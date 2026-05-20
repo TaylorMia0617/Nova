@@ -1,0 +1,118 @@
+.editor-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background-color: #1e1e1e;
+  overflow: hidden;
+}
+
+.tabs-bar {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  background: #181818;
+  border-bottom: 1px solid #2d2d2d;
+  overflow-x: auto;
+}
+
+.tabs-empty {
+  padding: 0 14px;
+  color: #7d7d7d;
+  font-size: 12px;
+}
+
+.tab-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 220px;
+  padding: 10px 12px;
+  background: transparent;
+  color: #b7b7b7;
+  border-right: 1px solid #2d2d2d;
+  font-size: 12px;
+}
+
+.tab-button.active {
+  background: #1e1e1e;
+  color: #ffffff;
+}
+
+.tab-button span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dirty-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #4fc1ff;
+  flex-shrink: 0;
+}
+
+.close-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  padding: 2px;
+}
+
+.close-tab:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.editor-panel .panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  background-color: #252526;
+  border-bottom: 1px solid #3c3c3c;
+}
+
+.editor-panel .panel-header h2 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #cccccc;
+  margin: 0;
+}
+
+.editor-title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.save-indicator {
+  font-size: 12px;
+  color: #8c8c8c;
+}
+
+.editor-container {
+  flex: 1;
+  overflow: hidden;
+}
+
+.empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #858585;
+  font-size: 14px;
+}
+
+.editor-statusbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 6px 12px;
+  background: #007acc;
+  color: #ffffff;
+  font-size: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.15);
+}

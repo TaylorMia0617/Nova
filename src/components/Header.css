@@ -1,0 +1,107 @@
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 20px;
+  background-color: #252526;
+  border-bottom: 1px solid #3c3c3c;
+  height: 60px;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.app-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #ffffff;
+  margin: 0;
+}
+
+.app-subtitle {
+  font-size: 12px;
+  color: #858585;
+}
+
+.workspace-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #8bb7ff;
+}
+
+.workspace-error {
+  margin-top: 6px;
+  max-width: 420px;
+  font-size: 12px;
+  color: #ffb4b4;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.workspace-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #333333;
+  color: #e6e6e6;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.workspace-button:hover:not(:disabled) {
+  background: #404040;
+}
+
+.workspace-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.api-key-section {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.api-key-section label {
+  font-size: 12px;
+  color: #cccccc;
+}
+
+.api-key-input {
+  background-color: #3c3c3c;
+  border: 1px solid #555;
+  color: #d4d4d4;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  width: 250px;
+}
+
+.api-key-input:focus {
+  outline: none;
+  border-color: #007acc;
+}
+
+.icon-button {
+  background: transparent;
+  color: #cccccc;
+  padding: 6px;
+  border-radius: 4px;
+  transition: background-color 0.2s;
+}
+
+.icon-button:hover {
+  background-color: #3c3c3c;
+  color: #ffffff;
+}

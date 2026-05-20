@@ -1,0 +1,132 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #1e1e1e;
+  color: #d4d4d4;
+}
+
+.app-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.main-content {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.resizable-pane {
+  min-width: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.resizable-pane > * {
+  flex: 1;
+}
+
+.workspace-center {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.resize-handle {
+  flex: 0 0 auto;
+  background: #1f1f1f;
+  transition: background-color 0.12s;
+  z-index: 5;
+}
+
+.resize-handle.vertical {
+  width: 5px;
+  cursor: col-resize;
+}
+
+.resize-handle.horizontal {
+  height: 5px;
+  cursor: row-resize;
+  border-top: 1px solid #333333;
+}
+
+.resize-handle:hover,
+.app-container.is-resizing .resize-handle {
+  background: #007acc;
+}
+
+.app-container.is-resizing {
+  user-select: none;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  outline: none;
+  font-family: inherit;
+}
+
+input, textarea {
+  font-family: inherit;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #2d2d2d;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #555;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #666;
+}
+
+.monaco-editor .suggest-widget .monaco-list-row .details-label {
+  display: inline-flex;
+  align-items: center;
+  min-width: 42px;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.monaco-editor .suggest-widget .monaco-list-row .codicon.codicon-symbol-variable ~ .contents .details-label,
+.monaco-editor .suggest-widget .monaco-list-row .icon-label .codicon.codicon-symbol-variable ~ .details-label {
+  color: #2d1b00;
+  background: #ffb86c;
+}
+
+.monaco-editor .suggest-widget .monaco-list-row .codicon.codicon-symbol-reference ~ .contents .details-label,
+.monaco-editor .suggest-widget .monaco-list-row .icon-label .codicon.codicon-symbol-reference ~ .details-label {
+  color: #052a38;
+  background: #6ad7ff;
+}
+
+.monaco-editor .suggest-widget .monaco-list-row .codicon.codicon-symbol-folder ~ .contents .details-label,
+.monaco-editor .suggest-widget .monaco-list-row .icon-label .codicon.codicon-symbol-folder ~ .details-label {
+  color: #10301a;
+  background: #9effa1;
+}

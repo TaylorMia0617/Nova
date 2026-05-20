@@ -1,0 +1,12 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+*.log
+.vscode
+.idea
+.env
+.env.local
+target
+src-tauri/target
