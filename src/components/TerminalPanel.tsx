@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { ExternalLink, Play, RefreshCw, TerminalSquare, X } from "lucide-react";
+import { Activity, ExternalLink, Play, RefreshCw, TerminalSquare, X } from "lucide-react";
 import { useFileStore } from "../stores/fileStore";
 import {
+  diagnoseTerminal,
   disposeTerminal,
   getTerminalShellInfo,
   isTerminalAvailable,
@@ -52,6 +53,53 @@ const TerminalPanel: React.FC<TerminalPanelProps> = ({ height }) => {
     }
   };
 
+  const handleDiagnose = async () => {
+    const terminal = terminalRef.current;
+
+    try {
+      const diagnosis = await diagnoseTerminal({ cwd: rootPath ?? undefined });
+      const lines = [
+        "",
+        "=== Terminal Diagnosis ===",
+        `packaged: ${diagnosis.isPackaged}`,
+        `platform: ${diagnosis.platform} ${diagnosis.arch}`,
+        `cwd: ${diagnosis.cwd}`,
+        `shell: ${diagnosis.shell.label}`,
+        `shell path: ${diagnosis.shell.command}`,
+        diagnosis.shell.args?.length ? `shell args: ${diagnosis.shell.args.join(" ")}` : "shell args: (none)",
+        "",
+        "command lookup:",
+        ...Object.entries(diagnosis.commands).map(([name, value]) => `  ${name}: ${value ?? "not found"}`),
+        "",
+        "opencode config:",
+        diagnosis.opencodeConfig
+          ? `  ${diagnosis.opencodeConfig.path}: ${diagnosis.opencodeConfig.exists ? diagnosis.opencodeConfig.kind : "missing"}`
+          : "  unavailable",
+        "",
+        "probes:",
+        ...Object.entries(diagnosis.probes).flatMap(([name, probe]) => [
+          `  ${name}: ${probe.ok ? "ok" : "failed"} status=${probe.status ?? "n/a"}`,
+          probe.resolvedCommand ? `    resolved: ${probe.resolvedCommand}` : "",
+          probe.launcher ? `    launcher: ${probe.launcher}` : "",
+          probe.invocation ? `    invocation: ${probe.invocation}` : "",
+          probe.stdout ? `    stdout: ${probe.stdout}` : "",
+          probe.stderr ? `    stderr: ${probe.stderr}` : "",
+          probe.error ? `    error: ${probe.error}` : "",
+          ...(probe.details ?? []).map((detail) => `    detail: ${detail}`),
+        ]).filter(Boolean),
+        "",
+        "PATH entries:",
+        ...diagnosis.pathEntries.map((entry) => `  ${entry}`),
+        "=== End Diagnosis ===",
+        "",
+      ];
+
+      terminal?.writeln(lines.join("\r\n"));
+    } catch (error) {
+      terminal?.writeln(error instanceof Error ? error.message : "Failed to diagnose terminal.");
+    }
+  };
+
   useEffect(() => {
     if (!isOpen || !terminalElementRef.current) return;
 
@@ -66,11 +114,16 @@ const TerminalPanel: React.FC<TerminalPanelProps> = ({ height }) => {
     }
 
     const terminal = new XTerm({
+      allowProposedApi: true,
       cursorBlink: true,
       fontFamily: "Cascadia Mono, Consolas, 'Courier New', monospace",
       fontSize: 13,
       lineHeight: 1.2,
       convertEol: true,
+      windowsPty: {
+        backend: "conpty",
+        buildNumber: 19045,
+      },
       theme: {
         background: "#111111",
         foreground: "#d7d7d7",
@@ -107,8 +160,8 @@ const TerminalPanel: React.FC<TerminalPanelProps> = ({ height }) => {
         terminalIdRef.current = terminalId;
         setStatus("ready");
         terminal.writeln("");
-        terminal.writeln(`${info?.label ?? "Shell"} ready. Try: where.exe opencode`);
-        terminal.writeln("If the embedded shell misses a CLI, use the external terminal button.");
+        terminal.writeln(`${info?.label ?? "Shell"} ready. Try: where opencode`);
+        terminal.writeln("Windows CLI commands now run through Command Prompt for better npm/.cmd compatibility.");
         terminal.writeln("");
         terminal.focus();
       } catch (error) {
@@ -118,6 +171,13 @@ const TerminalPanel: React.FC<TerminalPanelProps> = ({ height }) => {
     });
 
     const dataDisposable = terminal.onData((data) => {
+      const terminalId = terminalIdRef.current;
+      if (terminalId) {
+        void writeTerminal(terminalId, data);
+      }
+    });
+
+    const binaryDisposable = terminal.onBinary((data) => {
       const terminalId = terminalIdRef.current;
       if (terminalId) {
         void writeTerminal(terminalId, data);
@@ -154,6 +214,7 @@ const TerminalPanel: React.FC<TerminalPanelProps> = ({ height }) => {
       window.removeEventListener("resize", resize);
       resizeObserver.disconnect();
       dataDisposable.dispose();
+      binaryDisposable.dispose();
       disposeData();
       disposeExit();
       const terminalId = terminalIdRef.current;
@@ -186,6 +247,9 @@ const TerminalPanel: React.FC<TerminalPanelProps> = ({ height }) => {
           <span className={`terminal-status ${status}`}>{status}</span>
         </div>
         <div className="terminal-actions">
+          <button onClick={() => void handleDiagnose()} title="Diagnose Terminal">
+            <Activity size={14} />
+          </button>
           <button onClick={restartTerminal} title="Restart Terminal">
             <RefreshCw size={14} />
           </button>

@@ -54,6 +54,17 @@ function findCommand(command) {
   return null;
 }
 
+function resolveCommand(command) {
+  return findCommand(`${command}.cmd`) || findCommand(`${command}.exe`) || findCommand(command);
+}
+
+function resolvePreferredWindowsCommand(command) {
+  if (command === "opencode") {
+    return findCommand("opencode.cmd") || findCommand("opencode.exe") || findCommand("opencode") || command;
+  }
+  return resolveCommand(command) || command;
+}
+
 function uniquePathEntries(entries) {
   const seen = new Set();
   return entries
@@ -110,35 +121,10 @@ function buildTerminalEnv() {
 
 function getTerminalShell() {
   if (process.platform === "win32") {
-    const pathBootstrap =
-      "$machine=[Environment]::GetEnvironmentVariable('Path','Machine');" +
-      "$user=[Environment]::GetEnvironmentVariable('Path','User');" +
-      "$extra=@(\"$env:APPDATA\\npm\",\"$env:USERPROFILE\\AppData\\Roaming\\npm\",\"$env:LOCALAPPDATA\\Microsoft\\WindowsApps\") -join ';';" +
-      "$env:Path=@($extra,$user,$machine,$env:Path) -join ';';";
-
-    const pwshPath = findCommand("pwsh.exe");
-    if (pwshPath) {
-      return {
-        label: "PowerShell 7",
-        command: pwshPath,
-        args: ["-NoLogo", "-NoExit", "-Command", pathBootstrap],
-      };
-    }
-
-    const powershellPath =
-      findCommand("powershell.exe") || "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
-    if (powershellPath) {
-      return {
-        label: "Windows PowerShell",
-        command: powershellPath,
-        args: ["-NoLogo", "-ExecutionPolicy", "Bypass", "-NoExit", "-Command", pathBootstrap],
-      };
-    }
-
     return {
       label: "Command Prompt",
       command: "C:\\Windows\\System32\\cmd.exe",
-      args: [],
+      args: ["/d"],
     };
   }
 
@@ -153,27 +139,84 @@ function quotePowerShellLiteral(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
+function quoteCmdArg(value) {
+  const stringValue = String(value);
+  if (!stringValue.length) return "\"\"";
+  if (!/[\s"&|<>^()]/.test(stringValue)) return stringValue;
+  return `"${stringValue.replace(/"/g, "\"\"")}"`;
+}
+
+function buildShellStyleInvocation(command, args = []) {
+  return [quoteCmdArg(command), ...args.map((arg) => quoteCmdArg(arg))].join(" ");
+}
+
+function getWindowsCommandExecution(command, args = []) {
+  const resolvedCommand =
+    typeof command === "string" && !command.includes("\\") && !path.extname(command)
+      ? resolvePreferredWindowsCommand(command)
+      : command;
+  const isCommandScript = /\.(cmd|bat)$/i.test(resolvedCommand);
+  const invocation = buildShellStyleInvocation(resolvedCommand, args);
+
+  if (isCommandScript) {
+    return {
+      resolvedCommand,
+      launcher: "cmd.exe",
+      command: "C:\\Windows\\System32\\cmd.exe",
+      args: ["/d", "/s", "/c", invocation],
+      invocation,
+    };
+  }
+
+  return {
+    resolvedCommand,
+    launcher: "direct",
+    command: resolvedCommand,
+    args,
+    invocation,
+  };
+}
+
+function inspectPathKind(targetPath) {
+  try {
+    const stat = fsSync.statSync(targetPath);
+    return {
+      path: targetPath,
+      exists: true,
+      kind: stat.isDirectory() ? "directory" : stat.isFile() ? "file" : "other",
+    };
+  } catch {
+    return {
+      path: targetPath,
+      exists: false,
+      kind: "missing",
+    };
+  }
+}
+
 function openExternalTerminal(cwd, commandToRun) {
   const workingDirectory = cwd ? normalizePath(cwd) : os.homedir();
 
   if (process.platform === "win32") {
-    const escapedDirectory = workingDirectory.replace(/"/g, '\\"');
-    const escapedCommand = commandToRun ? commandToRun.replace(/"/g, '\\"') : "";
-    const wtCommand = commandToRun
-      ? `wt.exe -d "${escapedDirectory}" powershell.exe -NoExit -Command "${escapedCommand}"`
-      : `wt.exe -d "${escapedDirectory}"`;
-    const powershellBody = commandToRun
-      ? `Set-Location -LiteralPath ${quotePowerShellLiteral(workingDirectory)}; ${commandToRun}`
-      : `Set-Location -LiteralPath ${quotePowerShellLiteral(workingDirectory)}`;
-    const powershellCommand = `start "" powershell.exe -NoExit -Command "${powershellBody.replace(/"/g, '\\"')}"`;
-    const command = `${wtCommand} || ${powershellCommand}`;
-
-    spawn("C:\\Windows\\System32\\cmd.exe", ["/d", "/s", "/c", command], {
+    const execution = commandToRun ? getWindowsCommandExecution(commandToRun) : null;
+    const cmdArgs = execution ? ["/d", "/k", execution.invocation] : ["/d"];
+    const wtProcess = spawn("wt.exe", ["-d", workingDirectory, "cmd.exe", ...cmdArgs], {
+      cwd: workingDirectory,
       detached: true,
       stdio: "ignore",
       windowsHide: true,
       env: buildTerminalEnv(),
-    }).unref();
+    });
+    wtProcess.on("error", () => {
+      spawn("C:\\Windows\\System32\\cmd.exe", ["/d", "/c", "start", "\"\"", "cmd.exe", ...cmdArgs], {
+        cwd: workingDirectory,
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+        env: buildTerminalEnv(),
+      }).unref();
+    });
+    wtProcess.unref();
     return;
   }
 
@@ -183,6 +226,89 @@ function openExternalTerminal(cwd, commandToRun) {
     stdio: "ignore",
     env: buildTerminalEnv(),
   }).unref();
+}
+
+function runProbe(command, args = [], cwd = os.homedir()) {
+  try {
+    const execution = process.platform === "win32"
+      ? getWindowsCommandExecution(command, args)
+      : {
+        resolvedCommand: command,
+        launcher: "direct",
+        command,
+        args,
+        invocation: [command, ...args].join(" "),
+      };
+    const result = spawnSync(execution.command, execution.args, {
+      cwd,
+      env: buildTerminalEnv(),
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 5000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stdout = (result.stdout || "").trim();
+    const stderr = (result.stderr || "").trim();
+    const details = [];
+    if (/EEXIST/i.test(`${stdout}\n${stderr}`)) {
+      details.push("CLI started but failed during internal initialization (EEXIST).");
+    }
+
+    return {
+      ok: result.status === 0,
+      status: result.status,
+      stdout,
+      stderr,
+      error: result.error?.message || null,
+      resolvedCommand: execution.resolvedCommand,
+      launcher: execution.launcher,
+      invocation: execution.invocation,
+      details,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: null,
+      stdout: "",
+      stderr: "",
+      error: error instanceof Error ? error.message : String(error),
+      resolvedCommand: command,
+      launcher: process.platform === "win32" ? "cmd.exe" : "direct",
+      invocation: [command, ...args].join(" "),
+      details: [],
+    };
+  }
+}
+
+function diagnoseTerminal(cwd) {
+  const workingDirectory = cwd ? normalizePath(cwd) : os.homedir();
+  const env = buildTerminalEnv();
+  const shell = getTerminalShell();
+  const pathEntries = uniquePathEntries([env.Path || env.PATH || ""]);
+  const commands = ["pwsh.exe", "powershell.exe", "cmd.exe", "wt.exe", "opencode.cmd", "opencode.exe", "opencode"];
+  const opencodeConfigPath = path.join(os.homedir(), ".config", "opencode");
+
+  return {
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    arch: process.arch,
+    cwd: workingDirectory,
+    shell,
+    commands: Object.fromEntries(commands.map((command) => [command, findCommand(command)])),
+    pathEntries,
+    opencodeConfig: inspectPathKind(opencodeConfigPath),
+    probes: {
+      powershellVersion: runProbe(
+        "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "$PSVersionTable.PSVersion.ToString()"],
+        workingDirectory
+      ),
+      cmdEcho: runProbe("C:\\Windows\\System32\\cmd.exe", ["/d", "/s", "/c", "echo terminal-ok"], workingDirectory),
+      npmVersion: runProbe("npm", ["--version"], workingDirectory),
+      opencodeWhere: runProbe("C:\\Windows\\System32\\where.exe", ["opencode"], workingDirectory),
+      opencodeVersion: runProbe("opencode", ["--version"], workingDirectory),
+    },
+  };
 }
 
 function normalizePath(filePath) {
@@ -386,6 +512,10 @@ ipcMain.handle("terminal:getShellInfo", async () => {
 
 ipcMain.handle("terminal:openExternal", async (_event, options = {}) => {
   openExternalTerminal(options.cwd, options.command);
+});
+
+ipcMain.handle("terminal:diagnose", async (_event, options = {}) => {
+  return diagnoseTerminal(options.cwd);
 });
 
 ipcMain.handle("terminal:write", async (_event, terminalId, data) => {

@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld("novelHost", {
   startTerminal: (options) => ipcRenderer.invoke("terminal:start", options),
   getTerminalShellInfo: () => ipcRenderer.invoke("terminal:getShellInfo"),
   openExternalTerminal: (options) => ipcRenderer.invoke("terminal:openExternal", options),
+  diagnoseTerminal: (options) => ipcRenderer.invoke("terminal:diagnose", options),
   writeTerminal: (terminalId, data) => ipcRenderer.invoke("terminal:write", terminalId, data),
   resizeTerminal: (terminalId, cols, rows) => ipcRenderer.invoke("terminal:resize", terminalId, cols, rows),
   disposeTerminal: (terminalId) => ipcRenderer.invoke("terminal:dispose", terminalId),
