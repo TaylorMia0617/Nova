@@ -8,11 +8,18 @@ import {
   FolderPlus,
   Pencil,
   Plus,
+  Search,
   Trash2,
+  X,
 } from "lucide-react";
 import { useFileStore } from "../stores/fileStore";
 import type { WorkspaceNode } from "../services/fileSystemService";
 import "./AssetsPanel.css";
+
+type CreateDialogState =
+  | { type: "file"; targetNodePath: string | null }
+  | { type: "folder"; targetNodePath: string | null }
+  | null;
 
 const AssetsPanel: React.FC = () => {
   const {
@@ -34,7 +41,12 @@ const AssetsPanel: React.FC = () => {
   const [renameValue, setRenameValue] = useState("");
   const [draggedNodePath, setDraggedNodePath] = useState<string | null>(null);
   const [dropTargetPath, setDropTargetPath] = useState<string | null>(null);
+  const [createDialog, setCreateDialog] = useState<CreateDialogState>(null);
+  const [createValue, setCreateValue] = useState("");
+  const [deleteConfirmPath, setDeleteConfirmPath] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
   const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const createInputRef = useRef<HTMLInputElement | null>(null);
   const treeRef = useRef<HTMLDivElement | null>(null);
 
   const findNodeByPath = (nodes: WorkspaceNode[], path: string): WorkspaceNode | null => {
@@ -74,6 +86,65 @@ const AssetsPanel: React.FC = () => {
     () => (selectedNodePath ? findNodeByPath(files, selectedNodePath) : null),
     [files, selectedNodePath]
   );
+  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
+
+  const getAutoExpandedPaths = (nodes: WorkspaceNode[]): Set<string> => {
+    const paths = new Set<string>();
+
+    const visit = (items: WorkspaceNode[]) => {
+      for (const item of items) {
+        if (item.type === "folder") {
+          paths.add(item.path);
+          if (item.children) {
+            visit(item.children);
+          }
+        }
+      }
+    };
+
+    visit(nodes);
+    return paths;
+  };
+
+  const filterNodes = (nodes: WorkspaceNode[], query: string): WorkspaceNode[] =>
+    nodes.flatMap((node) => {
+      const selfMatches = node.name.toLowerCase().includes(query);
+
+      if (node.type === "file") {
+        return selfMatches ? [node] : [];
+      }
+
+      const filteredChildren = node.children ? filterNodes(node.children, query) : [];
+      if (selfMatches) {
+        return [
+          {
+            ...node,
+            children: node.children,
+          },
+        ];
+      }
+
+      if (filteredChildren.length > 0) {
+        return [
+          {
+            ...node,
+            children: filteredChildren,
+          },
+        ];
+      }
+
+      return [];
+    });
+
+  const visibleFiles = useMemo(() => {
+    if (!normalizedSearchQuery) return files;
+    return filterNodes(files, normalizedSearchQuery);
+  }, [files, normalizedSearchQuery]);
+
+  const visibleExpandedFolders = useMemo(() => {
+    if (!normalizedSearchQuery) return expandedFolders;
+    return getAutoExpandedPaths(visibleFiles);
+  }, [expandedFolders, normalizedSearchQuery, visibleFiles]);
 
   const toggleFolder = (folderPath: string) => {
     setExpandedFolders((current) => {
@@ -112,30 +183,45 @@ const AssetsPanel: React.FC = () => {
     setRenameValue("");
   };
 
-  const handleCreateFile = async (targetNodePath: string | null = selectedNodePath) => {
-    const name = prompt("Enter file name (include .md or .txt if desired):");
-    if (name) {
-      await createFile(name, getTargetFolderPath(targetNodePath));
-      setContextPos(null);
-    }
+  const openCreateDialog = (type: "file" | "folder", targetNodePath: string | null = selectedNodePath) => {
+    setCreateDialog({ type, targetNodePath });
+    setCreateValue("");
+    setContextPos(null);
   };
 
-  const handleCreateFolder = async (targetNodePath: string | null = selectedNodePath) => {
-    const name = prompt("Enter folder name:");
-    if (name) {
-      await createFolder(name, getTargetFolderPath(targetNodePath));
-      setContextPos(null);
+  const closeCreateDialog = () => {
+    setCreateDialog(null);
+    setCreateValue("");
+  };
+
+  const submitCreateDialog = async () => {
+    if (!createDialog) return;
+
+    const name = createValue.trim();
+    if (!name) return;
+
+    const targetFolderPath = getTargetFolderPath(createDialog.targetNodePath);
+    if (createDialog.type === "file") {
+      await createFile(name, targetFolderPath);
+    } else {
+      await createFolder(name, targetFolderPath);
     }
+
+    closeCreateDialog();
   };
 
   const handleDelete = async () => {
     if (!selectedNodePath || selectedNodePath === rootPath) return;
-    const ok = confirm("Delete selected item? This cannot be undone.");
-    if (ok) {
-      await deleteFile(selectedNodePath);
-      setSelectedNodePath(null);
-    }
+    setDeleteConfirmPath(selectedNodePath);
     setContextPos(null);
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteConfirmPath) return;
+
+    await deleteFile(deleteConfirmPath);
+    setSelectedNodePath((current) => (current === deleteConfirmPath ? null : current));
+    setDeleteConfirmPath(null);
   };
 
   const handleDuplicate = async () => {
@@ -156,7 +242,7 @@ const AssetsPanel: React.FC = () => {
   const renderFileTree = (nodes: WorkspaceNode[], level = 0): React.ReactNode =>
     nodes.map((node) => {
       const isFolder = node.type === "folder";
-      const isExpanded = expandedFolders.has(node.path);
+      const isExpanded = visibleExpandedFolders.has(node.path);
 
       return (
         <div key={node.path} style={{ marginLeft: `${level * 16}px` }}>
@@ -277,6 +363,13 @@ const AssetsPanel: React.FC = () => {
   }, [renamingNodePath]);
 
   useEffect(() => {
+    if (createDialog) {
+      createInputRef.current?.focus();
+      createInputRef.current?.select();
+    }
+  }, [createDialog]);
+
+  useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       const isTypingTarget =
@@ -314,12 +407,34 @@ const AssetsPanel: React.FC = () => {
       <div className="panel-header">
         <h2>Explorer</h2>
         <div className="panel-actions">
-          <button onClick={() => void handleCreateFile()} title="New File" disabled={!rootPath}>
+          <button onClick={() => openCreateDialog("file")} title="New File" disabled={!rootPath}>
             <Plus size={16} />
           </button>
-          <button onClick={() => void handleCreateFolder()} title="New Folder" disabled={!rootPath}>
+          <button onClick={() => openCreateDialog("folder")} title="New Folder" disabled={!rootPath}>
             <FolderPlus size={16} />
           </button>
+        </div>
+      </div>
+      <div className="explorer-search">
+        <div className="search-input-wrap">
+          <Search size={14} className="search-icon" />
+          <input
+            className="search-input"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="Search files and folders"
+            aria-label="Search files and folders"
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              className="clear-search-button"
+              onClick={() => setSearchQuery("")}
+              aria-label="Clear search"
+            >
+              <X size={14} />
+            </button>
+          )}
         </div>
       </div>
       <div
@@ -335,7 +450,13 @@ const AssetsPanel: React.FC = () => {
         }}
       >
         {rootPath ? (
-          renderFileTree(files)
+          visibleFiles.length > 0 ? (
+            renderFileTree(visibleFiles)
+          ) : (
+            <div className="explorer-empty">
+              <p>No files or folders match "{searchQuery.trim()}".</p>
+            </div>
+          )
         ) : (
           <div className="explorer-empty">
             <p>Open a workspace folder to start editing real files.</p>
@@ -347,11 +468,11 @@ const AssetsPanel: React.FC = () => {
           className="context-menu"
           style={{ position: "fixed", left: contextPos.x, top: contextPos.y, zIndex: 1000 }}
         >
-          <button onClick={() => void handleCreateFile()}>
+          <button onClick={() => openCreateDialog("file")}>
             <Plus size={14} />
             <span>New File</span>
           </button>
-          <button onClick={() => void handleCreateFolder()}>
+          <button onClick={() => openCreateDialog("folder")}>
             <FolderPlus size={14} />
             <span>New Folder</span>
           </button>
@@ -379,6 +500,56 @@ const AssetsPanel: React.FC = () => {
               <span>Delete</span>
             </button>
           )}
+        </div>
+      )}
+      {createDialog && (
+        <div className="dialog-backdrop" onClick={closeCreateDialog}>
+          <div
+            className="dialog-card"
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") closeCreateDialog();
+              if (event.key === "Enter") void submitCreateDialog();
+            }}
+          >
+            <h3>{createDialog.type === "file" ? "Create New File" : "Create New Folder"}</h3>
+            <p>
+              {createDialog.type === "file"
+                ? "Enter a file name. Include an extension like .md or .txt if you want one."
+                : "Enter a folder name."}
+            </p>
+            <input
+              ref={createInputRef}
+              className="dialog-input"
+              value={createValue}
+              onChange={(event) => setCreateValue(event.target.value)}
+              placeholder={createDialog.type === "file" ? "chapter-01.md" : "notes"}
+            />
+            <div className="dialog-actions">
+              <button type="button" className="secondary" onClick={closeCreateDialog}>
+                Cancel
+              </button>
+              <button type="button" onClick={() => void submitCreateDialog()} disabled={!createValue.trim()}>
+                Create
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {deleteConfirmPath && (
+        <div className="dialog-backdrop" onClick={() => setDeleteConfirmPath(null)}>
+          <div className="dialog-card" onClick={(event) => event.stopPropagation()}>
+            <h3>Delete Item</h3>
+            <p>This will permanently delete the selected file or folder.</p>
+            <div className="dialog-actions">
+              <button type="button" className="secondary" onClick={() => setDeleteConfirmPath(null)}>
+                Cancel
+              </button>
+              <button type="button" className="danger-action" onClick={() => void confirmDelete()}>
+                Delete
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
