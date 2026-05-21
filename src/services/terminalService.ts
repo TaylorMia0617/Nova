@@ -8,6 +8,40 @@ export interface TerminalExitPayload {
   exitCode: number;
 }
 
+export interface TerminalProbe {
+  ok: boolean;
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  error: string | null;
+  resolvedCommand?: string;
+  launcher?: string;
+  invocation?: string;
+  details?: string[];
+}
+
+export interface TerminalPathInspection {
+  path: string;
+  exists: boolean;
+  kind: string;
+}
+
+export interface TerminalDiagnosis {
+  isPackaged: boolean;
+  platform: string;
+  arch: string;
+  cwd: string;
+  shell: {
+    label: string;
+    command: string;
+    args: string[];
+  };
+  commands: Record<string, string | null>;
+  pathEntries: string[];
+  opencodeConfig?: TerminalPathInspection;
+  probes: Record<string, TerminalProbe>;
+}
+
 function getHost() {
   return window.novelHost;
 }
@@ -34,6 +68,14 @@ export async function openExternalTerminal(options: { cwd?: string; command?: st
     throw new Error("External terminal is only available in the Electron desktop app.");
   }
   await host.openExternalTerminal(options);
+}
+
+export async function diagnoseTerminal(options: { cwd?: string }): Promise<TerminalDiagnosis> {
+  const host = getHost();
+  if (!host?.diagnoseTerminal) {
+    throw new Error("Terminal diagnosis is only available in the Electron desktop app.");
+  }
+  return host.diagnoseTerminal(options) as Promise<TerminalDiagnosis>;
 }
 
 export async function writeTerminal(terminalId: string, data: string): Promise<void> {

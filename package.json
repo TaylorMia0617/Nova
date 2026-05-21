@@ -49,7 +49,7 @@
       ]
     },
     "directories": {
-      "output": "release",
+      "output": "release-build",
       "buildResources": "build"
     }
   }

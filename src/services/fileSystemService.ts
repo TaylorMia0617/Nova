@@ -26,6 +26,7 @@ interface NovelHostApi {
   startTerminal?: (options: { cwd?: string; cols?: number; rows?: number }) => Promise<string>;
   getTerminalShellInfo?: () => Promise<{ label: string; command: string }>;
   openExternalTerminal?: (options: { cwd?: string; command?: string }) => Promise<void>;
+  diagnoseTerminal?: (options: { cwd?: string }) => Promise<unknown>;
   writeTerminal?: (terminalId: string, data: string) => Promise<void>;
   resizeTerminal?: (terminalId: string, cols: number, rows: number) => Promise<void>;
   disposeTerminal?: (terminalId: string) => Promise<void>;
