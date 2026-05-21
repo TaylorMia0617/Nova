@@ -94,6 +94,32 @@ function joinPath(basePath: string, name: string): string {
   return `${basePath}${separator}${name}`;
 }
 
+function getPathPrefix(targetPath: string): string {
+  const separator = targetPath.includes("\\") ? "\\" : "/";
+  return `${targetPath.replace(/[\\/]+$/, "")}${separator}`;
+}
+
+function isSameOrDescendantPath(candidatePath: string, targetPath: string): boolean {
+  return candidatePath === targetPath || candidatePath.startsWith(getPathPrefix(targetPath));
+}
+
+function assertValidNewEntryName(name: string): string {
+  const trimmedName = name.trim();
+  if (!trimmedName) {
+    throw new Error("Name cannot be empty.");
+  }
+
+  if (trimmedName === "." || trimmedName === "..") {
+    throw new Error("Name cannot be . or ..");
+  }
+
+  if (/[\\/]/.test(trimmedName)) {
+    throw new Error("Name cannot contain path separators.");
+  }
+
+  return trimmedName;
+}
+
 function updateTabsWithRenamedPath(
   tabs: OpenFileTab[],
   oldPath: string,
@@ -101,7 +127,7 @@ function updateTabsWithRenamedPath(
   newName: string
 ): OpenFileTab[] {
   return tabs.map((tab) =>
-    tab.path === oldPath || tab.path.startsWith(`${oldPath}/`)
+    isSameOrDescendantPath(tab.path, oldPath)
       ? {
           ...tab,
           path: tab.path.replace(oldPath, newPath),
@@ -112,7 +138,7 @@ function updateTabsWithRenamedPath(
 }
 
 function filterTabsOutsidePath(tabs: OpenFileTab[], deletedPath: string): OpenFileTab[] {
-  return tabs.filter((tab) => !tab.path.startsWith(deletedPath));
+  return tabs.filter((tab) => !isSameOrDescendantPath(tab.path, deletedPath));
 }
 
 function findReferenceFilePath(nodes: WorkspaceNode[], fileName: string): string | null {
@@ -435,8 +461,9 @@ export const useFileStore = create<FileState>()((set, get) => ({
     if (!rootPath) return;
 
     try {
+      const safeName = assertValidNewEntryName(name);
       const targetFolder = parentPath ?? rootPath;
-      const fullPath = joinPath(targetFolder, name);
+      const fullPath = joinPath(targetFolder, safeName);
       await createFileOnDisk(fullPath);
       await get().refreshWorkspace();
       await get().openFile(fullPath);
@@ -452,8 +479,9 @@ export const useFileStore = create<FileState>()((set, get) => ({
     if (!rootPath) return;
 
     try {
+      const safeName = assertValidNewEntryName(name);
       const targetFolder = parentPath ?? rootPath;
-      await createFolderOnDisk(joinPath(targetFolder, name));
+      await createFolderOnDisk(joinPath(targetFolder, safeName));
       await get().refreshWorkspace();
       set({ errorMessage: null });
     } catch (error) {
@@ -473,15 +501,15 @@ export const useFileStore = create<FileState>()((set, get) => ({
           openTabs: nextTabs,
           activeFile: nextTabs.find((tab) => tab.path === nextActivePath || tab.path === newPath) ?? null,
           characterFilePath:
-            state.characterFilePath === path || state.characterFilePath?.startsWith(`${path}/`)
+            state.characterFilePath && isSameOrDescendantPath(state.characterFilePath, path)
               ? state.characterFilePath.replace(path, newPath)
               : state.characterFilePath,
           placeFilePath:
-            state.placeFilePath === path || state.placeFilePath?.startsWith(`${path}/`)
+            state.placeFilePath && isSameOrDescendantPath(state.placeFilePath, path)
               ? state.placeFilePath.replace(path, newPath)
               : state.placeFilePath,
           itemFilePath:
-            state.itemFilePath === path || state.itemFilePath?.startsWith(`${path}/`)
+            state.itemFilePath && isSameOrDescendantPath(state.itemFilePath, path)
               ? state.itemFilePath.replace(path, newPath)
               : state.itemFilePath,
           errorMessage: null,
@@ -517,11 +545,17 @@ export const useFileStore = create<FileState>()((set, get) => ({
             : nextTabs[nextTabs.length - 1] ?? null;
 
         const nextCharacterFilePath =
-          state.characterFilePath && state.characterFilePath.startsWith(path) ? null : state.characterFilePath;
+          state.characterFilePath && isSameOrDescendantPath(state.characterFilePath, path)
+            ? null
+            : state.characterFilePath;
         const nextPlaceFilePath =
-          state.placeFilePath && state.placeFilePath.startsWith(path) ? null : state.placeFilePath;
+          state.placeFilePath && isSameOrDescendantPath(state.placeFilePath, path)
+            ? null
+            : state.placeFilePath;
         const nextItemFilePath =
-          state.itemFilePath && state.itemFilePath.startsWith(path) ? null : state.itemFilePath;
+          state.itemFilePath && isSameOrDescendantPath(state.itemFilePath, path)
+            ? null
+            : state.itemFilePath;
 
         const nextCharacterEntries = nextCharacterFilePath ? state.characterEntries : [];
         const nextPlaceEntries = nextPlaceFilePath ? state.placeEntries : [];
@@ -556,15 +590,15 @@ export const useFileStore = create<FileState>()((set, get) => ({
           openTabs: nextTabs,
           activeFile: nextTabs.find((tab) => tab.path === nextActivePath || tab.path === newPath) ?? null,
           characterFilePath:
-            state.characterFilePath === sourcePath || state.characterFilePath?.startsWith(`${sourcePath}/`)
+            state.characterFilePath && isSameOrDescendantPath(state.characterFilePath, sourcePath)
               ? state.characterFilePath.replace(sourcePath, newPath)
               : state.characterFilePath,
           placeFilePath:
-            state.placeFilePath === sourcePath || state.placeFilePath?.startsWith(`${sourcePath}/`)
+            state.placeFilePath && isSameOrDescendantPath(state.placeFilePath, sourcePath)
               ? state.placeFilePath.replace(sourcePath, newPath)
               : state.placeFilePath,
           itemFilePath:
-            state.itemFilePath === sourcePath || state.itemFilePath?.startsWith(`${sourcePath}/`)
+            state.itemFilePath && isSameOrDescendantPath(state.itemFilePath, sourcePath)
               ? state.itemFilePath.replace(sourcePath, newPath)
               : state.itemFilePath,
           errorMessage: null,

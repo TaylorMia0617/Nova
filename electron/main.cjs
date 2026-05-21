@@ -315,6 +315,28 @@ function normalizePath(filePath) {
   return path.normalize(filePath);
 }
 
+function getValidatedEntryName(targetPath) {
+  const normalizedPath = normalizePath(targetPath);
+  const entryName = path.basename(normalizedPath);
+
+  if (!entryName || entryName === "." || entryName === "..") {
+    throw new Error("Name cannot be empty.");
+  }
+
+  if (entryName !== normalizedPath && path.dirname(normalizedPath) === normalizedPath) {
+    throw new Error("Invalid target path.");
+  }
+
+  if (/[\\/]/.test(entryName)) {
+    throw new Error("Name cannot contain path separators.");
+  }
+
+  return {
+    normalizedPath,
+    entryName,
+  };
+}
+
 async function pathExists(filePath) {
   try {
     await fs.access(filePath);
@@ -427,14 +449,24 @@ ipcMain.handle("fs:writeFile", async (_event, filePath, content) => {
 });
 
 ipcMain.handle("fs:createFile", async (_event, filePath) => {
-  const normalizedPath = normalizePath(filePath);
-  await fs.mkdir(path.dirname(normalizedPath), { recursive: true });
-  const handle = await fs.open(normalizedPath, "a");
+  const { normalizedPath } = getValidatedEntryName(filePath);
+
+  if (await pathExists(normalizedPath)) {
+    throw new Error("A file or folder with that name already exists.");
+  }
+
+  const handle = await fs.open(normalizedPath, "wx");
   await handle.close();
 });
 
 ipcMain.handle("fs:createFolder", async (_event, folderPath) => {
-  await fs.mkdir(normalizePath(folderPath), { recursive: true });
+  const { normalizedPath } = getValidatedEntryName(folderPath);
+
+  if (await pathExists(normalizedPath)) {
+    throw new Error("A file or folder with that name already exists.");
+  }
+
+  await fs.mkdir(normalizedPath);
 });
 
 ipcMain.handle("fs:renamePath", async (_event, currentPath, newName) => {
