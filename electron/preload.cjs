@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld("novelHost", {
   duplicateFile: (sourcePath) => ipcRenderer.invoke("fs:duplicateFile", sourcePath),
   movePath: (sourcePath, destinationFolderPath) => ipcRenderer.invoke("fs:movePath", sourcePath, destinationFolderPath),
   startTerminal: (options) => ipcRenderer.invoke("terminal:start", options),
+  getTerminalShellInfo: () => ipcRenderer.invoke("terminal:getShellInfo"),
+  openExternalTerminal: (options) => ipcRenderer.invoke("terminal:openExternal", options),
   writeTerminal: (terminalId, data) => ipcRenderer.invoke("terminal:write", terminalId, data),
   resizeTerminal: (terminalId, cols, rows) => ipcRenderer.invoke("terminal:resize", terminalId, cols, rows),
   disposeTerminal: (terminalId) => ipcRenderer.invoke("terminal:dispose", terminalId),

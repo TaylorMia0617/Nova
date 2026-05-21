@@ -24,6 +24,8 @@ interface NovelHostApi {
   duplicateFile: (path: string) => Promise<string>;
   movePath: (sourcePath: string, destinationFolderPath: string) => Promise<string>;
   startTerminal?: (options: { cwd?: string; cols?: number; rows?: number }) => Promise<string>;
+  getTerminalShellInfo?: () => Promise<{ label: string; command: string }>;
+  openExternalTerminal?: (options: { cwd?: string; command?: string }) => Promise<void>;
   writeTerminal?: (terminalId: string, data: string) => Promise<void>;
   resizeTerminal?: (terminalId: string, cols: number, rows: number) => Promise<void>;
   disposeTerminal?: (terminalId: string) => Promise<void>;

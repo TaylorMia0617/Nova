@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { TerminalSquare, X } from "lucide-react";
+import { ExternalLink, Play, RefreshCw, TerminalSquare, X } from "lucide-react";
 import { useFileStore } from "../stores/fileStore";
 import {
   disposeTerminal,
+  getTerminalShellInfo,
   isTerminalAvailable,
   onTerminalData,
   onTerminalExit,
+  openExternalTerminal,
   resizeTerminal,
   startTerminal,
   writeTerminal,
@@ -26,7 +28,29 @@ const TerminalPanel: React.FC<TerminalPanelProps> = ({ height }) => {
   const fitAddonRef = useRef<FitAddon | null>(null);
   const terminalIdRef = useRef<string | null>(null);
   const [isOpen, setIsOpen] = useState(true);
+  const [sessionKey, setSessionKey] = useState(0);
+  const [shellInfo, setShellInfo] = useState<{ label: string; command: string } | null>(null);
   const [status, setStatus] = useState<"idle" | "starting" | "ready" | "unavailable" | "exited">("idle");
+
+  const restartTerminal = () => {
+    setSessionKey((current) => current + 1);
+  };
+
+  const handleOpenExternal = async () => {
+    try {
+      await openExternalTerminal({ cwd: rootPath ?? undefined });
+    } catch (error) {
+      terminalRef.current?.writeln(error instanceof Error ? error.message : "Failed to open external terminal.");
+    }
+  };
+
+  const handleOpenOpencode = async () => {
+    try {
+      await openExternalTerminal({ cwd: rootPath ?? undefined, command: "opencode" });
+    } catch (error) {
+      terminalRef.current?.writeln(error instanceof Error ? error.message : "Failed to open opencode.");
+    }
+  };
 
   useEffect(() => {
     if (!isOpen || !terminalElementRef.current) return;
@@ -73,6 +97,8 @@ const TerminalPanel: React.FC<TerminalPanelProps> = ({ height }) => {
     requestAnimationFrame(async () => {
       fitAddon.fit();
       try {
+        const info = await getTerminalShellInfo();
+        setShellInfo(info);
         const terminalId = await startTerminal({
           cwd: rootPath ?? undefined,
           cols: terminal.cols,
@@ -81,7 +107,8 @@ const TerminalPanel: React.FC<TerminalPanelProps> = ({ height }) => {
         terminalIdRef.current = terminalId;
         setStatus("ready");
         terminal.writeln("");
-        terminal.writeln("PowerShell ready. Try: where.exe opencode");
+        terminal.writeln(`${info?.label ?? "Shell"} ready. Try: where.exe opencode`);
+        terminal.writeln("If the embedded shell misses a CLI, use the external terminal button.");
         terminal.writeln("");
         terminal.focus();
       } catch (error) {
@@ -138,7 +165,7 @@ const TerminalPanel: React.FC<TerminalPanelProps> = ({ height }) => {
       fitAddonRef.current = null;
       terminalIdRef.current = null;
     };
-  }, [isOpen, rootPath]);
+  }, [isOpen, rootPath, sessionKey]);
 
   if (!isOpen) {
     return (
@@ -154,12 +181,24 @@ const TerminalPanel: React.FC<TerminalPanelProps> = ({ height }) => {
       <div className="terminal-header">
         <div className="terminal-title">
           <TerminalSquare size={15} />
-          <span>PowerShell</span>
+          <span>Terminal</span>
+          <span className="terminal-tab active">{shellInfo?.label ?? "Auto Shell"}</span>
           <span className={`terminal-status ${status}`}>{status}</span>
         </div>
-        <button onClick={() => setIsOpen(false)} title="Hide Terminal">
-          <X size={14} />
-        </button>
+        <div className="terminal-actions">
+          <button onClick={restartTerminal} title="Restart Terminal">
+            <RefreshCw size={14} />
+          </button>
+          <button onClick={() => void handleOpenOpencode()} title="Run opencode in External Terminal">
+            <Play size={14} />
+          </button>
+          <button onClick={() => void handleOpenExternal()} title="Open External Terminal Here">
+            <ExternalLink size={14} />
+          </button>
+          <button onClick={() => setIsOpen(false)} title="Hide Terminal">
+            <X size={14} />
+          </button>
+        </div>
       </div>
       <div className="terminal-body" ref={terminalElementRef} />
     </section>

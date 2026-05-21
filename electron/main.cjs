@@ -1,11 +1,72 @@
 const { app, BrowserWindow, dialog, ipcMain } = require("electron");
 const fs = require("fs/promises");
+const fsSync = require("fs");
 const path = require("path");
 const os = require("os");
 const pty = require("node-pty");
+const { spawn, spawnSync } = require("child_process");
 
 const isDev = !app.isPackaged;
 const terminals = new Map();
+
+function expandWindowsEnv(value) {
+  return value.replace(/%([^%]+)%/g, (_match, name) => process.env[name] || "");
+}
+
+function readRegistryPath(root, key) {
+  try {
+    const result = spawnSync("reg", ["query", root, "/v", key], {
+      encoding: "utf8",
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const output = result.stdout || "";
+    const match = output.match(new RegExp(`${key}\\s+REG_\\w+\\s+(.+)`, "i"));
+    return match ? expandWindowsEnv(match[1].trim()) : "";
+  } catch {
+    return "";
+  }
+}
+
+function findCommand(command) {
+  const pathValue = uniquePathEntries([
+    readRegistryPath("HKCU\\Environment", "Path"),
+    readRegistryPath("HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment", "Path"),
+    process.env.Path || process.env.PATH || "",
+  ]).join(path.delimiter);
+  const extensions =
+    process.platform === "win32"
+      ? (process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";")
+      : [""];
+
+  for (const directory of uniquePathEntries([pathValue])) {
+    const candidates = process.platform === "win32" && path.extname(command)
+      ? [path.join(directory, command)]
+      : extensions.map((extension) => path.join(directory, `${command}${extension}`));
+
+    for (const candidate of candidates) {
+      if (fsSync.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  return null;
+}
+
+function uniquePathEntries(entries) {
+  const seen = new Set();
+  return entries
+    .flatMap((entry) => String(entry || "").split(path.delimiter))
+    .map((entry) => expandWindowsEnv(entry.trim()))
+    .filter(Boolean)
+    .filter((entry) => {
+      const key = entry.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
 
 function buildTerminalEnv() {
   const env = { ...process.env };
@@ -21,15 +82,27 @@ function buildTerminalEnv() {
     const appDataPath = process.env.APPDATA ? [path.join(process.env.APPDATA, "npm")] : [];
     const localAppDataPath = process.env.LOCALAPPDATA ? [
       path.join(process.env.LOCALAPPDATA, "Microsoft", "WindowsApps"),
+      path.join(process.env.LOCALAPPDATA, "Programs", "opencode"),
     ] : [];
-    const machinePath = process.env.Path || process.env.PATH || "";
-    const mergedPath = [...userPath, ...appDataPath, ...localAppDataPath, machinePath]
-      .filter(Boolean)
-      .join(path.delimiter);
+    const machineRegistryPath = readRegistryPath(
+      "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment",
+      "Path"
+    );
+    const userRegistryPath = readRegistryPath("HKCU\\Environment", "Path");
+    const processPath = process.env.Path || process.env.PATH || "";
+    const mergedPath = uniquePathEntries([
+      ...userPath,
+      ...appDataPath,
+      ...localAppDataPath,
+      userRegistryPath,
+      machineRegistryPath,
+      processPath,
+    ]).join(path.delimiter);
 
     env.Path = mergedPath;
     env.PATH = mergedPath;
     env.TERM = "xterm-256color";
+    env.PATHEXT = env.PATHEXT || ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.CPL";
   }
 
   return env;
@@ -37,16 +110,79 @@ function buildTerminalEnv() {
 
 function getTerminalShell() {
   if (process.platform === "win32") {
+    const pathBootstrap =
+      "$machine=[Environment]::GetEnvironmentVariable('Path','Machine');" +
+      "$user=[Environment]::GetEnvironmentVariable('Path','User');" +
+      "$extra=@(\"$env:APPDATA\\npm\",\"$env:USERPROFILE\\AppData\\Roaming\\npm\",\"$env:LOCALAPPDATA\\Microsoft\\WindowsApps\") -join ';';" +
+      "$env:Path=@($extra,$user,$machine,$env:Path) -join ';';";
+
+    const pwshPath = findCommand("pwsh.exe");
+    if (pwshPath) {
+      return {
+        label: "PowerShell 7",
+        command: pwshPath,
+        args: ["-NoLogo", "-NoExit", "-Command", pathBootstrap],
+      };
+    }
+
+    const powershellPath =
+      findCommand("powershell.exe") || "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+    if (powershellPath) {
+      return {
+        label: "Windows PowerShell",
+        command: powershellPath,
+        args: ["-NoLogo", "-ExecutionPolicy", "Bypass", "-NoExit", "-Command", pathBootstrap],
+      };
+    }
+
     return {
-      command: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-      args: ["-NoLogo", "-ExecutionPolicy", "Bypass"],
+      label: "Command Prompt",
+      command: "C:\\Windows\\System32\\cmd.exe",
+      args: [],
     };
   }
 
   return {
+    label: path.basename(process.env.SHELL || "bash"),
     command: process.env.SHELL || "bash",
     args: [],
   };
+}
+
+function quotePowerShellLiteral(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function openExternalTerminal(cwd, commandToRun) {
+  const workingDirectory = cwd ? normalizePath(cwd) : os.homedir();
+
+  if (process.platform === "win32") {
+    const escapedDirectory = workingDirectory.replace(/"/g, '\\"');
+    const escapedCommand = commandToRun ? commandToRun.replace(/"/g, '\\"') : "";
+    const wtCommand = commandToRun
+      ? `wt.exe -d "${escapedDirectory}" powershell.exe -NoExit -Command "${escapedCommand}"`
+      : `wt.exe -d "${escapedDirectory}"`;
+    const powershellBody = commandToRun
+      ? `Set-Location -LiteralPath ${quotePowerShellLiteral(workingDirectory)}; ${commandToRun}`
+      : `Set-Location -LiteralPath ${quotePowerShellLiteral(workingDirectory)}`;
+    const powershellCommand = `start "" powershell.exe -NoExit -Command "${powershellBody.replace(/"/g, '\\"')}"`;
+    const command = `${wtCommand} || ${powershellCommand}`;
+
+    spawn("C:\\Windows\\System32\\cmd.exe", ["/d", "/s", "/c", command], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+      env: buildTerminalEnv(),
+    }).unref();
+    return;
+  }
+
+  spawn(getTerminalShell().command, getTerminalShell().args, {
+    cwd: workingDirectory,
+    detached: true,
+    stdio: "ignore",
+    env: buildTerminalEnv(),
+  }).unref();
 }
 
 function normalizePath(filePath) {
@@ -222,6 +358,8 @@ ipcMain.handle("terminal:start", async (event, options = {}) => {
     rows: options.rows || 24,
     cwd,
     env: buildTerminalEnv(),
+    useConpty: true,
+    conptyInheritCursor: true,
   });
 
   terminals.set(terminalId, ptyProcess);
@@ -236,6 +374,18 @@ ipcMain.handle("terminal:start", async (event, options = {}) => {
   });
 
   return terminalId;
+});
+
+ipcMain.handle("terminal:getShellInfo", async () => {
+  const shell = getTerminalShell();
+  return {
+    label: shell.label,
+    command: shell.command,
+  };
+});
+
+ipcMain.handle("terminal:openExternal", async (_event, options = {}) => {
+  openExternalTerminal(options.cwd, options.command);
 });
 
 ipcMain.handle("terminal:write", async (_event, terminalId, data) => {

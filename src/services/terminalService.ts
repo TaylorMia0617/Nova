@@ -24,6 +24,18 @@ export async function startTerminal(options: { cwd?: string; cols?: number; rows
   return host.startTerminal(options);
 }
 
+export async function getTerminalShellInfo(): Promise<{ label: string; command: string } | null> {
+  return getHost()?.getTerminalShellInfo?.() ?? null;
+}
+
+export async function openExternalTerminal(options: { cwd?: string; command?: string }): Promise<void> {
+  const host = getHost();
+  if (!host?.openExternalTerminal) {
+    throw new Error("External terminal is only available in the Electron desktop app.");
+  }
+  await host.openExternalTerminal(options);
+}
+
 export async function writeTerminal(terminalId: string, data: string): Promise<void> {
   await getHost()?.writeTerminal?.(terminalId, data);
 }

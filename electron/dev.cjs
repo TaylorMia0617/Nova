@@ -1,4 +1,5 @@
 const { spawn } = require("child_process");
+const fs = require("fs");
 const net = require("net");
 const path = require("path");
 
@@ -69,10 +70,22 @@ async function main() {
   await waitForPort(devPort);
 
   const electronPath = require("electron");
+  if (!fs.existsSync(electronPath)) {
+    throw new Error(
+      `Electron binary is missing at ${electronPath}. Run: npm install electron --force`
+    );
+  }
+
   const electron = spawn(electronPath, ["."], {
     cwd: root,
     stdio: "inherit",
     shell: false,
+  });
+
+  electron.once("error", (error) => {
+    vite?.kill();
+    console.error(error);
+    process.exit(1);
   });
 
   electron.once("exit", (code) => {
