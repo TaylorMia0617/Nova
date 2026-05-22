@@ -4,9 +4,11 @@ import {
   createFolder as createFolderOnDisk,
   deletePath,
   duplicateFile as duplicateFileOnDisk,
+  loadWorkspaceTree,
   loadWorkspace,
   movePath,
   pickWorkspace,
+  readDirectory,
   readFile,
   renamePath,
   type WorkspaceNode,
@@ -95,6 +97,8 @@ interface FileState {
   setErrorMessage: (message: string | null) => void;
   openWorkspace: () => Promise<void>;
   refreshWorkspace: () => Promise<void>;
+  ensureFolderLoaded: (path: string) => Promise<void>;
+  loadFullWorkspaceTree: () => Promise<void>;
   openFile: (path: string) => Promise<void>;
   setActiveFile: (path: string | null) => void;
   closeTab: (path: string) => void;
@@ -125,6 +129,53 @@ function joinPath(basePath: string, name: string): string {
   return `${basePath}${separator}${name}`;
 }
 
+function replaceNodeChildren(nodes: WorkspaceNode[], path: string, children: WorkspaceNode[]): WorkspaceNode[] {
+  return nodes.map((node) => {
+    if (node.path === path && node.type === "folder") {
+      return {
+        ...node,
+        hasChildren: children.length > 0,
+        isLoaded: true,
+        children,
+      };
+    }
+
+    if (!node.children) {
+      return node;
+    }
+
+    return {
+      ...node,
+      children: replaceNodeChildren(node.children, path, children),
+    };
+  });
+}
+
+function hydrateFolderChain(nodes: WorkspaceNode[], targetPath: string): WorkspaceNode[] {
+  return nodes.map((node) => {
+    if (node.type !== "folder") {
+      return node;
+    }
+
+    if (targetPath === node.path || isSameOrDescendantPath(targetPath, node.path)) {
+      return {
+        ...node,
+        hasChildren: true,
+        children: node.children ?? [],
+      };
+    }
+
+    if (!node.children) {
+      return node;
+    }
+
+    return {
+      ...node,
+      children: hydrateFolderChain(node.children, targetPath),
+    };
+  });
+}
+
 function getPathPrefix(targetPath: string): string {
   const separator = targetPath.includes("\\") ? "\\" : "/";
   return `${targetPath.replace(/[\\/]+$/, "")}${separator}`;
@@ -149,6 +200,10 @@ function assertValidNewEntryName(name: string): string {
   }
 
   return trimmedName;
+}
+
+function withDefaultMarkdownExtension(name: string): string {
+  return /\.[^./\\]+$/.test(name) ? name : `${name}.md`;
 }
 
 function updateTabsWithRenamedPath(
@@ -231,7 +286,10 @@ function buildReferenceEntries(
 async function ensureProjectReferenceFiles(
   rootPath: string,
   files: WorkspaceNode[]
-): Promise<Record<(typeof PROJECT_REFERENCE_DEFINITIONS)[number]["key"], string>> {
+): Promise<{
+  paths: Record<(typeof PROJECT_REFERENCE_DEFINITIONS)[number]["key"], string>;
+  createdMissingFiles: boolean;
+}> {
   const existingPaths = Object.fromEntries(
     PROJECT_REFERENCE_DEFINITIONS.map((definition) => [
       definition.key,
@@ -243,9 +301,12 @@ async function ensureProjectReferenceFiles(
   const hasAllExistingReference = PROJECT_REFERENCE_DEFINITIONS.every((definition) => existingPaths[definition.key]);
 
   if (hasAllExistingReference) {
-    return Object.fromEntries(
-      PROJECT_REFERENCE_DEFINITIONS.map((definition) => [definition.key, existingPaths[definition.key] as string])
-    ) as Record<(typeof PROJECT_REFERENCE_DEFINITIONS)[number]["key"], string>;
+    return {
+      paths: Object.fromEntries(
+        PROJECT_REFERENCE_DEFINITIONS.map((definition) => [definition.key, existingPaths[definition.key] as string])
+      ) as Record<(typeof PROJECT_REFERENCE_DEFINITIONS)[number]["key"], string>,
+      createdMissingFiles: false,
+    };
   }
 
   const existingSettingsFolderPath = findFolderPath(files, SETTINGS_FOLDER_NAME);
@@ -263,6 +324,7 @@ async function ensureProjectReferenceFiles(
   }
 
   const result = {} as Record<(typeof PROJECT_REFERENCE_DEFINITIONS)[number]["key"], string>;
+  let createdMissingFiles = !existingSettingsFolderPath;
 
   for (const definition of PROJECT_REFERENCE_DEFINITIONS) {
     const existingPath = existingPaths[definition.key];
@@ -275,6 +337,7 @@ async function ensureProjectReferenceFiles(
     try {
       await createFileOnDisk(filePath);
       await writeFile(filePath, definition.template);
+      createdMissingFiles = true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!message.includes("already exists")) {
@@ -285,17 +348,23 @@ async function ensureProjectReferenceFiles(
   }
 
   if (!hasAnyExistingReference) {
-    return result;
+    return {
+      paths: result,
+      createdMissingFiles,
+    };
   }
 
   return {
-    ...Object.fromEntries(
-      PROJECT_REFERENCE_DEFINITIONS.map((definition) => [
-        definition.key,
-        existingPaths[definition.key] ?? result[definition.key],
-      ])
-    ),
-  } as Record<(typeof PROJECT_REFERENCE_DEFINITIONS)[number]["key"], string>;
+    paths: {
+      ...Object.fromEntries(
+        PROJECT_REFERENCE_DEFINITIONS.map((definition) => [
+          definition.key,
+          existingPaths[definition.key] ?? result[definition.key],
+        ])
+      ),
+    } as Record<(typeof PROJECT_REFERENCE_DEFINITIONS)[number]["key"], string>,
+    createdMissingFiles,
+  };
 }
 
 function buildReferenceState(
@@ -343,14 +412,25 @@ export const useFileStore = create<FileState>()((set, get) => ({
       }
 
       let workspace = await loadWorkspace(selectedPath);
-      const referencePaths = await ensureProjectReferenceFiles(workspace.rootPath, workspace.nodes);
+      const { paths: referencePaths, createdMissingFiles } = await ensureProjectReferenceFiles(
+        workspace.rootPath,
+        workspace.nodes
+      );
 
-      workspace = await loadWorkspace(selectedPath);
+      if (createdMissingFiles) {
+        workspace = await loadWorkspace(selectedPath);
+      }
 
-      const characterEntries = parseNamedEntries(await readFile(referencePaths.character));
-      const placeEntries = parseNamedEntries(await readFile(referencePaths.place));
-      const itemEntries = parseNamedEntries(await readFile(referencePaths.item));
-      const skillEntries = parseNamedEntries(await readFile(referencePaths.skill));
+      const [characterContent, placeContent, itemContent, skillContent] = await Promise.all([
+        readFile(referencePaths.character),
+        readFile(referencePaths.place),
+        readFile(referencePaths.item),
+        readFile(referencePaths.skill),
+      ]);
+      const characterEntries = parseNamedEntries(characterContent);
+      const placeEntries = parseNamedEntries(placeContent);
+      const itemEntries = parseNamedEntries(itemContent);
+      const skillEntries = parseNamedEntries(skillContent);
 
       set({
         rootPath: workspace.rootPath,
@@ -374,12 +454,47 @@ export const useFileStore = create<FileState>()((set, get) => ({
       });
     }
   },
+  ensureFolderLoaded: async (path) => {
+    const targetNode = getNodeByPath(get().files, path);
+    if (!targetNode || targetNode.type !== "folder" || targetNode.isLoaded) {
+      return;
+    }
+
+    try {
+      const children = await readDirectory(path);
+      set((state) => ({
+        files: replaceNodeChildren(state.files, path, children),
+        errorMessage: null,
+      }));
+    } catch (error) {
+      set({
+        errorMessage: error instanceof Error ? error.message : "Failed to load folder contents.",
+      });
+    }
+  },
+  loadFullWorkspaceTree: async () => {
+    const { rootPath } = get();
+    if (!rootPath) return;
+
+    try {
+      const workspace = await loadWorkspaceTree(rootPath);
+      set({
+        rootName: workspace.rootName,
+        files: workspace.nodes,
+        errorMessage: null,
+      });
+    } catch (error) {
+      set({
+        errorMessage: error instanceof Error ? error.message : "Failed to load project files.",
+      });
+    }
+  },
   refreshWorkspace: async () => {
     const { rootPath, activeFile, openTabs } = get();
     if (!rootPath) return;
 
     try {
-      const workspace = await loadWorkspace(rootPath);
+      const workspace = await loadWorkspaceTree(rootPath);
       const validTabs = await Promise.all(
         openTabs
           .filter((tab) => getNodeByPath(workspace.nodes, tab.path))
@@ -410,10 +525,17 @@ export const useFileStore = create<FileState>()((set, get) => ({
       const skillFilePath = findReferenceFilePath(workspace.nodes, SKILL_FILE_NAME);
       const worldFilePath = findReferenceFilePath(workspace.nodes, WORLD_FILE_NAME);
 
-      const characterEntries = characterFilePath ? parseNamedEntries(await readFile(characterFilePath)) : [];
-      const placeEntries = placeFilePath ? parseNamedEntries(await readFile(placeFilePath)) : [];
-      const itemEntries = itemFilePath ? parseNamedEntries(await readFile(itemFilePath)) : [];
-      const skillEntries = skillFilePath ? parseNamedEntries(await readFile(skillFilePath)) : [];
+      const [characterContent, placeContent, itemContent, skillContent] = await Promise.all([
+        characterFilePath ? readFile(characterFilePath) : Promise.resolve(""),
+        placeFilePath ? readFile(placeFilePath) : Promise.resolve(""),
+        itemFilePath ? readFile(itemFilePath) : Promise.resolve(""),
+        skillFilePath ? readFile(skillFilePath) : Promise.resolve(""),
+      ]);
+
+      const characterEntries = characterFilePath ? parseNamedEntries(characterContent) : [];
+      const placeEntries = placeFilePath ? parseNamedEntries(placeContent) : [];
+      const itemEntries = itemFilePath ? parseNamedEntries(itemContent) : [];
+      const skillEntries = skillFilePath ? parseNamedEntries(skillContent) : [];
 
       set({
         rootName: workspace.rootName,
@@ -582,9 +704,13 @@ export const useFileStore = create<FileState>()((set, get) => ({
     if (!rootPath) return;
 
     try {
-      const safeName = assertValidNewEntryName(name);
+      const safeName = withDefaultMarkdownExtension(assertValidNewEntryName(name));
       const targetFolder = parentPath ?? rootPath;
       const fullPath = joinPath(targetFolder, safeName);
+      set((state) => ({
+        files: hydrateFolderChain(state.files, targetFolder),
+      }));
+      await get().ensureFolderLoaded(targetFolder);
       await createFileOnDisk(fullPath);
       await get().refreshWorkspace();
       await get().openFile(fullPath);
@@ -602,6 +728,10 @@ export const useFileStore = create<FileState>()((set, get) => ({
     try {
       const safeName = assertValidNewEntryName(name);
       const targetFolder = parentPath ?? rootPath;
+      set((state) => ({
+        files: hydrateFolderChain(state.files, targetFolder),
+      }));
+      await get().ensureFolderLoaded(targetFolder);
       await createFolderOnDisk(joinPath(targetFolder, safeName));
       await get().refreshWorkspace();
       set({ errorMessage: null });

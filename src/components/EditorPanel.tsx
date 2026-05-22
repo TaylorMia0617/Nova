@@ -4,20 +4,26 @@ import {
   AlignCenter,
   AlignLeft,
   AlignRight,
-  Bold,
+  ChevronDown,
   Download,
   Heading1,
   Heading2,
   Heading3,
-  Italic,
   Save,
-  Strikethrough,
   Type,
-  Underline,
   WrapText,
   X,
 } from "lucide-react";
 import { useFileStore } from "../stores/fileStore";
+import { useSettingsStore } from "../stores/settingsStore";
+import { callAI } from "../services/aiService";
+import {
+  applySelectionPreview,
+  registerEditorBridge,
+} from "../services/editorInsertionService";
+import { exportDocument, getExportTemplates } from "../services/documentExportService";
+import type { ExportFormat, ExportTemplateId } from "../types/export";
+import { onWorkspaceChanged, unwatchWorkspace, watchWorkspace } from "../services/terminalService";
 import "./EditorPanel.css";
 
 const CHARACTER_FILE_NAME = "\u4eba\u7269\u5217\u8868.txt";
@@ -30,24 +36,30 @@ const DESCRIPTION_LIMIT = 20;
 const TYPING_SUGGEST_DELAY_MS = 1000;
 const PUNCTUATION_SUGGEST_DELAY_MS = 2000;
 const AUTO_SAVE_DELAY_MS = 3000;
-const PROJECT_REFRESH_INTERVAL_MS = 5000;
-const REFERENCE_PUNCTUATION = /[\u3002\uFF01\uFF1F!?\uFF1B;\uFF1A:\uFF0C,\u3001]$/;
-const EDITOR_FONT_FAMILIES = [
-  { label: "Serif", value: "'Noto Serif SC', 'Source Han Serif SC', Georgia, serif" },
-  { label: "Sans", value: "'Noto Sans SC', 'Source Han Sans SC', 'Segoe UI', sans-serif" },
-  { label: "Mono", value: "'Cascadia Mono', Consolas, 'Courier New', monospace" },
-] as const;
-const EDITOR_FONT_SIZES = [12, 14, 16, 18, 20, 24] as const;
-const EDITOR_FONT_FAMILY_VALUES = EDITOR_FONT_FAMILIES.map((option) => option.value);
+const REFERENCE_PUNCTUATION = /[。！？!?；;]$/;
+const DEFAULT_EDITOR_FONT_FAMILY = "'Noto Serif SC', 'Source Han Serif SC', Georgia, serif";
+const DEFAULT_EDITOR_FONT_SIZE = 14;
 
 type HeadingState = "body" | "h1" | "h2" | "h3";
 type AlignmentMode = "center" | "right";
-type EditorFontFamily = (typeof EDITOR_FONT_FAMILIES)[number]["value"];
+type SelectionAction = "polish" | "correct" | "stylize";
 
 type AlignmentBlock = {
   startLine: number;
   endLine: number;
   alignment: AlignmentMode;
+};
+
+type SelectionPopupState = {
+  text: string;
+  top: number;
+  left: number;
+};
+
+type SelectionPreviewState = {
+  mode: SelectionAction;
+  original: string;
+  result: string;
 };
 
 let markdownFoldingProviderRegistered = false;
@@ -106,9 +118,7 @@ const registerMarkdownHeadingFolding = (monaco: any) => {
 
       for (let lineNumber = 1; lineNumber <= model.getLineCount(); lineNumber += 1) {
         const level = getHeadingLevel(model.getLineContent(lineNumber));
-        if (level) {
-          headings.push({ lineNumber, level });
-        }
+        if (level) headings.push({ lineNumber, level });
       }
 
       return headings
@@ -126,9 +136,7 @@ const registerMarkdownHeadingFolding = (monaco: any) => {
             end -= 1;
           }
 
-          if (end <= heading.lineNumber) {
-            return null;
-          }
+          if (end <= heading.lineNumber) return null;
 
           return {
             start: heading.lineNumber,
@@ -148,6 +156,7 @@ const EditorPanel: React.FC = () => {
     activeFile,
     openTabs,
     referenceEntries,
+    rootPath,
     setActiveFile,
     closeTab,
     updateFileContent,
@@ -155,13 +164,13 @@ const EditorPanel: React.FC = () => {
     saveAllFiles,
     refreshWorkspace,
   } = useFileStore();
+  const { defaultSelectionModelId, selectionPromptTemplates, getModelProfileById } = useSettingsStore();
   const editorRef = useRef<any>(null);
   const monacoRef = useRef<any>(null);
   const editorContainerRef = useRef<HTMLDivElement | null>(null);
   const completionDisposableRef = useRef<Array<{ dispose: () => void }>>([]);
   const suggestionTimeoutRef = useRef<number | null>(null);
   const autoSaveTimeoutRef = useRef<number | null>(null);
-  const refreshIntervalRef = useRef<number | null>(null);
   const alignmentBlocksByPathRef = useRef<Record<string, AlignmentBlock[]>>({});
   const alignmentDecorationIdsRef = useRef<string[]>([]);
   const alignmentDecorationModesRef = useRef<Record<string, AlignmentMode>>({});
@@ -169,9 +178,17 @@ const EditorPanel: React.FC = () => {
   const [selectionLength, setSelectionLength] = useState(0);
   const [wordWrap, setWordWrap] = useState<"on" | "off">("on");
   const [lastSavedAt, setLastSavedAt] = useState<string>("Not saved yet");
-  const [fontFamily, setFontFamily] = useState<EditorFontFamily>(EDITOR_FONT_FAMILIES[0].value);
-  const [fontSize, setFontSize] = useState<number>(14);
   const [activeHeadingState, setActiveHeadingState] = useState<HeadingState>("body");
+  const [selectionPopup, setSelectionPopup] = useState<SelectionPopupState | null>(null);
+  const [selectionPreview, setSelectionPreview] = useState<SelectionPreviewState | null>(null);
+  const [selectionLoading, setSelectionLoading] = useState(false);
+  const [selectionError, setSelectionError] = useState("");
+  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
+  const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("pdf");
+  const [exportTemplateId, setExportTemplateId] = useState<ExportTemplateId>("classic");
+  const [exportError, setExportError] = useState("");
+  const exportTemplates = getExportTemplates();
 
   const isReferenceFile =
     activeFile?.name === CHARACTER_FILE_NAME ||
@@ -242,9 +259,7 @@ const EditorPanel: React.FC = () => {
       };
     }
 
-    if (isReferenceFile) {
-      return null;
-    }
+    if (isReferenceFile) return null;
 
     const plainMatch = beforeCursor.match(/[A-Za-z0-9_\u4e00-\u9fff-]+$/);
     const partial = plainMatch ? plainMatch[0] : "";
@@ -277,14 +292,11 @@ const EditorPanel: React.FC = () => {
   const triggerReferenceSuggestions = () => {
     const editor = editorRef.current;
     if (!editor || referenceEntries.length === 0 || isReferenceFile) return;
-
     const model = editor.getModel();
     const position = editor.getPosition();
     if (!model || !position) return;
-
     const context = getSuggestionContext(model, position);
     if (!context) return;
-
     editor.trigger("reference-suggestions", "editor.action.triggerSuggest", {});
   };
 
@@ -342,7 +354,6 @@ const EditorPanel: React.FC = () => {
   const relayoutEditor = () => {
     const editor = editorRef.current;
     if (!editor) return;
-
     requestAnimationFrame(() => {
       editor.layout();
       editor.render(true);
@@ -356,7 +367,6 @@ const EditorPanel: React.FC = () => {
       setActiveHeadingState("body");
       return;
     }
-
     const selection = editor.getSelection();
     const lineNumber = selection?.startLineNumber ?? editor.getPosition()?.lineNumber ?? 1;
     setActiveHeadingState(normalizeHeadingState(model.getLineContent(lineNumber)));
@@ -366,7 +376,6 @@ const EditorPanel: React.FC = () => {
     const editor = editorRef.current;
     const model = editor?.getModel();
     if (!path || !model) return;
-
     const lineCount = model.getLineCount();
     const blocks = alignmentDecorationIdsRef.current
       .map((decorationId) => {
@@ -380,7 +389,6 @@ const EditorPanel: React.FC = () => {
         };
       })
       .filter(Boolean) as AlignmentBlock[];
-
     alignmentBlocksByPathRef.current[path] = mergeAlignmentBlocks(clampAlignmentBlocks(blocks, lineCount));
   };
 
@@ -389,7 +397,6 @@ const EditorPanel: React.FC = () => {
     const model = editor?.getModel();
     const monaco = monacoRef.current;
     if (!editor || !model || !monaco || !path) return;
-
     const lineCount = model.getLineCount();
     const blocks = mergeAlignmentBlocks(
       clampAlignmentBlocks(alignmentBlocksByPathRef.current[path] ?? [], lineCount)
@@ -423,7 +430,6 @@ const EditorPanel: React.FC = () => {
     if (!editor || !model || !activeFile?.path) return;
 
     snapshotAlignmentBlocks(activeFile.path);
-
     const lineCount = model.getLineCount();
     const selections = editor.getSelections() ?? [];
     let nextBlocks = alignmentBlocksByPathRef.current[activeFile.path] ?? [];
@@ -431,35 +437,17 @@ const EditorPanel: React.FC = () => {
     selections.forEach((selection: any) => {
       const startLine = Math.max(1, Math.min(selection.startLineNumber, lineCount));
       const endLine = Math.max(1, Math.min(selection.endLineNumber, lineCount));
-
       const preservedBlocks = nextBlocks.flatMap((block) => {
-        if (block.endLine < startLine || block.startLine > endLine) {
-          return [block];
-        }
-
+        if (block.endLine < startLine || block.startLine > endLine) return [block];
         const updated: AlignmentBlock[] = [];
-        if (block.startLine < startLine) {
-          updated.push({
-            ...block,
-            endLine: startLine - 1,
-          });
-        }
-        if (block.endLine > endLine) {
-          updated.push({
-            ...block,
-            startLine: endLine + 1,
-          });
-        }
+        if (block.startLine < startLine) updated.push({ ...block, endLine: startLine - 1 });
+        if (block.endLine > endLine) updated.push({ ...block, startLine: endLine + 1 });
         return updated;
       });
 
       nextBlocks = preservedBlocks;
       if (alignment !== "left") {
-        nextBlocks.push({
-          startLine,
-          endLine,
-          alignment,
-        });
+        nextBlocks.push({ startLine, endLine, alignment });
       }
     });
 
@@ -470,31 +458,15 @@ const EditorPanel: React.FC = () => {
     editor.focus();
   };
 
-  const applyEdits = (edits: Array<{ range: any; text: string }>) => {
+  const applyEdits = (edits: Array<{ range: any; text: string }>, source = "format-toolbar") => {
     const editor = editorRef.current;
     if (!editor || edits.length === 0) return;
-    editor.executeEdits("format-toolbar", edits);
+    editor.executeEdits(source, edits);
     requestAnimationFrame(() => {
       syncHeadingState();
       relayoutEditor();
     });
     editor.focus();
-  };
-
-  const wrapSelection = (prefix: string, suffix = prefix) => {
-    const editor = editorRef.current;
-    const model = editor?.getModel();
-    if (!editor || !model) return;
-
-    const edits = (editor.getSelections() ?? []).map((selection: any) => {
-      const selectedText = model.getValueInRange(selection);
-      return {
-        range: selection,
-        text: `${prefix}${selectedText || "\u6587\u672c"}${suffix}`,
-      };
-    });
-
-    applyEdits(edits);
   };
 
   const transformSelectedBlocks = (transform: (text: string) => string) => {
@@ -548,9 +520,36 @@ const EditorPanel: React.FC = () => {
     updateAlignmentBlocks(alignment);
   };
 
-  const handleFontFamilyChange = (value: string) => {
-    if (EDITOR_FONT_FAMILY_VALUES.includes(value as EditorFontFamily)) {
-      setFontFamily(value as EditorFontFamily);
+  const handleSelectionAi = async (mode: SelectionAction) => {
+    const modelProfile = getModelProfileById(defaultSelectionModelId);
+    const editor = editorRef.current;
+    const model = editor?.getModel();
+    const selectedText = editor?.getModel()?.getValueInRange(editor.getSelection())?.trim() ?? "";
+    if (!modelProfile || !editor || !model || !selectedText) return;
+
+    setSelectionLoading(true);
+    setSelectionError("");
+    try {
+      const prompt = selectionPromptTemplates[mode];
+      const result = await callAI({
+        modelProfile,
+        taskType: mode,
+        userMessage: selectedText,
+        documentContext: model.getValue(),
+        conversationHistory: [],
+        selectionPrompt: prompt,
+      });
+
+      setSelectionPreview({
+        mode,
+        original: selectedText,
+        result,
+      });
+      setSelectionPopup(null);
+    } catch (error) {
+      setSelectionError(error instanceof Error ? error.message : "AI request failed.");
+    } finally {
+      setSelectionLoading(false);
     }
   };
 
@@ -564,6 +563,46 @@ const EditorPanel: React.FC = () => {
     applyAlignmentDecorations(activeFile?.path);
     syncHeadingState();
 
+    registerEditorBridge({
+      getSelectionText: () => editor.getModel()?.getValueInRange(editor.getSelection()) ?? "",
+      getSelectionRange: () => editor.getSelection() ?? null,
+      getContent: () => editor.getModel()?.getValue() ?? "",
+      applyText: ({ mode, text }) => {
+        const selection = editor.getSelection();
+        const model = editor.getModel();
+        if (!selection || !model) return;
+        const monacoRange = new monaco.Range(
+          selection.startLineNumber,
+          selection.startColumn,
+          selection.endLineNumber,
+          selection.endColumn
+        );
+
+        if (mode === "replaceSelection") {
+          applyEdits([{ range: monacoRange, text }], "selection-preview");
+          return;
+        }
+
+        if (mode === "insertAfterSelection") {
+          const range = new monaco.Range(
+            selection.endLineNumber,
+            selection.endColumn,
+            selection.endLineNumber,
+            selection.endColumn
+          );
+          applyEdits([{ range, text: `\n${text}` }], "selection-preview");
+          return;
+        }
+
+        if (selection.isEmpty()) {
+          applyEdits([{ range: monacoRange, text }], "editor-insert");
+        } else {
+          applyEdits([{ range: monacoRange, text }], "editor-insert");
+        }
+      },
+      focus: () => editor.focus(),
+    });
+
     editor.onDidChangeCursorPosition((event: any) => {
       setCursorPosition({
         line: event.position.lineNumber,
@@ -573,15 +612,44 @@ const EditorPanel: React.FC = () => {
     });
 
     editor.onDidChangeCursorSelection((event: any) => {
+      const selectedText = editor.getModel()?.getValueInRange(event.selection) ?? "";
       setSelectionLength(editor.getModel()?.getValueLengthInRange(event.selection) ?? 0);
       syncHeadingState();
+
+      if (isReferenceFile || !selectedText.trim()) {
+        setSelectionPopup(null);
+        return;
+      }
+
+      const selections = editor.getSelections() ?? [];
+      if (selections.length !== 1) {
+        setSelectionPopup(null);
+        return;
+      }
+
+      const visibleRanges = editor.getScrolledVisiblePosition({
+        lineNumber: event.selection.endLineNumber,
+        column: event.selection.endColumn,
+      });
+
+      const editorRect = editor.getDomNode()?.getBoundingClientRect();
+      if (!visibleRanges || !editorRect) return;
+
+      setSelectionPopup({
+        text: selectedText,
+        left: editorRect.left + visibleRanges.left,
+        top: editorRect.top + visibleRanges.top - 10,
+      });
+    });
+
+    editor.onDidBlurEditorText(() => {
+      window.setTimeout(() => {
+        setSelectionPopup((current) => current);
+      }, 0);
     });
 
     editor.onDidChangeModelContent((event: any) => {
-      if (suggestionTimeoutRef.current) {
-        window.clearTimeout(suggestionTimeoutRef.current);
-      }
-
+      if (suggestionTimeoutRef.current) window.clearTimeout(suggestionTimeoutRef.current);
       const insertedText = getInsertedTextFromChanges(event.changes ?? []);
       suggestionTimeoutRef.current = window.setTimeout(() => {
         const trimmed = insertedText.trimEnd();
@@ -589,7 +657,6 @@ const EditorPanel: React.FC = () => {
           triggerReferenceSuggestions();
         }
       }, getSuggestionDelay(insertedText));
-
       syncHeadingState();
     });
   };
@@ -607,52 +674,52 @@ const EditorPanel: React.FC = () => {
   };
 
   useEffect(() => {
-    if (monacoRef.current) {
-      registerReferenceCompletionProvider(monacoRef.current);
-    }
+    if (monacoRef.current) registerReferenceCompletionProvider(monacoRef.current);
   }, [referenceEntries, isReferenceFile, activeFile?.path]);
 
   useEffect(() => {
     if (!editorContainerRef.current) return;
-
     const resizeObserver = new ResizeObserver(() => {
       relayoutEditor();
     });
-
     resizeObserver.observe(editorContainerRef.current);
     return () => resizeObserver.disconnect();
   }, [activeFile?.path]);
 
   useEffect(() => {
-    if (autoSaveTimeoutRef.current) {
-      window.clearTimeout(autoSaveTimeoutRef.current);
-    }
-
+    if (autoSaveTimeoutRef.current) window.clearTimeout(autoSaveTimeoutRef.current);
     if (!activeFile?.isDirty) return;
 
     autoSaveTimeoutRef.current = window.setTimeout(() => {
-      void saveAllFiles();
-      setLastSavedAt(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+      void saveAllFiles().then(() => {
+        setLastSavedAt(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+      });
     }, AUTO_SAVE_DELAY_MS);
 
     return () => {
-      if (autoSaveTimeoutRef.current) {
-        window.clearTimeout(autoSaveTimeoutRef.current);
-      }
+      if (autoSaveTimeoutRef.current) window.clearTimeout(autoSaveTimeoutRef.current);
     };
   }, [activeFile?.content, activeFile?.isDirty, activeFile?.path, saveAllFiles]);
 
   useEffect(() => {
-    refreshIntervalRef.current = window.setInterval(() => {
-      void refreshWorkspace();
-    }, PROJECT_REFRESH_INTERVAL_MS);
+    if (!rootPath) return;
 
-    return () => {
-      if (refreshIntervalRef.current) {
-        window.clearInterval(refreshIntervalRef.current);
-      }
+    void watchWorkspace(rootPath);
+    const disposeWorkspaceChanged = onWorkspaceChanged(({ rootPath: changedRootPath }) => {
+      if (changedRootPath === rootPath) void refreshWorkspace();
+    });
+
+    const handleFocus = () => {
+      void refreshWorkspace();
     };
-  }, [refreshWorkspace]);
+
+    window.addEventListener("focus", handleFocus);
+    return () => {
+      window.removeEventListener("focus", handleFocus);
+      disposeWorkspaceChanged();
+      void unwatchWorkspace(rootPath);
+    };
+  }, [refreshWorkspace, rootPath]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -671,7 +738,7 @@ const EditorPanel: React.FC = () => {
       completionDisposableRef.current.forEach((disposable) => disposable.dispose());
       if (suggestionTimeoutRef.current) window.clearTimeout(suggestionTimeoutRef.current);
       if (autoSaveTimeoutRef.current) window.clearTimeout(autoSaveTimeoutRef.current);
-      if (refreshIntervalRef.current) window.clearInterval(refreshIntervalRef.current);
+      registerEditorBridge(null);
     };
   }, []);
 
@@ -688,27 +755,34 @@ const EditorPanel: React.FC = () => {
       setActiveHeadingState("body");
       return;
     }
-
     applyAlignmentDecorations(activeFile.path);
     syncHeadingState();
   }, [activeFile?.path, isReferenceFile]);
 
-  const handleExport = () => {
-    if (!activeFile?.content) return;
-    const hasExt = /\.[^/.]+$/.test(activeFile.name);
-    const ext = hasExt ? activeFile.name.split(".").pop()?.toLowerCase() : "md";
-    const mime = ext === "txt" ? "text/plain" : "text/markdown";
-    const blob = new Blob([activeFile.content], { type: mime });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = hasExt ? activeFile.name : `${activeFile.name}.md`;
-    a.click();
-    URL.revokeObjectURL(url);
+  const handleExport = async () => {
+    if (!activeFile?.content.trim()) {
+      setExportError("There is no content to export.");
+      return;
+    }
+
+    try {
+      const filenameBase = activeFile.name.replace(/\.[^/.]+$/, "");
+      await exportDocument({
+        format: exportFormat,
+        templateId: exportTemplateId,
+        title: filenameBase || activeFile.name,
+        content: activeFile.content,
+        filenameBase: filenameBase || "document",
+      });
+      setExportError("");
+      setIsExportDialogOpen(false);
+      setIsExportMenuOpen(false);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : "Failed to export document.");
+    }
   };
 
-  const toolbarButtonClass = (isActive = false) =>
-    `toolbar-button${isActive ? " active" : ""}`;
+  const toolbarButtonClass = (isActive = false) => `toolbar-button${isActive ? " active" : ""}`;
 
   const fileStats = useMemo(() => {
     const content = activeFile?.content || "";
@@ -758,49 +832,6 @@ const EditorPanel: React.FC = () => {
         </div>
         <div className="panel-actions">
           <div className="format-toolbar">
-            <select
-              className="toolbar-select"
-              value={fontFamily}
-              onChange={(event) => handleFontFamilyChange(event.target.value)}
-              title="Font Family"
-              disabled={!activeFile}
-            >
-              {EDITOR_FONT_FAMILIES.map((option) => (
-                <option key={option.label} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <select
-              className="toolbar-select toolbar-size"
-              value={fontSize}
-              onChange={(event) => setFontSize(Number(event.target.value))}
-              title="Font Size"
-              disabled={!activeFile}
-            >
-              {EDITOR_FONT_SIZES.map((size) => (
-                <option key={size} value={size}>
-                  {size}px
-                </option>
-              ))}
-            </select>
-            <button className={toolbarButtonClass()} onClick={() => wrapSelection("**")} title="Bold" disabled={!activeFile}>
-              <Bold size={16} />
-            </button>
-            <button className={toolbarButtonClass()} onClick={() => wrapSelection("*")} title="Italic" disabled={!activeFile}>
-              <Italic size={16} />
-            </button>
-            <button
-              className={toolbarButtonClass()}
-              onClick={() => wrapSelection("<u>", "</u>")}
-              title="Underline"
-              disabled={!activeFile}
-            >
-              <Underline size={16} />
-            </button>
-            <button className={toolbarButtonClass()} onClick={() => wrapSelection("~~")} title="Strikethrough" disabled={!activeFile}>
-              <Strikethrough size={16} />
-            </button>
             <button
               className={toolbarButtonClass(activeHeadingState === "h1")}
               onClick={() => applyHeading(1)}
@@ -853,9 +884,50 @@ const EditorPanel: React.FC = () => {
           >
             <WrapText size={16} />
           </button>
-          <button onClick={handleExport} title="Export" disabled={!activeFile}>
-            <Download size={16} />
-          </button>
+          <div className="export-menu-wrap">
+            <button
+              onClick={() => setIsExportMenuOpen((current) => !current)}
+              title="Export"
+              disabled={!activeFile}
+            >
+              <Download size={16} />
+              <ChevronDown size={14} />
+            </button>
+            {isExportMenuOpen && activeFile && (
+              <div className="export-menu">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExportFormat("txt");
+                    setIsExportDialogOpen(true);
+                    setIsExportMenuOpen(false);
+                  }}
+                >
+                  Export as TXT
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExportFormat("pdf");
+                    setIsExportDialogOpen(true);
+                    setIsExportMenuOpen(false);
+                  }}
+                >
+                  Export as PDF
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExportFormat("docx");
+                    setIsExportDialogOpen(true);
+                    setIsExportMenuOpen(false);
+                  }}
+                >
+                  Export as DOCX
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
       <div className="editor-container" ref={editorContainerRef}>
@@ -870,8 +942,8 @@ const EditorPanel: React.FC = () => {
             theme={EDITOR_THEME}
             options={{
               minimap: { enabled: true },
-              fontFamily,
-              fontSize,
+              fontFamily: DEFAULT_EDITOR_FONT_FAMILY,
+              fontSize: DEFAULT_EDITOR_FONT_SIZE,
               lineNumbers: "on",
               scrollBeyondLastLine: true,
               automaticLayout: true,
@@ -899,6 +971,115 @@ const EditorPanel: React.FC = () => {
           </div>
         )}
       </div>
+      {selectionPopup && !selectionPreview && (
+        <div className="selection-popup" style={{ left: selectionPopup.left, top: selectionPopup.top }}>
+          <button onClick={() => void handleSelectionAi("polish")} disabled={selectionLoading}>润色</button>
+          <button onClick={() => void handleSelectionAi("correct")} disabled={selectionLoading}>纠错</button>
+          <button onClick={() => void handleSelectionAi("stylize")} disabled={selectionLoading}>风格化</button>
+        </div>
+      )}
+      {selectionPreview && (
+        <div className="selection-preview-backdrop" onClick={() => setSelectionPreview(null)}>
+          <div className="selection-preview-card" onClick={(event) => event.stopPropagation()}>
+            <h3>AI 文本处理预览</h3>
+            <div className="selection-preview-grid">
+              <div>
+                <h4>原文</h4>
+                <pre>{selectionPreview.original}</pre>
+              </div>
+              <div>
+                <h4>结果</h4>
+                <pre>{selectionPreview.result}</pre>
+              </div>
+            </div>
+            <div className="selection-preview-actions">
+              <button
+                className="secondary"
+                onClick={() => {
+                  setSelectionPreview(null);
+                  setSelectionError("");
+                }}
+              >
+                取消
+              </button>
+              <button
+                className="secondary"
+                onClick={() => {
+                  applySelectionPreview("insertAfterSelection", selectionPreview.result);
+                  setSelectionPreview(null);
+                }}
+              >
+                插入到后方
+              </button>
+              <button
+                onClick={() => {
+                  applySelectionPreview("replaceSelection", selectionPreview.result);
+                  setSelectionPreview(null);
+                }}
+              >
+                替换原文
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {selectionError && <div className="selection-error-banner">{selectionError}</div>}
+      {isExportDialogOpen && activeFile && (
+        <div className="selection-preview-backdrop" onClick={() => setIsExportDialogOpen(false)}>
+          <div className="selection-preview-card export-dialog-card" onClick={(event) => event.stopPropagation()}>
+            <h3>Export Document</h3>
+            <div className="export-dialog-fields">
+              <label>
+                <span>Format</span>
+                <select value={exportFormat} onChange={(event) => setExportFormat(event.target.value as ExportFormat)}>
+                  <option value="txt">TXT</option>
+                  <option value="pdf">PDF</option>
+                  <option value="docx">DOCX</option>
+                </select>
+              </label>
+              {exportFormat !== "txt" && (
+                <label>
+                  <span>Template</span>
+                  <select
+                    value={exportTemplateId}
+                    onChange={(event) => setExportTemplateId(event.target.value as ExportTemplateId)}
+                  >
+                    {exportTemplates.map((template) => (
+                      <option key={template.id} value={template.id}>
+                        {template.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
+            {exportFormat !== "txt" && (
+              <div className="export-template-list">
+                {exportTemplates.map((template) => (
+                  <button
+                    key={template.id}
+                    type="button"
+                    className={`export-template-card ${exportTemplateId === template.id ? "active" : ""}`}
+                    onClick={() => setExportTemplateId(template.id)}
+                  >
+                    <strong>{template.label}</strong>
+                    <span>{template.description}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="selection-preview-actions">
+              <button className="secondary" onClick={() => setIsExportDialogOpen(false)}>
+                Cancel
+              </button>
+              <button onClick={() => void handleExport()}>
+                Export
+              </button>
+            </div>
+            {exportError && <div className="selection-error-inline">{exportError}</div>}
+          </div>
+        </div>
+      )}
       <div className="editor-statusbar">
         <span>{fileStats.language}</span>
         <span>Ln {cursorPosition.line}, Col {cursorPosition.column}</span>

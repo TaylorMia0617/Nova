@@ -1,7 +1,11 @@
+import { compareNodeNames } from "../../shared/workspaceSort.js";
+
 export interface WorkspaceNode {
   path: string;
   name: string;
   type: "folder" | "file";
+  hasChildren?: boolean;
+  isLoaded?: boolean;
   children?: WorkspaceNode[];
 }
 
@@ -14,7 +18,8 @@ export interface WorkspaceSnapshot {
 interface NovelHostApi {
   isElectron: true;
   pickWorkspace: () => Promise<string | null>;
-  loadWorkspace: (rootPath: string) => Promise<WorkspaceSnapshot>;
+  loadWorkspace: (rootPath: string, options?: { recursive?: boolean }) => Promise<WorkspaceSnapshot>;
+  readDirectory: (directoryPath: string, options?: { recursive?: boolean }) => Promise<WorkspaceNode[]>;
   readFile: (path: string) => Promise<string>;
   writeFile: (path: string, content: string) => Promise<void>;
   createFile: (path: string) => Promise<void>;
@@ -23,6 +28,16 @@ interface NovelHostApi {
   deletePath: (path: string) => Promise<void>;
   duplicateFile: (path: string) => Promise<string>;
   movePath: (sourcePath: string, destinationFolderPath: string) => Promise<string>;
+  ensureWorkspaceAppData?: () => Promise<{ rootPath: string; dataPath: string; conversationsPath: string }>;
+  listConversationSummaries?: () => Promise<import("../types/ai").ConversationSummary[]>;
+  readConversation?: (conversationId: string) => Promise<import("../types/ai").ConversationRecord | null>;
+  writeConversation?: (
+    record: import("../types/ai").ConversationRecord
+  ) => Promise<import("../types/ai").ConversationSummary[]>;
+  deleteConversation?: (conversationId: string) => Promise<import("../types/ai").ConversationSummary[]>;
+  testMcpConnection?: (profile: import("../types/ai").ModelProfile) => Promise<unknown>;
+  pickAttachments?: () => Promise<Array<{ path: string; name: string; size: number; mimeType: string }>>;
+  readAttachmentText?: (filePath: string) => Promise<{ textContent: string; truncated: boolean }>;
   startTerminal?: (options: { cwd?: string; cols?: number; rows?: number }) => Promise<string>;
   getTerminalShellInfo?: () => Promise<{ label: string; command: string }>;
   openExternalTerminal?: (options: { cwd?: string; command?: string }) => Promise<void>;
@@ -32,11 +47,15 @@ interface NovelHostApi {
   disposeTerminal?: (terminalId: string) => Promise<void>;
   onTerminalData?: (callback: (payload: { terminalId: string; data: string }) => void) => () => void;
   onTerminalExit?: (callback: (payload: { terminalId: string; exitCode: number }) => void) => () => void;
+  watchWorkspace?: (rootPath: string) => Promise<void>;
+  unwatchWorkspace?: (rootPath: string) => Promise<void>;
+  onWorkspaceChanged?: (callback: (payload: { rootPath: string; changedPath: string | null }) => void) => () => void;
 }
 
 type AnyDirectoryHandle = FileSystemDirectoryHandle & {
   entries: () => AsyncIterableIterator<[string, FileSystemHandle]>;
 };
+
 type AnyFileHandle = FileSystemFileHandle;
 type PermissionCapableHandle = FileSystemHandle & {
   queryPermission?: (descriptor: { mode: "read" | "readwrite" }) => Promise<PermissionState>;
@@ -45,23 +64,6 @@ type PermissionCapableHandle = FileSystemHandle & {
 
 const directoryHandleRegistry = new Map<string, AnyDirectoryHandle>();
 const fileHandleRegistry = new Map<string, AnyFileHandle>();
-const naturalNameCollator = new Intl.Collator("zh-Hans-CN", {
-  numeric: true,
-  sensitivity: "base",
-});
-const chineseDigitMap = new Map([
-  ["零", 0],
-  ["一", 1],
-  ["二", 2],
-  ["两", 2],
-  ["三", 3],
-  ["四", 4],
-  ["五", 5],
-  ["六", 6],
-  ["七", 7],
-  ["八", 8],
-  ["九", 9],
-]);
 
 declare global {
   interface Window {
@@ -88,74 +90,6 @@ function joinPath(basePath: string, name: string): string {
   return basePath ? `${basePath}/${name}` : name;
 }
 
-function parseChineseNumber(input: string): number | null {
-  if (!input) return null;
-  if (/^\d+$/.test(input)) return Number(input);
-
-  let total = 0;
-  let section = 0;
-  let number = 0;
-
-  for (const char of input) {
-    if (chineseDigitMap.has(char)) {
-      number = chineseDigitMap.get(char) ?? 0;
-      continue;
-    }
-
-    if (char === "十") {
-      section += (number || 1) * 10;
-      number = 0;
-      continue;
-    }
-
-    if (char === "百") {
-      section += (number || 1) * 100;
-      number = 0;
-      continue;
-    }
-
-    if (char === "千") {
-      section += (number || 1) * 1000;
-      number = 0;
-      continue;
-    }
-
-    return null;
-  }
-
-  total += section + number;
-  return Number.isFinite(total) ? total : null;
-}
-
-function extractSortableNumber(name: string): number | null {
-  const normalizedName = name.replace(/\.[^.]+$/, "").trim();
-  const chapterMatch = normalizedName.match(/^第\s*([0-9零一二两三四五六七八九十百千]+)\s*[章节回部集卷篇]/);
-  if (chapterMatch) {
-    return parseChineseNumber(chapterMatch[1]);
-  }
-
-  const leadingNumberMatch = normalizedName.match(/^([0-9零一二两三四五六七八九十百千]+)/);
-  if (leadingNumberMatch) {
-    return parseChineseNumber(leadingNumberMatch[1]);
-  }
-
-  return null;
-}
-
-function compareNodeNames(leftName: string, rightName: string): number {
-  const leftNumber = extractSortableNumber(leftName);
-  const rightNumber = extractSortableNumber(rightName);
-
-  if (leftNumber !== null && rightNumber !== null && leftNumber !== rightNumber) {
-    return leftNumber - rightNumber;
-  }
-
-  if (leftNumber !== null && rightNumber === null) return -1;
-  if (leftNumber === null && rightNumber !== null) return 1;
-
-  return naturalNameCollator.compare(leftName, rightName);
-}
-
 function getParentPath(path: string): string | null {
   const parts = pathParts(path);
   if (parts.length <= 1) return null;
@@ -180,7 +114,8 @@ function asFileHandle(handle: FileSystemHandle | FileSystemFileHandle): AnyFileH
 
 async function buildTree(
   directoryHandle: AnyDirectoryHandle,
-  parentPath = ""
+  parentPath = "",
+  recursive = false
 ): Promise<WorkspaceNode[]> {
   const entries: WorkspaceNode[] = [];
 
@@ -193,12 +128,13 @@ async function buildTree(
     if (entry.kind === "directory") {
       const childDirectory = asDirectoryHandle(entry);
       registerDirectoryHandle(entryPath, childDirectory);
-      const children = await buildTree(childDirectory, entryPath);
       entries.push({
         path: entryPath,
         name: entry.name,
         type: "folder",
-        children,
+        hasChildren: true,
+        isLoaded: recursive,
+        children: recursive ? await buildTree(childDirectory, entryPath, true) : undefined,
       });
     } else {
       registerFileHandle(entryPath, asFileHandle(entry));
@@ -291,7 +227,7 @@ export async function pickWorkspace(): Promise<string | null> {
 export async function loadWorkspace(rootPath: string): Promise<WorkspaceSnapshot> {
   const host = getHostApi();
   if (host) {
-    return host.loadWorkspace(rootPath);
+    return host.loadWorkspace(rootPath, { recursive: false });
   }
 
   const rootHandle = directoryHandleRegistry.get(rootPath);
@@ -300,13 +236,53 @@ export async function loadWorkspace(rootPath: string): Promise<WorkspaceSnapshot
   }
 
   await ensurePermission(rootHandle);
-  const nodes = await buildTree(rootHandle, rootPath);
+  const nodes = await buildTree(rootHandle, rootPath, false);
 
   return {
     rootPath,
     rootName: rootHandle.name,
     nodes,
   };
+}
+
+export async function loadWorkspaceTree(rootPath: string): Promise<WorkspaceSnapshot> {
+  const host = getHostApi();
+  if (host) {
+    return host.loadWorkspace(rootPath, { recursive: true });
+  }
+
+  const rootHandle = directoryHandleRegistry.get(rootPath);
+  if (!rootHandle) {
+    throw new Error("The selected workspace is no longer available. Please open it again.");
+  }
+
+  await ensurePermission(rootHandle);
+  const nodes = await buildTree(rootHandle, rootPath, true);
+
+  return {
+    rootPath,
+    rootName: rootHandle.name,
+    nodes,
+  };
+}
+
+export async function readDirectory(
+  directoryPath: string,
+  options?: { recursive?: boolean }
+): Promise<WorkspaceNode[]> {
+  const recursive = options?.recursive ?? false;
+  const host = getHostApi();
+  if (host) {
+    return host.readDirectory(directoryPath, { recursive });
+  }
+
+  const directoryHandle = directoryHandleRegistry.get(directoryPath);
+  if (!directoryHandle) {
+    throw new Error("Could not find that folder in the current workspace.");
+  }
+
+  await ensurePermission(directoryHandle);
+  return buildTree(directoryHandle, directoryPath, recursive);
 }
 
 export async function readFile(path: string): Promise<string> {

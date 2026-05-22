@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { useFileStore } from "../stores/fileStore";
 import type { WorkspaceNode } from "../services/fileSystemService";
+import { buildWorkspaceIndexes, collectFolderPaths, filterWorkspaceNodes } from "../utils/workspaceTree";
 import "./AssetsPanel.css";
 
 type CreateDialogState =
@@ -26,6 +27,8 @@ const AssetsPanel: React.FC = () => {
     files,
     rootPath,
     activeFile,
+    ensureFolderLoaded,
+    loadFullWorkspaceTree,
     openFile,
     createFile,
     createFolder,
@@ -49,104 +52,41 @@ const AssetsPanel: React.FC = () => {
   const createInputRef = useRef<HTMLInputElement | null>(null);
   const treeRef = useRef<HTMLDivElement | null>(null);
 
-  const findNodeByPath = (nodes: WorkspaceNode[], path: string): WorkspaceNode | null => {
-    for (const node of nodes) {
-      if (node.path === path) return node;
-      if (node.children) {
-        const found = findNodeByPath(node.children, path);
-        if (found) return found;
-      }
-    }
-    return null;
-  };
-
-  const findParentPath = (nodes: WorkspaceNode[], childPath: string, parentPath?: string): string | null => {
-    for (const node of nodes) {
-      if (node.path === childPath) return parentPath || null;
-      if (node.children) {
-        const found = findParentPath(node.children, childPath, node.path);
-        if (found) return found;
-      }
-    }
-    return null;
-  };
+  const workspaceIndexes = useMemo(() => buildWorkspaceIndexes(files), [files]);
 
   const getTargetFolderPath = (nodePath: string | null): string | undefined => {
     if (!nodePath) return rootPath ?? undefined;
 
-    const selectedNode = findNodeByPath(files, nodePath);
+    const selectedNode = workspaceIndexes.nodeIndex[nodePath] ?? null;
     if (selectedNode?.type === "folder") {
       return selectedNode.path;
     }
 
-    return findParentPath(files, nodePath) ?? rootPath ?? undefined;
+    return workspaceIndexes.parentIndex[nodePath] ?? rootPath ?? undefined;
   };
 
   const selectedNode = useMemo(
-    () => (selectedNodePath ? findNodeByPath(files, selectedNodePath) : null),
-    [files, selectedNodePath]
+    () => (selectedNodePath ? workspaceIndexes.nodeIndex[selectedNodePath] ?? null : null),
+    [workspaceIndexes, selectedNodePath]
   );
   const normalizedSearchQuery = searchQuery.trim().toLowerCase();
 
-  const getAutoExpandedPaths = (nodes: WorkspaceNode[]): Set<string> => {
-    const paths = new Set<string>();
-
-    const visit = (items: WorkspaceNode[]) => {
-      for (const item of items) {
-        if (item.type === "folder") {
-          paths.add(item.path);
-          if (item.children) {
-            visit(item.children);
-          }
-        }
-      }
-    };
-
-    visit(nodes);
-    return paths;
-  };
-
-  const filterNodes = (nodes: WorkspaceNode[], query: string): WorkspaceNode[] =>
-    nodes.flatMap((node) => {
-      const selfMatches = node.name.toLowerCase().includes(query);
-
-      if (node.type === "file") {
-        return selfMatches ? [node] : [];
-      }
-
-      const filteredChildren = node.children ? filterNodes(node.children, query) : [];
-      if (selfMatches) {
-        return [
-          {
-            ...node,
-            children: node.children,
-          },
-        ];
-      }
-
-      if (filteredChildren.length > 0) {
-        return [
-          {
-            ...node,
-            children: filteredChildren,
-          },
-        ];
-      }
-
-      return [];
-    });
-
   const visibleFiles = useMemo(() => {
     if (!normalizedSearchQuery) return files;
-    return filterNodes(files, normalizedSearchQuery);
+    return filterWorkspaceNodes(files, normalizedSearchQuery);
   }, [files, normalizedSearchQuery]);
 
   const visibleExpandedFolders = useMemo(() => {
     if (!normalizedSearchQuery) return expandedFolders;
-    return getAutoExpandedPaths(visibleFiles);
+    return collectFolderPaths(visibleFiles);
   }, [expandedFolders, normalizedSearchQuery, visibleFiles]);
 
-  const toggleFolder = (folderPath: string) => {
+  const toggleFolder = async (folderPath: string) => {
+    const node = workspaceIndexes.nodeIndex[folderPath] ?? null;
+    if (node?.type === "folder" && !node.isLoaded) {
+      await ensureFolderLoaded(folderPath);
+    }
+
     setExpandedFolders((current) => {
       const next = new Set(current);
       if (next.has(folderPath)) {
@@ -159,7 +99,7 @@ const AssetsPanel: React.FC = () => {
   };
 
   const beginRename = (nodePath: string) => {
-    const node = findNodeByPath(files, nodePath);
+    const node = workspaceIndexes.nodeIndex[nodePath] ?? null;
     if (!node || node.path === rootPath) return;
     setSelectedNodePath(nodePath);
     setRenamingNodePath(nodePath);
@@ -258,7 +198,7 @@ const AssetsPanel: React.FC = () => {
               e.stopPropagation();
               setSelectedNodePath(node.path);
               if (isFolder) {
-                toggleFolder(node.path);
+                await toggleFolder(node.path);
               } else {
                 await openFile(node.path);
               }
@@ -346,8 +286,14 @@ const AssetsPanel: React.FC = () => {
   useEffect(() => {
     if (rootPath) {
       setExpandedFolders(new Set([rootPath]));
+      void ensureFolderLoaded(rootPath);
     }
-  }, [rootPath]);
+  }, [ensureFolderLoaded, rootPath]);
+
+  useEffect(() => {
+    if (!normalizedSearchQuery || !rootPath) return;
+    void loadFullWorkspaceTree();
+  }, [loadFullWorkspaceTree, normalizedSearchQuery, rootPath]);
 
   useEffect(() => {
     const handleClick = () => setContextPos(null);
@@ -477,7 +423,7 @@ const AssetsPanel: React.FC = () => {
             <span>New Folder</span>
           </button>
           {selectedNode?.type === "folder" && (
-            <button onClick={() => toggleFolder(selectedNode.path)}>
+            <button onClick={() => void toggleFolder(selectedNode.path)}>
               {expandedFolders.has(selectedNode.path) ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
               <span>{expandedFolders.has(selectedNode.path) ? "Collapse Folder" : "Expand Folder"}</span>
             </button>
@@ -515,7 +461,7 @@ const AssetsPanel: React.FC = () => {
             <h3>{createDialog.type === "file" ? "Create New File" : "Create New Folder"}</h3>
             <p>
               {createDialog.type === "file"
-                ? "Enter a file name. Include an extension like .md or .txt if you want one."
+                ? "Enter a file name. If you omit the extension, the app creates a Markdown file (.md)."
                 : "Enter a folder name."}
             </p>
             <input
@@ -523,7 +469,7 @@ const AssetsPanel: React.FC = () => {
               className="dialog-input"
               value={createValue}
               onChange={(event) => setCreateValue(event.target.value)}
-              placeholder={createDialog.type === "file" ? "chapter-01.md" : "notes"}
+              placeholder={createDialog.type === "file" ? "chapter-01" : "notes"}
             />
             <div className="dialog-actions">
               <button type="button" className="secondary" onClick={closeCreateDialog}>

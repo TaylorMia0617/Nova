@@ -42,6 +42,11 @@ export interface TerminalDiagnosis {
   probes: Record<string, TerminalProbe>;
 }
 
+export interface WorkspaceChangePayload {
+  rootPath: string;
+  changedPath: string | null;
+}
+
 function getHost() {
   return window.novelHost;
 }
@@ -96,4 +101,16 @@ export function onTerminalData(callback: (payload: TerminalDataPayload) => void)
 
 export function onTerminalExit(callback: (payload: TerminalExitPayload) => void): () => void {
   return getHost()?.onTerminalExit?.(callback) ?? (() => undefined);
+}
+
+export async function watchWorkspace(rootPath: string): Promise<void> {
+  await getHost()?.watchWorkspace?.(rootPath);
+}
+
+export async function unwatchWorkspace(rootPath: string): Promise<void> {
+  await getHost()?.unwatchWorkspace?.(rootPath);
+}
+
+export function onWorkspaceChanged(callback: (payload: WorkspaceChangePayload) => void): () => void {
+  return getHost()?.onWorkspaceChanged?.(callback) ?? (() => undefined);
 }

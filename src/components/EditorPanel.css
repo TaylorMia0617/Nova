@@ -117,6 +117,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 6px;
   width: 32px;
   height: 32px;
   border-radius: 6px;
@@ -140,21 +141,6 @@
   background: #2f3440;
   color: #ffffff;
   box-shadow: inset 0 0 0 1px #4f8cff;
-}
-
-.toolbar-select {
-  min-width: 96px;
-  height: 32px;
-  border: 1px solid #3c3c3c;
-  border-radius: 6px;
-  background: #181818;
-  color: #d6d6d6;
-  font-size: 12px;
-  padding: 0 10px;
-}
-
-.toolbar-size {
-  min-width: 74px;
 }
 
 .editor-container {
@@ -191,4 +177,215 @@
 .monaco-editor .view-line.editor-align-right,
 .monaco-editor .margin-view-overlays .line-numbers.editor-align-right {
   text-align: right;
+}
+
+.selection-popup {
+  position: fixed;
+  transform: translate(-20%, -100%);
+  display: inline-flex;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 999px;
+  background: rgba(18, 24, 35, 0.96);
+  border: 1px solid #33435a;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+  z-index: 1300;
+}
+
+.selection-popup button {
+  background: #202b3b;
+  color: #eef4ff;
+  border-radius: 999px;
+  padding: 8px 12px;
+  font-size: 12px;
+}
+
+.selection-popup button:hover:not(:disabled) {
+  background: #2d3d56;
+}
+
+.selection-preview-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 9, 14, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1400;
+}
+
+.selection-preview-card {
+  width: min(860px, calc(100vw - 48px));
+  background: #171d27;
+  border: 1px solid #2d3a4e;
+  border-radius: 18px;
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.4);
+  padding: 22px;
+}
+
+.selection-preview-card h3,
+.selection-preview-card h4 {
+  margin: 0;
+  color: #eff4fd;
+}
+
+.selection-preview-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.selection-preview-grid pre {
+  margin-top: 10px;
+  padding: 14px;
+  border-radius: 14px;
+  background: #101620;
+  border: 1px solid #27374d;
+  color: #dce6f5;
+  white-space: pre-wrap;
+  max-height: 320px;
+  overflow: auto;
+  font-family: inherit;
+}
+
+.selection-preview-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.selection-preview-actions button {
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: #2d68bf;
+  color: #fff;
+}
+
+.selection-preview-actions button.secondary {
+  background: #283546;
+}
+
+.selection-error-banner {
+  position: absolute;
+  right: 12px;
+  bottom: 36px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #5b2230;
+  color: #ffd5de;
+  border: 1px solid #7c3144;
+  font-size: 12px;
+  z-index: 1200;
+}
+
+.export-menu-wrap {
+  position: relative;
+}
+
+.export-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  min-width: 180px;
+  background: #161d28;
+  border: 1px solid #2f4058;
+  border-radius: 12px;
+  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.34);
+  padding: 6px;
+  z-index: 1250;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.export-menu button {
+  width: 100%;
+  justify-content: flex-start;
+  padding: 10px 12px;
+  background: transparent;
+  color: #dfe7f5;
+  border-radius: 8px;
+}
+
+.export-menu button:hover {
+  background: #243248;
+}
+
+.export-dialog-card {
+  width: min(720px, calc(100vw - 48px));
+}
+
+.export-dialog-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.export-dialog-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: #dce6f5;
+}
+
+.export-dialog-fields select {
+  background: #101620;
+  color: #edf2f8;
+  border: 1px solid #2f4058;
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.export-template-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.export-template-card {
+  text-align: left;
+  background: #111825;
+  border: 1px solid #2e3a4d;
+  border-radius: 14px;
+  padding: 14px;
+  color: #e8eef8;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.export-template-card.active {
+  border-color: #4f8cff;
+  background: #172338;
+}
+
+.export-template-card span {
+  color: #8ea2bf;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.selection-error-inline {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #5b2230;
+  color: #ffd5de;
+  border: 1px solid #7c3144;
+  font-size: 12px;
+}
+
+@media (max-width: 960px) {
+  .selection-preview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .export-template-list,
+  .export-dialog-fields {
+    grid-template-columns: 1fr;
+  }
 }

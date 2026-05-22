@@ -1,73 +1,115 @@
-interface Message {
-  role: "user" | "assistant";
-  content: string;
+import { runMcpSearch } from "./mcpService";
+import type { AiTaskType, ConversationAttachment, ConversationMessage, ModelProfile } from "../types/ai";
+import { serializeAttachmentsForPrompt } from "./attachmentService";
+
+interface AiRequestOptions {
+  modelProfile: ModelProfile;
+  taskType: AiTaskType;
+  userMessage: string;
+  documentContext: string;
+  conversationHistory: ConversationMessage[];
+  selectionPrompt?: string;
+  attachments?: ConversationAttachment[];
 }
 
-export async function callAI(
-  provider: "openai" | "gemini",
-  apiKey: string,
-  userMessage: string,
-  context: string,
-  conversationHistory: Message[]
-): Promise<string> {
-  if (provider === "openai") {
-    return callOpenAI(apiKey, userMessage, context, conversationHistory);
-  } else {
-    return callGemini(apiKey, userMessage, context, conversationHistory);
+function buildSystemPrompt(taskType: AiTaskType, context: string, selectionPrompt?: string) {
+  const base = `You are a creative writing assistant helping a novelist.
+You help with structure, scene writing, line editing, continuity, and narrative clarity.
+Always return plain text with no surrounding markdown fences.
+Current document context:
+${context.slice(-3000)}`;
+
+  if (taskType === "chat") {
+    return `${base}
+
+When relevant, use the browsing or search context that has already been retrieved from MCP tools.`;
   }
+
+  return `${base}
+
+${selectionPrompt || ""}
+Return only the rewritten text.`;
 }
 
-async function callOpenAI(
-  apiKey: string,
-  userMessage: string,
-  context: string,
-  conversationHistory: Message[]
-): Promise<string> {
-  const systemPrompt = `You are a creative writing assistant helping a novelist. 
-You help with character development, plot progression, dialogue, and narrative flow.
-When asked to continue or expand text, maintain consistency with the existing style and tone.
-Context from the current document:
-${context.slice(-2000)}`;
-
-  const input = [
+function buildOpenAIResponsesInput(userMessage: string, conversationHistory: ConversationMessage[]) {
+  return [
     ...conversationHistory.map((msg) => ({
       role: msg.role,
-      content: [
-        {
-          type: "input_text" as const,
-          text: msg.content,
-        },
-      ],
+      content: [{ type: "input_text" as const, text: msg.content }],
     })),
     {
       role: "user" as const,
-      content: [
-        {
-          type: "input_text" as const,
-          text: userMessage,
-        },
-      ],
+      content: [{ type: "input_text" as const, text: userMessage }],
     },
   ];
+}
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
+function buildChatCompletionMessages(
+  systemPrompt: string,
+  userMessage: string,
+  conversationHistory: ConversationMessage[]
+) {
+  return [
+    {
+      role: "system" as const,
+      content: systemPrompt,
+    },
+    ...conversationHistory.map((msg) => ({
+      role: msg.role,
+      content: msg.content,
+    })),
+    {
+      role: "user" as const,
+      content: userMessage,
+    },
+  ];
+}
+
+function getFinalUserMessage(userMessage: string, mcpContext: string, attachments: ConversationAttachment[]) {
+  const attachmentContext = serializeAttachmentsForPrompt(attachments);
+  const composedContexts = [
+    mcpContext ? `External research context:\n${mcpContext}` : "",
+    attachmentContext ? `Attached file context:\n${attachmentContext}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  return composedContexts ? `${userMessage}\n\n${composedContexts}` : userMessage;
+}
+
+function isChatCompletionsUrl(url: string) {
+  return /\/chat\/completions\/?$/i.test(url);
+}
+
+async function parseErrorMessage(response: Response) {
+  try {
+    const error = await response.json();
+    return error.error?.message || error.message || `AI request failed: ${response.status} ${response.statusText}`;
+  } catch {
+    return `AI request failed: ${response.status} ${response.statusText}`;
+  }
+}
+
+async function callResponsesApi(options: AiRequestOptions, systemPrompt: string, finalUserMessage: string) {
+  const { modelProfile, taskType, conversationHistory } = options;
+
+  const response = await fetch(modelProfile.baseUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${modelProfile.apiKey}`,
     },
     body: JSON.stringify({
-      model: "gpt-4o-mini",
+      model: modelProfile.model,
       instructions: systemPrompt,
-      input,
-      max_output_tokens: 1000,
-      temperature: 0.7,
+      input: buildOpenAIResponsesInput(finalUserMessage, conversationHistory),
+      max_output_tokens: 1200,
+      temperature: taskType === "chat" ? 0.7 : 0.45,
     }),
   });
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error?.message || "OpenAI API error");
+    throw new Error(await parseErrorMessage(response));
   }
 
   const data = await response.json();
@@ -85,60 +127,81 @@ ${context.slice(-2000)}`;
           .join("");
 
   if (!outputText) {
-    throw new Error("OpenAI response did not include any text output");
+    throw new Error("AI response did not include any text output.");
   }
 
-  return outputText;
+  return outputText.trim();
 }
 
-async function callGemini(
-  apiKey: string,
-  userMessage: string,
-  context: string,
-  conversationHistory: Message[]
-): Promise<string> {
-  const systemPrompt = `You are a creative writing assistant helping a novelist. 
-You help with character development, plot progression, dialogue, and narrative flow.
-When asked to continue or expand text, maintain consistency with the existing style and tone.
-Context from the current document:
-${context.slice(-2000)}`;
+async function callChatCompletionsApi(options: AiRequestOptions, systemPrompt: string, finalUserMessage: string) {
+  const { modelProfile, taskType, conversationHistory } = options;
 
-  const historyText = conversationHistory
-    .map((msg) => `${msg.role}: ${msg.content}`)
-    .join("\n");
-
-  const prompt = `${systemPrompt}\n\n${historyText}\n\nuser: ${userMessage}`;
-
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [
-              {
-                text: prompt,
-              },
-            ],
-          },
-        ],
-        generationConfig: {
-          maxOutputTokens: 1000,
-          temperature: 0.7,
-        },
-      }),
-    }
-  );
+  const response = await fetch(modelProfile.baseUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${modelProfile.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: modelProfile.model,
+      messages: buildChatCompletionMessages(systemPrompt, finalUserMessage, conversationHistory),
+      max_tokens: 1200,
+      temperature: taskType === "chat" ? 0.7 : 0.45,
+    }),
+  });
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error?.message || "Gemini API error");
+    throw new Error(await parseErrorMessage(response));
   }
 
   const data = await response.json();
-  return data.candidates[0].content.parts[0].text;
+  const outputText = data.choices?.[0]?.message?.content;
+
+  if (typeof outputText === "string" && outputText.trim()) {
+    return outputText.trim();
+  }
+
+  if (Array.isArray(outputText)) {
+    const merged = outputText
+      .map((item: any) => (typeof item?.text === "string" ? item.text : ""))
+      .filter(Boolean)
+      .join("");
+    if (merged.trim()) {
+      return merged.trim();
+    }
+  }
+
+  throw new Error("AI response did not include any chat completion text.");
+}
+
+async function callOpenAiCompatible(options: AiRequestOptions, mcpContext = "") {
+  const { taskType, userMessage, documentContext, selectionPrompt, attachments = [], modelProfile } = options;
+  const systemPrompt = buildSystemPrompt(taskType, documentContext, selectionPrompt);
+  const finalUserMessage = getFinalUserMessage(userMessage, mcpContext, attachments);
+
+  if (isChatCompletionsUrl(modelProfile.baseUrl)) {
+    return callChatCompletionsApi(options, systemPrompt, finalUserMessage);
+  }
+
+  return callResponsesApi(options, systemPrompt, finalUserMessage);
+}
+
+export async function callAI(options: AiRequestOptions): Promise<string> {
+  const { modelProfile, taskType, userMessage } = options;
+
+  let mcpContext = "";
+  if (modelProfile.mcpServerUrl.trim()) {
+    try {
+      const result = await runMcpSearch(modelProfile, userMessage);
+      if (result.text.trim()) {
+        mcpContext = `Tool: ${result.toolName}\n${result.text.trim()}`;
+      }
+    } catch (error) {
+      if (taskType === "chat") {
+        throw error;
+      }
+    }
+  }
+
+  return callOpenAiCompatible(options, mcpContext);
 }

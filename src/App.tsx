@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import AssetsPanel from "./components/AssetsPanel";
-import EditorPanel from "./components/EditorPanel";
-import CopilotPanel from "./components/CopilotPanel";
 import Header from "./components/Header";
-import TerminalPanel from "./components/TerminalPanel";
+
+const EditorPanel = lazy(() => import("./components/EditorPanel"));
+const CopilotPanel = lazy(() => import("./components/CopilotPanel"));
+const TerminalPanel = lazy(() => import("./components/TerminalPanel"));
 
 type DragTarget = "left" | "right" | "terminal" | null;
 
@@ -67,7 +68,9 @@ function App() {
           }}
         />
         <div className="workspace-center">
-          <EditorPanel />
+          <Suspense fallback={<div className="panel-loading">Loading editor...</div>}>
+            <EditorPanel />
+          </Suspense>
           <div
             className="resize-handle horizontal"
             onPointerDown={(event) => {
@@ -75,7 +78,9 @@ function App() {
               setDragTarget("terminal");
             }}
           />
-          <TerminalPanel height={terminalHeight} />
+          <Suspense fallback={<div className="panel-loading terminal-loading">Loading terminal...</div>}>
+            <TerminalPanel height={terminalHeight} />
+          </Suspense>
         </div>
         <div
           className="resize-handle vertical"
@@ -85,7 +90,9 @@ function App() {
           }}
         />
         <div className="resizable-pane right-pane" style={{ width: rightWidth }}>
-          <CopilotPanel />
+          <Suspense fallback={<div className="panel-loading">Loading copilot...</div>}>
+            <CopilotPanel />
+          </Suspense>
         </div>
       </div>
     </div>

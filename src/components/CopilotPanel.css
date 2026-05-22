@@ -1,26 +1,57 @@
 .copilot-panel {
   width: 100%;
-  background-color: #252526;
-  border-left: 1px solid #3c3c3c;
+  background:
+    radial-gradient(circle at top, rgba(58, 101, 171, 0.22), transparent 40%),
+    linear-gradient(180deg, #161b24 0%, #10151d 100%);
+  border-left: 1px solid #273143;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
 }
 
 .copilot-panel .panel-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 16px;
-  background-color: #2d2d2d;
-  border-bottom: 1px solid #3c3c3c;
+  padding: 14px 16px 10px;
+  background-color: rgba(17, 22, 31, 0.92);
+  border-bottom: 1px solid #273143;
 }
 
 .copilot-panel .panel-header h2 {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
-  color: #cccccc;
+  color: #edf3ff;
   margin: 0;
+}
+
+.copilot-header-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.copilot-header-main span {
+  color: #8ea1bd;
+  font-size: 12px;
+}
+
+.copilot-toolbar {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #273143;
+  background: rgba(13, 18, 26, 0.78);
+}
+
+.copilot-toolbar select,
+.input-area textarea {
+  background-color: #0d1420;
+  border: 1px solid #314158;
+  color: #dce7f5;
+  border-radius: 10px;
 }
 
 .chat-container {
@@ -45,7 +76,7 @@
   align-items: center;
   justify-content: center;
   height: 100%;
-  color: #858585;
+  color: #9fb1ca;
   text-align: center;
 }
 
@@ -55,7 +86,7 @@
 
 .empty-chat .hint {
   font-size: 12px;
-  color: #6e6e6e;
+  color: #72829a;
 }
 
 .message {
@@ -76,12 +107,16 @@
   max-width: 85%;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
 }
 
 .message-role {
-  font-size: 10px;
-  color: #858585;
+  font-size: 11px;
+  color: #8ca1bf;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -91,59 +126,132 @@
 }
 
 .message-text {
-  padding: 10px 14px;
-  border-radius: 8px;
+  padding: 12px 14px;
+  border-radius: 14px;
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 1.6;
   word-wrap: break-word;
+  white-space: pre-wrap;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
 }
 
 .message.user .message-text {
-  background-color: #0e639c;
+  background: linear-gradient(135deg, #255aa7 0%, #3278d3 100%);
   color: #ffffff;
 }
 
 .message.assistant .message-text {
-  background-color: #3c3c3c;
-  color: #d4d4d4;
+  background-color: #1a2230;
+  color: #e2ebf7;
+  border: 1px solid #2b3950;
 }
 
 .message-text.loading {
-  color: #858585;
+  color: #9bb0cf;
   font-style: italic;
 }
 
 .insert-button {
   align-self: flex-start;
-  background-color: #0e639c;
+  background-color: #24466f;
   color: #ffffff;
   border: none;
   padding: 6px 12px;
-  border-radius: 4px;
+  border-radius: 999px;
   font-size: 11px;
   cursor: pointer;
   transition: background-color 0.2s;
 }
 
 .insert-button:hover {
-  background-color: #1177bb;
+  background-color: #2f5c91;
 }
 
 .input-area {
   display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px 10px;
+  background-color: rgba(12, 18, 26, 0.96);
+  border-top: 1px solid #273143;
+}
+
+.input-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.attach-button,
+.clear-attachments-button {
+  display: inline-flex;
+  align-items: center;
   gap: 8px;
-  padding: 12px;
-  background-color: #2d2d2d;
-  border-top: 1px solid #3c3c3c;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: #182434;
+  color: #e6f0ff;
+}
+
+.attach-button:hover:not(:disabled),
+.clear-attachments-button:hover:not(:disabled) {
+  background: #22344d;
+}
+
+.draft-attachments,
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.draft-attachment-chip,
+.message-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  background: #162031;
+  border: 1px solid #2d405f;
+  border-radius: 12px;
+  padding: 8px 10px;
+  color: #dce6f5;
+  font-size: 12px;
+}
+
+.draft-attachment-chip > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.draft-attachment-chip span {
+  color: #8fa4c3;
+}
+
+.draft-attachment-chip button {
+  background: transparent;
+  color: #dce6f5;
+  padding: 2px;
+  border-radius: 6px;
+}
+
+.draft-attachment-chip button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.input-area textarea {
+  width: 100%;
+}
+
+.input-area > .send-button {
+  align-self: flex-end;
 }
 
 .input-area textarea {
   flex: 1;
-  background-color: #3c3c3c;
-  border: 1px solid #555;
-  color: #d4d4d4;
   padding: 10px;
-  border-radius: 6px;
+  border-radius: 12px;
   font-size: 13px;
   resize: none;
   font-family: inherit;
@@ -151,7 +259,7 @@
 
 .input-area textarea:focus {
   outline: none;
-  border-color: #007acc;
+  border-color: #4f8cff;
 }
 
 .input-area textarea:disabled {
@@ -160,11 +268,11 @@
 }
 
 .send-button {
-  background-color: #0e639c;
+  background: linear-gradient(135deg, #2b68bf 0%, #3d8df6 100%);
   color: #ffffff;
   border: none;
   padding: 8px 12px;
-  border-radius: 6px;
+  border-radius: 12px;
   cursor: pointer;
   transition: background-color 0.2s;
   display: flex;
@@ -173,10 +281,44 @@
 }
 
 .send-button:hover:not(:disabled) {
-  background-color: #1177bb;
+  filter: brightness(1.08);
 }
 
 .send-button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.copilot-footer-note {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 16px 12px;
+  color: #7f8ea6;
+  font-size: 11px;
+}
+
+.copilot-status {
+  margin: 0 16px 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #3a1821;
+  color: #ffcad5;
+  border: 1px solid #67303d;
+  font-size: 12px;
+}
+
+.chat-selection-insert {
+  position: fixed;
+  transform: translate(-50%, -100%);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: #111c2e;
+  color: #eef4ff;
+  border: 1px solid #31517c;
+  padding: 8px 12px;
+  border-radius: 999px;
+  z-index: 1500;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.3);
 }

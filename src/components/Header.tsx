@@ -1,11 +1,13 @@
-import React from "react";
+import React, { useMemo, useState } from "react";
 import { FolderOpen, SaveAll, Settings } from "lucide-react";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useFileStore } from "../stores/fileStore";
+import SettingsModal from "./SettingsModal";
 import "./Header.css";
 
 const Header: React.FC = () => {
-  const { apiKey, setApiKey, provider } = useSettingsStore();
+  const { modelProfiles, defaultChatModelId, defaultSelectionModelId } = useSettingsStore();
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const {
     rootName,
     openWorkspace,
@@ -16,57 +18,54 @@ const Header: React.FC = () => {
     setErrorMessage,
   } = useFileStore();
 
-  const handleApiKeyChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setApiKey(e.target.value);
-  };
-
   const dirtyCount = openTabs.filter((tab) => tab.isDirty).length;
+  const chatModel = useMemo(
+    () => modelProfiles.find((profile) => profile.id === defaultChatModelId) ?? null,
+    [defaultChatModelId, modelProfiles]
+  );
+  const selectionModel = useMemo(
+    () => modelProfiles.find((profile) => profile.id === defaultSelectionModelId) ?? null,
+    [defaultSelectionModelId, modelProfiles]
+  );
 
   return (
-    <header className="header">
-      <div className="header-left">
-        <div>
-          <h1 className="app-title">NovelAssistance</h1>
-          <span className="app-subtitle">
-            {rootName ? `Workspace: ${rootName}` : "AI Writing Assistant"}
-          </span>
-          {rootName && !errorMessage && (
-            <div className="workspace-hint">
-              会在 settings 文件夹中维护人物、地名、道具、招式与世界观文件，正文停顿后会自动弹出项目词条建议
-            </div>
-          )}
-          {errorMessage && (
-            <div className="workspace-error" onClick={() => setErrorMessage(null)}>
-              {errorMessage}
-            </div>
-          )}
+    <>
+      <header className="header">
+        <div className="header-left">
+          <div>
+            <h1 className="app-title">NovelAssistance</h1>
+            <span className="app-subtitle">
+              {rootName ? `Workspace: ${rootName}` : "Electron writing workspace"}
+            </span>
+            {rootName && !errorMessage && (
+              <div className="workspace-hint">
+                Chat model: {chatModel?.label || "Not configured"} · Selection model: {selectionModel?.label || "Not configured"}
+              </div>
+            )}
+            {errorMessage && (
+              <div className="workspace-error" onClick={() => setErrorMessage(null)}>
+                {errorMessage}
+              </div>
+            )}
+          </div>
         </div>
-      </div>
-      <div className="header-right">
-        <button className="workspace-button" onClick={openWorkspace} disabled={isLoadingWorkspace}>
-          <FolderOpen size={16} />
-          <span>{isLoadingWorkspace ? "Opening..." : "Open Workspace"}</span>
-        </button>
-        <button className="workspace-button" onClick={saveAllFiles} disabled={dirtyCount === 0}>
-          <SaveAll size={16} />
-          <span>{dirtyCount > 0 ? `Save All (${dirtyCount})` : "Save All"}</span>
-        </button>
-        <div className="api-key-section">
-          <label htmlFor="api-key">API Key:</label>
-          <input
-            id="api-key"
-            type="password"
-            value={apiKey}
-            onChange={handleApiKeyChange}
-            placeholder={`Enter ${provider} API Key`}
-            className="api-key-input"
-          />
+        <div className="header-right">
+          <button className="workspace-button" onClick={() => void openWorkspace()} disabled={isLoadingWorkspace}>
+            <FolderOpen size={16} />
+            <span>{isLoadingWorkspace ? "Opening..." : "Open Workspace"}</span>
+          </button>
+          <button className="workspace-button" onClick={() => void saveAllFiles()} disabled={dirtyCount === 0}>
+            <SaveAll size={16} />
+            <span>{dirtyCount > 0 ? `Save All (${dirtyCount})` : "Save All"}</span>
+          </button>
+          <button className="icon-button settings-launch" title="AI settings" onClick={() => setIsSettingsOpen(true)}>
+            <Settings size={20} />
+            <span>Settings</span>
+          </button>
         </div>
-        <button className="icon-button" title="Settings">
-          <Settings size={20} />
-        </button>
-      </div>
-    </header>
+      </header>
+      <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+    </>
   );
 };
 
