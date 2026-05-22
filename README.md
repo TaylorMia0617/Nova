@@ -1,120 +1,188 @@
-# NovelAssistance - AI Writing Assistant
+# NovelAssistance
 
-A local-first, privacy-focused AI-powered writing assistant for novelists and creative writers.
+Local-first desktop writing workspace for novel drafting, reference management, and AI-assisted writing.
+
+## Current Runtime
+
+This project currently ships on `Electron`.
+
+- `src-tauri/` is legacy exploration material and is not the active desktop runtime.
+- Development, packaging, terminal integration, and file access all run through the Electron app.
 
 ## Features
 
-### Phase 1 (MVP) - Current Implementation
+- Three-column desktop layout:
+  Explorer, editor, and AI copilot
+- Real workspace file management:
+  open, create, rename, duplicate, move, and delete files/folders
+- Monaco-based editor with Markdown-focused formatting
+- Local reference files for characters, places, items, skills, and world notes
+- Integrated terminal in the Electron app
+- BYOK AI support for OpenAI-compatible endpoints and remote MCP-assisted workflows
 
-- **Three-Column Immersive Layout**
-  - Left: Assets Manager with file system support
-  - Center: Monaco Editor for Markdown editing
-  - Right: AI Copilot for real-time assistance
+## Security and Data Behavior
 
-- **File System Management**
-  - Create and manage multiple files and folders
-  - Organize chapters, outlines, and drafts
-  - Persistent storage using Zustand
+- Workspace file operations are restricted to the currently opened workspace root.
+- API keys are session-only by default.
+- Users can explicitly enable local API key persistence on the current device.
+- Copilot conversations are stored per-workspace inside `.novel-assistance/conversations/`.
 
-- **AI Integration**
-  - Support for OpenAI (GPT-4o-mini) and Google Gemini APIs
-  - BYOK (Bring Your Own Key) model - API keys stored locally
-  - Context-aware AI assistance with document content
-  - AI text expansion functionality
-  - Chat interface with conversation history
+## AI Request Rules
 
-- **Privacy & Security**
-  - All data stored locally on your machine
-  - API keys stored in browser localStorage
-  - No server intermediation
+### 1. Supported AI API styles
 
-## Tech Stack
+The app currently supports two OpenAI-compatible request styles:
 
-- **Frontend**: React 19 + TypeScript
-- **Desktop Framework**: Tauri 2.0
-- **State Management**: Zustand with persistence
-- **Editor**: Monaco Editor (VS Code's editor)
-- **Icons**: Lucide React
-- **Build Tool**: Vite
+- `Responses API`
+  Example endpoint:
+  `https://api.openai.com/v1/responses`
+- `Chat Completions API`
+  Example endpoint:
+  `https://api.deepseek.com/v1/chat/completions`
 
-## Getting Started
+The app automatically chooses the request format based on the `AI Base URL`:
+
+- If the URL ends with `/v1/responses`, the app sends:
+  `model + instructions + input + max_output_tokens`
+- If the URL ends with `/v1/chat/completions`, the app sends:
+  `model + messages + max_tokens`
+
+Important:
+
+- `AI Base URL` must be a full request endpoint, not only a service root.
+- Example of correct values:
+  `https://api.openai.com/v1/responses`
+  `https://api.deepseek.com/v1/chat/completions`
+- Example of incorrect values:
+  `https://api.deepseek.com`
+  `https://api.openai.com`
+
+### 2. Model profile fields
+
+Each model profile contains:
+
+- `Name`
+- `Model ID`
+- `AI Base URL`
+- `API Key`
+- `MCP Server URL` (optional)
+- `Remember secrets on this device`
+
+Rules:
+
+- `Model ID` must match the target provider's actual model name.
+- `API Key` is always sent as:
+  `Authorization: Bearer <your-key>`
+- If your provider needs extra custom headers, the current UI does not yet expose them.
+- Anthropic-style endpoints are not currently supported unless they also expose an OpenAI-compatible path.
+
+### 3. MCP behavior
+
+`MCP Server URL` is optional.
+
+- Leave it empty if you only want direct AI chat.
+- Fill it only when you have a remote MCP server endpoint.
+
+Important distinction:
+
+- `AI Base URL` is the model request endpoint.
+- `MCP Server URL` is the remote MCP tool server endpoint.
+
+They are not the same thing.
+
+When `MCP Server URL` is configured:
+
+- the app first attempts a minimal MCP tool lookup / call flow
+- returned MCP text context is appended to the final AI prompt
+- if MCP fails during chat requests, the request fails with the returned error
+
+### 4. Conversation and context rules
+
+- Copilot memory is stored per workspace in:
+  `.novel-assistance/conversations/`
+- The current editor file content is included as document context.
+- Recent chat history is included in the AI request.
+- Attached text files are converted into plain-text context and appended to the prompt.
+- Attachments are not uploaded as binary files and do not use multimodal file APIs.
+
+### 5. Attachment rules
+
+Supported attachment types are text-oriented files only, including:
+
+- `txt`
+- `md`
+- `json`
+- `csv`
+- `yaml`
+- `yml`
+- `xml`
+- `html`
+- `js`
+- `ts`
+- `py`
+- `rs`
+- `java`
+- `c`
+- `cpp`
+
+Rules:
+
+- Attachments are read locally by Electron.
+- The app stores attachment metadata and text content in conversation history.
+- Attachments are added to the prompt as supplemental context.
+- PDF / DOCX attachments are not parsed in the current version.
+
+### 6. Request troubleshooting
+
+If a request fails:
+
+- `401 Unauthorized`
+  Usually means the API key is invalid, rejected by an upstream gateway, or the endpoint does not accept the current auth style.
+- `No response text`
+  Usually means the endpoint is not actually compatible with the request format implied by the URL.
+- MCP errors
+  Usually mean the `MCP Server URL` is not a valid remote MCP endpoint, or its tool contract differs from the minimal integration used here.
+
+Recommended checks:
+
+1. Confirm `AI Base URL` is a full endpoint.
+2. Confirm the endpoint is either `responses`-compatible or `chat/completions`-compatible.
+3. Confirm the `Model ID` matches the provider.
+4. Confirm the same key and endpoint work in `curl`.
+5. If `curl` works but the app does not, compare headers and request body format.
+
+## Development
 
 ### Prerequisites
 
-- Node.js (v18 or higher)
-- npm or yarn
-- Rust toolchain (for Tauri)
+- Node.js 18+
+- npm
 
-### Installation
+### Install
 
-1. Clone the repository:
-```bash
-git clone <repository-url>
-cd NovelAssistance
-```
-
-2. Install dependencies:
 ```bash
 npm install
 ```
 
-3. Run the development server:
-```bash
-npm run tauri dev
-```
-
-### Building for Production
+### Run the desktop app
 
 ```bash
-npm run tauri build
+npm run desktop:dev
 ```
 
-## Usage
+This starts Vite and then launches Electron against the local renderer.
 
-1. **Enter API Key**: Add your OpenAI or Gemini API key in the header
-2. **Select File**: Click on a file in the Assets panel to start editing
-3. **Write**: Use the Monaco Editor to write your novel
-4. **AI Assistance**: 
-   - Type questions in the Copilot panel for writing help
-   - Click the sparkle icon to expand your current text
-   - Use "Insert to Editor" to add AI-generated content
+### Build the desktop app
 
-## Project Structure
-
-```
-NovelAssistance/
-├── src/
-│   ├── components/          # React components
-│   │   ├── AssetsPanel.tsx  # File system manager
-│   │   ├── EditorPanel.tsx  # Monaco editor
-│   │   ├── CopilotPanel.tsx # AI chat interface
-│   │   └── Header.tsx      # App header with API key input
-│   ├── stores/             # Zustand state management
-│   │   ├── fileStore.ts    # File system state
-│   │   └── settingsStore.ts # Settings (API keys, etc.)
-│   ├── services/           # API services
-│   │   └── aiService.ts    # AI API integration
-│   ├── App.tsx             # Main app component
-│   ├── main.tsx            # Entry point
-│   └── styles.css          # Global styles
-├── src-tauri/              # Tauri backend (Rust)
-│   ├── src/
-│   │   └── main.rs         # Tauri entry point
-│   └── tauri.conf.json     # Tauri configuration
-└── package.json            # Node dependencies
+```bash
+npm run desktop:build
 ```
 
-## Roadmap
+## Project Notes
 
-- [x] Phase 1 (MVP): Three-column layout with basic AI expansion
-- [ ] Phase 2 (Logic): World-building and character management pages
-- [ ] Phase 3 (Optimization): Gemini Context Caching for long novels
-- [ ] Phase 4 (Advanced): Timeline logic conflict detection
+- The workspace `settings` folder stores built-in reference text files used by editor suggestions.
+- External workspace edits are refreshed through workspace change events and window focus recovery instead of fixed polling.
 
 ## License
 
-MIT License - feel free to use this project for your creative writing needs!
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit issues or pull requests.
+MIT

@@ -10,6 +10,7 @@ files:
   - filter:
       - dist/**/*
       - electron/**/*
+      - shared/**/*
       - node_modules/node-pty/**/*
       - package.json
 win:
