@@ -130,3 +130,7 @@ input, textarea {
   color: #10301a;
   background: #9effa1;
 }
+
+.monaco-editor .suggest-widget {
+  z-index: 1200 !important;
+}

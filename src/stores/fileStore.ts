@@ -13,21 +13,49 @@ import {
   writeFile,
 } from "../services/fileSystemService";
 
+const SETTINGS_FOLDER_NAME = "settings";
 const CHARACTER_FILE_NAME = "\u4eba\u7269\u5217\u8868.txt";
 const PLACE_FILE_NAME = "\u5730\u7406\u540d\u79f0.txt";
 const ITEM_FILE_NAME = "\u9053\u5177\u540d\u79f0.txt";
+const SKILL_FILE_NAME = "\u62db\u5f0f\u5217\u8868.txt";
+const WORLD_FILE_NAME = "\u4e16\u754c\u89c2.txt";
 
-const CHARACTER_FILE_TEMPLATE = `{{\u6797\u79cb}} \u51b7\u9759\u514b\u5236\u7684\u4fa6\u63a2\uff0c\u89c2\u5bdf\u529b\u6781\u5f3a
+const PROJECT_REFERENCE_DEFINITIONS = [
+  {
+    key: "character",
+    fileName: CHARACTER_FILE_NAME,
+    template: `{{\u6797\u79cb}} \u51b7\u9759\u514b\u5236\u7684\u4fa6\u63a2\uff0c\u89c2\u5bdf\u529b\u6781\u5f3a
 {{\u987e\u5b81}} \u5916\u8868\u6e29\u548c\uff0c\u771f\u5b9e\u8eab\u4efd\u6210\u8c1c
-`;
-
-const PLACE_FILE_TEMPLATE = `{{\u9ed1\u6cb3\u9547}} \u5e38\u5e74\u96fe\u6c14\u7b3c\u7f69\u7684\u5c0f\u9547\uff0c\u662f\u6545\u4e8b\u7684\u4e3b\u8981\u821e\u53f0
+`,
+  },
+  {
+    key: "place",
+    fileName: PLACE_FILE_NAME,
+    template: `{{\u9ed1\u6cb3\u9547}} \u5e38\u5e74\u96fe\u6c14\u7b3c\u7f69\u7684\u5c0f\u9547\uff0c\u662f\u6545\u4e8b\u7684\u4e3b\u8981\u821e\u53f0
 {{\u957f\u68a6\u68ee\u6797}} \u9760\u8fd1\u9547\u5916\u7684\u539f\u59cb\u68ee\u6797\uff0c\u4f20\u95fb\u9690\u85cf\u7740\u8bb8\u591a\u79d8\u5bc6
-`;
-
-const ITEM_FILE_TEMPLATE = `{{\u94dc\u949f}} \u53d1\u751f\u5f02\u5e38\u65f6\u4f1a\u81ea\u884c\u54cd\u8d77\u7684\u53e4\u8001\u9053\u5177
+`,
+  },
+  {
+    key: "item",
+    fileName: ITEM_FILE_NAME,
+    template: `{{\u94dc\u949f}} \u53d1\u751f\u5f02\u5e38\u65f6\u4f1a\u81ea\u884c\u54cd\u8d77\u7684\u53e4\u8001\u9053\u5177
 {{\u94f6\u8272\u94a5\u5319}} \u53ef\u4ee5\u6253\u5f00\u65e7\u5b85\u5730\u4e0b\u5ba4\u7684\u552f\u4e00\u94a5\u5319
-`;
+`,
+  },
+  {
+    key: "skill",
+    fileName: SKILL_FILE_NAME,
+    template: `{{\u65ad\u6708}} \u4ee5\u6781\u5feb\u5200\u52bf\u5f62\u6210\u7684\u5f27\u5f62\u659c\u65a9
+{{\u8e0f\u98ce\u6b65}} \u77ed\u8ddd\u79bb\u9ad8\u901f\u632a\u79fb\u7684\u8eab\u6cd5
+`,
+  },
+  {
+    key: "world",
+    fileName: WORLD_FILE_NAME,
+    template: `\u5199\u4e0b\u4e16\u754c\u89c2\u80cc\u666f\u3001\u5386\u53f2\u6cbf\u9769\u3001\u9635\u8425\u5173\u7cfb\u4e0e\u89c4\u5219\u8bbe\u5b9a\u3002
+`,
+  },
+] as const;
 
 export interface OpenFileTab {
   path: string;
@@ -43,7 +71,7 @@ export interface NamedEntry {
 }
 
 export interface ReferenceEntry extends NamedEntry {
-  category: "character" | "place" | "item";
+  category: "character" | "place" | "item" | "skill";
 }
 
 interface FileState {
@@ -55,10 +83,13 @@ interface FileState {
   characterEntries: NamedEntry[];
   placeEntries: NamedEntry[];
   itemEntries: NamedEntry[];
+  skillEntries: NamedEntry[];
   referenceEntries: ReferenceEntry[];
   characterFilePath: string | null;
   placeFilePath: string | null;
   itemFilePath: string | null;
+  skillFilePath: string | null;
+  worldFilePath: string | null;
   isLoadingWorkspace: boolean;
   errorMessage: string | null;
   setErrorMessage: (message: string | null) => void;
@@ -154,6 +185,19 @@ function findReferenceFilePath(nodes: WorkspaceNode[], fileName: string): string
   return null;
 }
 
+function findFolderPath(nodes: WorkspaceNode[], folderName: string): string | null {
+  for (const node of nodes) {
+    if (node.type === "folder" && node.name === folderName) {
+      return node.path;
+    }
+    if (node.children) {
+      const found = findFolderPath(node.children, folderName);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 function parseNamedEntries(content: string): NamedEntry[] {
   return content
     .split(/\r?\n/)
@@ -173,40 +217,99 @@ function parseNamedEntries(content: string): NamedEntry[] {
 function buildReferenceEntries(
   characters: NamedEntry[],
   places: NamedEntry[],
-  items: NamedEntry[]
+  items: NamedEntry[],
+  skills: NamedEntry[]
 ): ReferenceEntry[] {
   return [
     ...characters.map((entry) => ({ ...entry, category: "character" as const })),
     ...places.map((entry) => ({ ...entry, category: "place" as const })),
     ...items.map((entry) => ({ ...entry, category: "item" as const })),
+    ...skills.map((entry) => ({ ...entry, category: "skill" as const })),
   ];
 }
 
-async function ensureReferenceFile(
+async function ensureProjectReferenceFiles(
   rootPath: string,
-  files: WorkspaceNode[],
-  fileName: string,
-  template: string
-): Promise<string> {
-  const existingPath = findReferenceFilePath(files, fileName);
-  if (existingPath) return existingPath;
+  files: WorkspaceNode[]
+): Promise<Record<(typeof PROJECT_REFERENCE_DEFINITIONS)[number]["key"], string>> {
+  const existingPaths = Object.fromEntries(
+    PROJECT_REFERENCE_DEFINITIONS.map((definition) => [
+      definition.key,
+      findReferenceFilePath(files, definition.fileName),
+    ])
+  ) as Record<(typeof PROJECT_REFERENCE_DEFINITIONS)[number]["key"], string | null>;
 
-  const filePath = joinPath(rootPath, fileName);
-  await createFileOnDisk(filePath);
-  await writeFile(filePath, template);
-  return filePath;
+  const hasAnyExistingReference = Object.values(existingPaths).some(Boolean);
+  const hasAllExistingReference = PROJECT_REFERENCE_DEFINITIONS.every((definition) => existingPaths[definition.key]);
+
+  if (hasAllExistingReference) {
+    return Object.fromEntries(
+      PROJECT_REFERENCE_DEFINITIONS.map((definition) => [definition.key, existingPaths[definition.key] as string])
+    ) as Record<(typeof PROJECT_REFERENCE_DEFINITIONS)[number]["key"], string>;
+  }
+
+  const existingSettingsFolderPath = findFolderPath(files, SETTINGS_FOLDER_NAME);
+  const settingsFolderPath = existingSettingsFolderPath ?? joinPath(rootPath, SETTINGS_FOLDER_NAME);
+
+  if (!existingSettingsFolderPath) {
+    try {
+      await createFolderOnDisk(settingsFolderPath);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes("already exists")) {
+        throw error;
+      }
+    }
+  }
+
+  const result = {} as Record<(typeof PROJECT_REFERENCE_DEFINITIONS)[number]["key"], string>;
+
+  for (const definition of PROJECT_REFERENCE_DEFINITIONS) {
+    const existingPath = existingPaths[definition.key];
+    if (existingPath) {
+      result[definition.key] = existingPath;
+      continue;
+    }
+
+    const filePath = joinPath(settingsFolderPath, definition.fileName);
+    try {
+      await createFileOnDisk(filePath);
+      await writeFile(filePath, definition.template);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes("already exists")) {
+        throw error;
+      }
+    }
+    result[definition.key] = filePath;
+  }
+
+  if (!hasAnyExistingReference) {
+    return result;
+  }
+
+  return {
+    ...Object.fromEntries(
+      PROJECT_REFERENCE_DEFINITIONS.map((definition) => [
+        definition.key,
+        existingPaths[definition.key] ?? result[definition.key],
+      ])
+    ),
+  } as Record<(typeof PROJECT_REFERENCE_DEFINITIONS)[number]["key"], string>;
 }
 
 function buildReferenceState(
   characterEntries: NamedEntry[],
   placeEntries: NamedEntry[],
-  itemEntries: NamedEntry[]
+  itemEntries: NamedEntry[],
+  skillEntries: NamedEntry[]
 ) {
   return {
     characterEntries,
     placeEntries,
     itemEntries,
-    referenceEntries: buildReferenceEntries(characterEntries, placeEntries, itemEntries),
+    skillEntries,
+    referenceEntries: buildReferenceEntries(characterEntries, placeEntries, itemEntries, skillEntries),
   };
 }
 
@@ -219,10 +322,13 @@ export const useFileStore = create<FileState>()((set, get) => ({
   characterEntries: [],
   placeEntries: [],
   itemEntries: [],
+  skillEntries: [],
   referenceEntries: [],
   characterFilePath: null,
   placeFilePath: null,
   itemFilePath: null,
+  skillFilePath: null,
+  worldFilePath: null,
   isLoadingWorkspace: false,
   errorMessage: null,
   setErrorMessage: (message) => set({ errorMessage: message }),
@@ -237,30 +343,14 @@ export const useFileStore = create<FileState>()((set, get) => ({
       }
 
       let workspace = await loadWorkspace(selectedPath);
-      const characterFilePath = await ensureReferenceFile(
-        workspace.rootPath,
-        workspace.nodes,
-        CHARACTER_FILE_NAME,
-        CHARACTER_FILE_TEMPLATE
-      );
-      const placeFilePath = await ensureReferenceFile(
-        workspace.rootPath,
-        workspace.nodes,
-        PLACE_FILE_NAME,
-        PLACE_FILE_TEMPLATE
-      );
-      const itemFilePath = await ensureReferenceFile(
-        workspace.rootPath,
-        workspace.nodes,
-        ITEM_FILE_NAME,
-        ITEM_FILE_TEMPLATE
-      );
+      const referencePaths = await ensureProjectReferenceFiles(workspace.rootPath, workspace.nodes);
 
       workspace = await loadWorkspace(selectedPath);
 
-      const characterEntries = parseNamedEntries(await readFile(characterFilePath));
-      const placeEntries = parseNamedEntries(await readFile(placeFilePath));
-      const itemEntries = parseNamedEntries(await readFile(itemFilePath));
+      const characterEntries = parseNamedEntries(await readFile(referencePaths.character));
+      const placeEntries = parseNamedEntries(await readFile(referencePaths.place));
+      const itemEntries = parseNamedEntries(await readFile(referencePaths.item));
+      const skillEntries = parseNamedEntries(await readFile(referencePaths.skill));
 
       set({
         rootPath: workspace.rootPath,
@@ -268,10 +358,12 @@ export const useFileStore = create<FileState>()((set, get) => ({
         files: workspace.nodes,
         openTabs: [],
         activeFile: null,
-        characterFilePath,
-        placeFilePath,
-        itemFilePath,
-        ...buildReferenceState(characterEntries, placeEntries, itemEntries),
+        characterFilePath: referencePaths.character,
+        placeFilePath: referencePaths.place,
+        itemFilePath: referencePaths.item,
+        skillFilePath: referencePaths.skill,
+        worldFilePath: referencePaths.world,
+        ...buildReferenceState(characterEntries, placeEntries, itemEntries, skillEntries),
         errorMessage: null,
         isLoadingWorkspace: false,
       });
@@ -288,7 +380,25 @@ export const useFileStore = create<FileState>()((set, get) => ({
 
     try {
       const workspace = await loadWorkspace(rootPath);
-      const validTabs = openTabs.filter((tab) => getNodeByPath(workspace.nodes, tab.path));
+      const validTabs = await Promise.all(
+        openTabs
+          .filter((tab) => getNodeByPath(workspace.nodes, tab.path))
+          .map(async (tab) => {
+            if (tab.isDirty) return tab;
+
+            try {
+              const diskContent = await readFile(tab.path);
+              return {
+                ...tab,
+                content: diskContent,
+                savedContent: diskContent,
+                isDirty: false,
+              };
+            } catch {
+              return tab;
+            }
+          })
+      );
       const nextActiveFile =
         activeFile && validTabs.some((tab) => tab.path === activeFile.path)
           ? validTabs.find((tab) => tab.path === activeFile.path) ?? null
@@ -297,10 +407,13 @@ export const useFileStore = create<FileState>()((set, get) => ({
       const characterFilePath = findReferenceFilePath(workspace.nodes, CHARACTER_FILE_NAME);
       const placeFilePath = findReferenceFilePath(workspace.nodes, PLACE_FILE_NAME);
       const itemFilePath = findReferenceFilePath(workspace.nodes, ITEM_FILE_NAME);
+      const skillFilePath = findReferenceFilePath(workspace.nodes, SKILL_FILE_NAME);
+      const worldFilePath = findReferenceFilePath(workspace.nodes, WORLD_FILE_NAME);
 
       const characterEntries = characterFilePath ? parseNamedEntries(await readFile(characterFilePath)) : [];
       const placeEntries = placeFilePath ? parseNamedEntries(await readFile(placeFilePath)) : [];
       const itemEntries = itemFilePath ? parseNamedEntries(await readFile(itemFilePath)) : [];
+      const skillEntries = skillFilePath ? parseNamedEntries(await readFile(skillFilePath)) : [];
 
       set({
         rootName: workspace.rootName,
@@ -310,7 +423,9 @@ export const useFileStore = create<FileState>()((set, get) => ({
         characterFilePath,
         placeFilePath,
         itemFilePath,
-        ...buildReferenceState(characterEntries, placeEntries, itemEntries),
+        skillFilePath,
+        worldFilePath,
+        ...buildReferenceState(characterEntries, placeEntries, itemEntries, skillEntries),
         errorMessage: null,
       });
     } catch (error) {
@@ -346,11 +461,13 @@ export const useFileStore = create<FileState>()((set, get) => ({
           path === state.placeFilePath ? parseNamedEntries(content) : state.placeEntries;
         const nextItemEntries =
           path === state.itemFilePath ? parseNamedEntries(content) : state.itemEntries;
+        const nextSkillEntries =
+          path === state.skillFilePath ? parseNamedEntries(content) : state.skillEntries;
 
         return {
           openTabs: [...state.openTabs, newTab],
           activeFile: newTab,
-          ...buildReferenceState(nextCharacterEntries, nextPlaceEntries, nextItemEntries),
+          ...buildReferenceState(nextCharacterEntries, nextPlaceEntries, nextItemEntries, nextSkillEntries),
           errorMessage: null,
         };
       });
@@ -401,11 +518,13 @@ export const useFileStore = create<FileState>()((set, get) => ({
         path === state.placeFilePath ? parseNamedEntries(content) : state.placeEntries;
       const nextItemEntries =
         path === state.itemFilePath ? parseNamedEntries(content) : state.itemEntries;
+      const nextSkillEntries =
+        path === state.skillFilePath ? parseNamedEntries(content) : state.skillEntries;
 
       return {
         openTabs: nextTabs,
         activeFile: nextTabs.find((tab) => tab.path === state.activeFile?.path) ?? null,
-        ...buildReferenceState(nextCharacterEntries, nextPlaceEntries, nextItemEntries),
+        ...buildReferenceState(nextCharacterEntries, nextPlaceEntries, nextItemEntries, nextSkillEntries),
       };
     });
   },
@@ -436,11 +555,13 @@ export const useFileStore = create<FileState>()((set, get) => ({
           targetPath === state.placeFilePath ? parseNamedEntries(tab.content) : state.placeEntries;
         const nextItemEntries =
           targetPath === state.itemFilePath ? parseNamedEntries(tab.content) : state.itemEntries;
+        const nextSkillEntries =
+          targetPath === state.skillFilePath ? parseNamedEntries(tab.content) : state.skillEntries;
 
         return {
           openTabs: nextTabs,
           activeFile: nextTabs.find((item) => item.path === state.activeFile?.path) ?? null,
-          ...buildReferenceState(nextCharacterEntries, nextPlaceEntries, nextItemEntries),
+          ...buildReferenceState(nextCharacterEntries, nextPlaceEntries, nextItemEntries, nextSkillEntries),
           errorMessage: null,
         };
       });
@@ -512,6 +633,14 @@ export const useFileStore = create<FileState>()((set, get) => ({
             state.itemFilePath && isSameOrDescendantPath(state.itemFilePath, path)
               ? state.itemFilePath.replace(path, newPath)
               : state.itemFilePath,
+          skillFilePath:
+            state.skillFilePath && isSameOrDescendantPath(state.skillFilePath, path)
+              ? state.skillFilePath.replace(path, newPath)
+              : state.skillFilePath,
+          worldFilePath:
+            state.worldFilePath && isSameOrDescendantPath(state.worldFilePath, path)
+              ? state.worldFilePath.replace(path, newPath)
+              : state.worldFilePath,
           errorMessage: null,
         };
       });
@@ -556,10 +685,19 @@ export const useFileStore = create<FileState>()((set, get) => ({
           state.itemFilePath && isSameOrDescendantPath(state.itemFilePath, path)
             ? null
             : state.itemFilePath;
+        const nextSkillFilePath =
+          state.skillFilePath && isSameOrDescendantPath(state.skillFilePath, path)
+            ? null
+            : state.skillFilePath;
+        const nextWorldFilePath =
+          state.worldFilePath && isSameOrDescendantPath(state.worldFilePath, path)
+            ? null
+            : state.worldFilePath;
 
         const nextCharacterEntries = nextCharacterFilePath ? state.characterEntries : [];
         const nextPlaceEntries = nextPlaceFilePath ? state.placeEntries : [];
         const nextItemEntries = nextItemFilePath ? state.itemEntries : [];
+        const nextSkillEntries = nextSkillFilePath ? state.skillEntries : [];
 
         return {
           openTabs: nextTabs,
@@ -567,7 +705,9 @@ export const useFileStore = create<FileState>()((set, get) => ({
           characterFilePath: nextCharacterFilePath,
           placeFilePath: nextPlaceFilePath,
           itemFilePath: nextItemFilePath,
-          ...buildReferenceState(nextCharacterEntries, nextPlaceEntries, nextItemEntries),
+          skillFilePath: nextSkillFilePath,
+          worldFilePath: nextWorldFilePath,
+          ...buildReferenceState(nextCharacterEntries, nextPlaceEntries, nextItemEntries, nextSkillEntries),
           errorMessage: null,
         };
       });
@@ -601,6 +741,14 @@ export const useFileStore = create<FileState>()((set, get) => ({
             state.itemFilePath && isSameOrDescendantPath(state.itemFilePath, sourcePath)
               ? state.itemFilePath.replace(sourcePath, newPath)
               : state.itemFilePath,
+          skillFilePath:
+            state.skillFilePath && isSameOrDescendantPath(state.skillFilePath, sourcePath)
+              ? state.skillFilePath.replace(sourcePath, newPath)
+              : state.skillFilePath,
+          worldFilePath:
+            state.worldFilePath && isSameOrDescendantPath(state.worldFilePath, sourcePath)
+              ? state.worldFilePath.replace(sourcePath, newPath)
+              : state.worldFilePath,
           errorMessage: null,
         };
       });

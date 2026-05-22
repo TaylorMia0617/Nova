@@ -32,7 +32,7 @@ const Header: React.FC = () => {
           </span>
           {rootName && !errorMessage && (
             <div className="workspace-hint">
-              会自动创建“人物列表.txt”“地理名称.txt”“道具名称.txt”，正文里停顿 1 秒可弹出名称提示
+              会在 settings 文件夹中维护人物、地名、道具、招式与世界观文件，正文停顿后会自动弹出项目词条建议
             </div>
           )}
           {errorMessage && (
