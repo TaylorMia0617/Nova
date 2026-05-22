@@ -1,5 +1,6 @@
 .editor-panel {
   flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background-color: #1e1e1e;
@@ -68,7 +69,8 @@
 .editor-panel .panel-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
+  gap: 12px;
   padding: 12px 16px;
   background-color: #252526;
   border-bottom: 1px solid #3c3c3c;
@@ -92,8 +94,72 @@
   color: #8c8c8c;
 }
 
+.panel-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.format-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 6px;
+  border: 1px solid #3c3c3c;
+  border-radius: 8px;
+  background: #1f1f1f;
+}
+
+.panel-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  background: transparent;
+  color: #cccccc;
+  transition: background-color 0.2s, color 0.2s;
+}
+
+.panel-actions button:hover:not(:disabled) {
+  background: #2f3440;
+  color: #ffffff;
+}
+
+.panel-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.panel-actions button.active,
+.panel-actions .toolbar-button.active {
+  background: #2f3440;
+  color: #ffffff;
+  box-shadow: inset 0 0 0 1px #4f8cff;
+}
+
+.toolbar-select {
+  min-width: 96px;
+  height: 32px;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+  background: #181818;
+  color: #d6d6d6;
+  font-size: 12px;
+  padding: 0 10px;
+}
+
+.toolbar-size {
+  min-width: 74px;
+}
+
 .editor-container {
   flex: 1;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -115,4 +181,14 @@
   color: #ffffff;
   font-size: 12px;
   border-top: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.monaco-editor .view-line.editor-align-center,
+.monaco-editor .margin-view-overlays .line-numbers.editor-align-center {
+  text-align: center;
+}
+
+.monaco-editor .view-line.editor-align-right,
+.monaco-editor .margin-view-overlays .line-numbers.editor-align-right {
+  text-align: right;
 }

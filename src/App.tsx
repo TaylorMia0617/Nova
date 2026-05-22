@@ -8,6 +8,8 @@ import TerminalPanel from "./components/TerminalPanel";
 type DragTarget = "left" | "right" | "terminal" | null;
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+const MIN_EDITOR_HEIGHT = 120;
+const MIN_TERMINAL_HEIGHT = 120;
 
 function App() {
   const [leftWidth, setLeftWidth] = useState(280);
@@ -28,7 +30,14 @@ function App() {
       }
 
       if (dragTarget === "terminal") {
-        setTerminalHeight(clamp(window.innerHeight - event.clientY, 120, 520));
+        const headerElement = document.querySelector(".header");
+        const headerHeight = headerElement instanceof HTMLElement ? headerElement.offsetHeight : 0;
+        const maxTerminalHeight = Math.max(
+          MIN_TERMINAL_HEIGHT,
+          window.innerHeight - headerHeight - MIN_EDITOR_HEIGHT
+        );
+
+        setTerminalHeight(clamp(window.innerHeight - event.clientY, MIN_TERMINAL_HEIGHT, maxTerminalHeight));
       }
     };
 
