@@ -203,7 +203,7 @@ function assertValidNewEntryName(name: string): string {
 }
 
 function withDefaultMarkdownExtension(name: string): string {
-  return /\.[^./\\]+$/.test(name) ? name : `${name}.md`;
+  return /\.[^./\\]+$/.test(name) ? name : `${name}.txt`;
 }
 
 function updateTabsWithRenamedPath(
