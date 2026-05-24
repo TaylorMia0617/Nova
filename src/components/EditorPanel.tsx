@@ -17,6 +17,7 @@ import {
 import { useFileStore } from "../stores/fileStore";
 import { useSettingsStore } from "../stores/settingsStore";
 import { callAI } from "../services/aiService";
+import { readFile, type WorkspaceNode } from "../services/fileSystemService";
 import {
   applySelectionPreview,
   registerEditorBridge,
@@ -24,6 +25,7 @@ import {
 import { exportDocument, getExportTemplates } from "../services/documentExportService";
 import type { ExportFormat, ExportTemplateId } from "../types/export";
 import { onWorkspaceChanged, unwatchWorkspace, watchWorkspace } from "../services/terminalService";
+import { compareNodeNames } from "../../shared/workspaceSort.js";
 import "./EditorPanel.css";
 
 const CHARACTER_FILE_NAME = "\u4eba\u7269\u5217\u8868.txt";
@@ -39,6 +41,7 @@ const AUTO_SAVE_DELAY_MS = 3000;
 const REFERENCE_PUNCTUATION = /[。！？!?；;]$/;
 const DEFAULT_EDITOR_FONT_FAMILY = "'Noto Serif SC', 'Source Han Serif SC', Georgia, serif";
 const DEFAULT_EDITOR_FONT_SIZE = 14;
+const TXT_MERGE_EXTENSIONS = new Set([".txt", ".md", ".markdown"]);
 
 type HeadingState = "body" | "h1" | "h2" | "h3";
 type AlignmentMode = "center" | "right";
@@ -109,6 +112,31 @@ const mergeAlignmentBlocks = (blocks: AlignmentBlock[]) => {
   return merged;
 };
 
+const getPathSeparator = (path: string) => (path.includes("\\") ? "\\" : "/");
+
+const getParentPath = (path: string): string => {
+  const separator = getPathSeparator(path);
+  const lastIndex = path.lastIndexOf(separator);
+  return lastIndex <= 0 ? path : path.slice(0, lastIndex);
+};
+
+const getFileExtension = (name: string): string => {
+  const dotIndex = name.lastIndexOf(".");
+  if (dotIndex === -1) return "";
+  return name.slice(dotIndex).toLowerCase();
+};
+
+const findFolderNodeByPath = (nodes: WorkspaceNode[], path: string): WorkspaceNode | null => {
+  for (const node of nodes) {
+    if (node.type === "folder" && node.path === path) return node;
+    if (node.children) {
+      const found = findFolderNodeByPath(node.children, path);
+      if (found) return found;
+    }
+  }
+  return null;
+};
+
 const registerMarkdownHeadingFolding = (monaco: any) => {
   if (markdownFoldingProviderRegistered) return;
 
@@ -153,6 +181,7 @@ const registerMarkdownHeadingFolding = (monaco: any) => {
 
 const EditorPanel: React.FC = () => {
   const {
+    files,
     activeFile,
     openTabs,
     referenceEntries,
@@ -760,20 +789,56 @@ const EditorPanel: React.FC = () => {
   }, [activeFile?.path, isReferenceFile]);
 
   const handleExport = async () => {
-    if (!activeFile?.content.trim()) {
+    if (!activeFile) {
       setExportError("There is no content to export.");
       return;
     }
 
     try {
-      const filenameBase = activeFile.name.replace(/\.[^/.]+$/, "");
-      await exportDocument({
-        format: exportFormat,
-        templateId: exportTemplateId,
-        title: filenameBase || activeFile.name,
-        content: activeFile.content,
-        filenameBase: filenameBase || "document",
-      });
+      if (exportFormat === "txt") {
+        const parentPath = getParentPath(activeFile.path);
+        const parentFolder = findFolderNodeByPath(files, parentPath);
+        const siblingFiles = (parentFolder?.children ?? [])
+          .filter((node): node is WorkspaceNode => node.type === "file")
+          .filter((node) => TXT_MERGE_EXTENSIONS.has(getFileExtension(node.name)))
+          .sort((left, right) => compareNodeNames(left.name, right.name));
+
+        if (siblingFiles.length === 0) {
+          throw new Error("No text files were found in this folder to merge and export.");
+        }
+
+        const mergedContents = await Promise.all(
+          siblingFiles.map(async (fileNode) => {
+            const text = await readFile(fileNode.path);
+            return text.replace(/\s+$/, "");
+          })
+        );
+
+        const mergedContent = mergedContents.join("\n\n");
+        const filenameBase = `${parentFolder?.name || activeFile.name.replace(/\.[^/.]+$/, "")}-merged`;
+
+        await exportDocument({
+          format: "txt",
+          templateId: exportTemplateId,
+          title: filenameBase,
+          content: mergedContent,
+          filenameBase: filenameBase || "document-merged",
+        });
+      } else {
+        if (!activeFile.content.trim()) {
+          setExportError("There is no content to export.");
+          return;
+        }
+
+        const filenameBase = activeFile.name.replace(/\.[^/.]+$/, "");
+        await exportDocument({
+          format: exportFormat,
+          templateId: exportTemplateId,
+          title: filenameBase || activeFile.name,
+          content: activeFile.content,
+          filenameBase: filenameBase || "document",
+        });
+      }
       setExportError("");
       setIsExportDialogOpen(false);
       setIsExportMenuOpen(false);

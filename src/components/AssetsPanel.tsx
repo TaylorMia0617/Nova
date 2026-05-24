@@ -461,7 +461,7 @@ const AssetsPanel: React.FC = () => {
             <h3>{createDialog.type === "file" ? "Create New File" : "Create New Folder"}</h3>
             <p>
               {createDialog.type === "file"
-                ? "Enter a file name. If you omit the extension, the app creates a Markdown file (.md)."
+                ? "Enter a file name. If you omit the extension, the app creates a text file (.txt)."
                 : "Enter a folder name."}
             </p>
             <input
