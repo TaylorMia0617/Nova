@@ -1,6 +1,6 @@
 {
   "name": "novel-assistance",
-  "version": "0.0.4",
+  "version": "0.0.7",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -40,7 +40,8 @@
     "productName": "Novel Assistance",
     "npmRebuild": false,
     "asarUnpack": [
-      "node_modules/node-pty/**/*"
+      "node_modules/node-pty/**/*",
+      "node_modules/monaco-editor/**/*"
     ],
     "files": [
       "dist/**/*",

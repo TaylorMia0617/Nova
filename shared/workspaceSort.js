@@ -17,8 +17,20 @@ const chineseDigitMap = new Map([
   ["九", 9],
 ]);
 
-const chapterPattern = /^第\s*([0-9零一二两三四五六七八九十百千]+)\s*[章节回部集卷篇]/;
-const leadingNumberPattern = /^([0-9零一二两三四五六七八九十百千]+)/;
+const chineseSectionUnits = new Map([
+  ["十", 10],
+  ["百", 100],
+  ["千", 1000],
+]);
+
+const chineseLargeUnits = new Map([
+  ["万", 10000],
+  ["亿", 100000000],
+]);
+
+const sortableNumberChars = "0-9零一二两三四五六七八九十百千万亿";
+const chapterPattern = new RegExp(`^第\\s*([${sortableNumberChars}]+)\\s*[章节回部集卷篇]`);
+const leadingNumberPattern = new RegExp(`^([${sortableNumberChars}]+)`);
 
 export function parseChineseNumber(input) {
   if (!input) return null;
@@ -34,20 +46,16 @@ export function parseChineseNumber(input) {
       continue;
     }
 
-    if (char === "十") {
-      section += (number || 1) * 10;
+    if (chineseSectionUnits.has(char)) {
+      section += (number || 1) * (chineseSectionUnits.get(char) ?? 1);
       number = 0;
       continue;
     }
 
-    if (char === "百") {
-      section += (number || 1) * 100;
-      number = 0;
-      continue;
-    }
-
-    if (char === "千") {
-      section += (number || 1) * 1000;
+    if (chineseLargeUnits.has(char)) {
+      const unit = chineseLargeUnits.get(char) ?? 1;
+      total += (section + number || 1) * unit;
+      section = 0;
       number = 0;
       continue;
     }

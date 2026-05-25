@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
 import type { ModelProfile, SelectionPromptTemplates } from "../types/ai";
 
 type PromptKey = keyof SelectionPromptTemplates;
@@ -41,6 +41,48 @@ const sanitizeProfile = (profile: ModelProfile): ModelProfile => ({
   apiKey: profile.rememberSecrets ? profile.apiKey : "",
   headers: profile.rememberSecrets ? profile.headers : [],
 });
+
+const SETTINGS_STORAGE_NAME = "novel-assistance-settings";
+
+const getGlobalSettingsHost = () =>
+  typeof window === "undefined"
+    ? null
+    : ((window as typeof window & {
+        novelHost?: {
+          readGlobalSettings?: (name: string) => Promise<string | null>;
+          writeGlobalSettings?: (name: string, content: string) => Promise<void>;
+          deleteGlobalSettings?: (name: string) => Promise<void>;
+        };
+      }).novelHost ?? null);
+
+const globalSettingsStorage = {
+  getItem: async (name: string): Promise<string | null> => {
+    const host = getGlobalSettingsHost();
+    if (host?.readGlobalSettings) {
+      return host.readGlobalSettings(name);
+    }
+
+    return localStorage.getItem(name);
+  },
+  setItem: async (name: string, value: string): Promise<void> => {
+    const host = getGlobalSettingsHost();
+    if (host?.writeGlobalSettings) {
+      await host.writeGlobalSettings(name, value);
+      return;
+    }
+
+    localStorage.setItem(name, value);
+  },
+  removeItem: async (name: string): Promise<void> => {
+    const host = getGlobalSettingsHost();
+    if (host?.deleteGlobalSettings) {
+      await host.deleteGlobalSettings(name);
+      return;
+    }
+
+    localStorage.removeItem(name);
+  },
+};
 
 export const useSettingsStore = create<SettingsState>()(
   persist(
@@ -102,7 +144,8 @@ export const useSettingsStore = create<SettingsState>()(
       },
     }),
     {
-      name: "novel-assistance-settings",
+      name: SETTINGS_STORAGE_NAME,
+      storage: createJSONStorage(() => globalSettingsStorage),
       partialize: (state) => ({
         modelProfiles: state.modelProfiles.map(sanitizeProfile),
         defaultChatModelId: state.defaultChatModelId,

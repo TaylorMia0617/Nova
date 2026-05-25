@@ -398,7 +398,7 @@ export async function exportDocument(options: {
   const template = getExportTemplate(templateId);
 
   if (format === "txt") {
-    saveBlob(`${filenameBase}.txt`, new Blob([content], { type: "text/plain;charset=utf-8" }));
+    saveBlob(`${filenameBase}.txt`, new Blob(["\uFEFF", content], { type: "text/plain;charset=utf-8" }));
     return;
   }
 

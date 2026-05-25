@@ -35,6 +35,12 @@ const TEXT_ATTACHMENT_EXTENSIONS = new Set([
   ".hpp",
 ]);
 const MAX_ATTACHMENT_TEXT_LENGTH = 120000;
+const GLOBAL_SETTINGS_DIR_NAME = "global-settings";
+
+function getGlobalSettingsPath(name = "novel-assistance-settings") {
+  const safeName = String(name).replace(/[^a-zA-Z0-9._-]/g, "-") || "settings";
+  return path.join(app.getPath("userData"), GLOBAL_SETTINGS_DIR_NAME, `${safeName}.json`);
+}
 
 function expandWindowsEnv(value) {
   return value.replace(/%([^%]+)%/g, (_match, name) => process.env[name] || "");
@@ -734,6 +740,26 @@ ipcMain.handle("fs:readFile", async (_event, filePath) => {
 
 ipcMain.handle("fs:writeFile", async (_event, filePath, content) => {
   await fs.writeFile(assertWorkspacePath(filePath), content, "utf8");
+});
+
+ipcMain.handle("settings:read", async (_event, name) => {
+  const settingsPath = getGlobalSettingsPath(name);
+  if (!(await pathExists(settingsPath))) {
+    return null;
+  }
+
+  return fs.readFile(settingsPath, "utf8");
+});
+
+ipcMain.handle("settings:write", async (_event, name, content) => {
+  const settingsPath = getGlobalSettingsPath(name);
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+  await fs.writeFile(settingsPath, content, "utf8");
+});
+
+ipcMain.handle("settings:delete", async (_event, name) => {
+  const settingsPath = getGlobalSettingsPath(name);
+  await fs.rm(settingsPath, { force: true });
 });
 
 ipcMain.handle("fs:createFile", async (_event, filePath) => {
