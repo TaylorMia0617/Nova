@@ -77,8 +77,12 @@ function getFinalUserMessage(userMessage: string, mcpContext: string, attachment
   return composedContexts ? `${userMessage}\n\n${composedContexts}` : userMessage;
 }
 
-function isChatCompletionsUrl(url: string) {
-  return /\/chat\/completions\/?$/i.test(url);
+function isResponsesUrl(url: string) {
+  return /\/responses\/?$/i.test(url);
+}
+
+function isMimoModel(model: string) {
+  return model.trim().toLowerCase().startsWith("mimo");
 }
 
 async function parseErrorMessage(response: Response) {
@@ -135,6 +139,7 @@ async function callResponsesApi(options: AiRequestOptions, systemPrompt: string,
 
 async function callChatCompletionsApi(options: AiRequestOptions, systemPrompt: string, finalUserMessage: string) {
   const { modelProfile, taskType, conversationHistory } = options;
+  const tokenLimitKey = isMimoModel(modelProfile.model) ? "max_completion_tokens" : "max_tokens";
 
   const response = await fetch(modelProfile.baseUrl, {
     method: "POST",
@@ -145,7 +150,7 @@ async function callChatCompletionsApi(options: AiRequestOptions, systemPrompt: s
     body: JSON.stringify({
       model: modelProfile.model,
       messages: buildChatCompletionMessages(systemPrompt, finalUserMessage, conversationHistory),
-      max_tokens: 1200,
+      [tokenLimitKey]: 1200,
       temperature: taskType === "chat" ? 0.7 : 0.45,
     }),
   });
@@ -179,11 +184,11 @@ async function callOpenAiCompatible(options: AiRequestOptions, mcpContext = "") 
   const systemPrompt = buildSystemPrompt(taskType, documentContext, selectionPrompt);
   const finalUserMessage = getFinalUserMessage(userMessage, mcpContext, attachments);
 
-  if (isChatCompletionsUrl(modelProfile.baseUrl)) {
-    return callChatCompletionsApi(options, systemPrompt, finalUserMessage);
+  if (!isMimoModel(modelProfile.model) && isResponsesUrl(modelProfile.baseUrl)) {
+    return callResponsesApi(options, systemPrompt, finalUserMessage);
   }
 
-  return callResponsesApi(options, systemPrompt, finalUserMessage);
+  return callChatCompletionsApi(options, systemPrompt, finalUserMessage);
 }
 
 export async function callAI(options: AiRequestOptions): Promise<string> {

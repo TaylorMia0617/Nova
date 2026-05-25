@@ -50,10 +50,11 @@ const CopilotPanel: React.FC = () => {
   const [selectionToolbar, setSelectionToolbar] = useState<{ text: string; x: number; y: number } | null>(null);
   const [statusText, setStatusText] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const lastDefaultChatModelIdRef = useRef(defaultChatModelId);
 
   const currentModel = useMemo(
     () => getModelProfileById(activeConversation?.modelId || defaultChatModelId),
-    [activeConversation?.modelId, defaultChatModelId, getModelProfileById]
+    [activeConversation?.modelId, defaultChatModelId, getModelProfileById, modelProfiles]
   );
 
   const scrollToBottom = () => {
@@ -73,6 +74,29 @@ const CopilotPanel: React.FC = () => {
     setConversationSummaries(nextSummaries);
     setActiveConversation(record);
   };
+
+  useEffect(() => {
+    if (!activeConversation || !defaultChatModelId) {
+      lastDefaultChatModelIdRef.current = defaultChatModelId;
+      return;
+    }
+
+    const defaultModelChanged = lastDefaultChatModelIdRef.current !== defaultChatModelId;
+    lastDefaultChatModelIdRef.current = defaultChatModelId;
+
+    const selectedModelExists =
+      !activeConversation.modelId || modelProfiles.some((profile) => profile.id === activeConversation.modelId);
+
+    if ((!defaultModelChanged && selectedModelExists) || activeConversation.modelId === defaultChatModelId) {
+      return;
+    }
+
+    void persistConversation({
+      ...activeConversation,
+      modelId: defaultChatModelId,
+      updatedAt: new Date().toISOString(),
+    });
+  }, [activeConversation?.id, activeConversation?.modelId, defaultChatModelId, modelProfiles]);
 
   useEffect(() => {
     scrollToBottom();
@@ -266,18 +290,28 @@ const CopilotPanel: React.FC = () => {
       </div>
       <div className="copilot-toolbar">
         <select
+          className="copilot-select"
+          title={
+            conversationSummaries.find((summary) => summary.id === selectedConversationId)?.title ||
+            "No saved conversations"
+          }
           value={selectedConversationId}
           onChange={(event) => void loadConversation(event.target.value)}
           disabled={conversationSummaries.length === 0}
         >
           {conversationSummaries.length === 0 && <option value="">No saved conversations</option>}
           {conversationSummaries.map((summary) => (
-            <option key={summary.id} value={summary.id}>
+            <option key={summary.id} value={summary.id} title={summary.title}>
               {summary.title}
             </option>
           ))}
         </select>
         <select
+          className="copilot-select"
+          title={
+            modelProfiles.find((profile) => profile.id === (activeConversation?.modelId || defaultChatModelId))
+              ?.label || "No model selected"
+          }
           value={activeConversation?.modelId || defaultChatModelId}
           onChange={(event) => {
             if (!activeConversation) return;
@@ -289,7 +323,7 @@ const CopilotPanel: React.FC = () => {
           }}
         >
           {modelProfiles.map((profile) => (
-            <option key={profile.id} value={profile.id}>
+            <option key={profile.id} value={profile.id} title={profile.label}>
               {profile.label}
             </option>
           ))}

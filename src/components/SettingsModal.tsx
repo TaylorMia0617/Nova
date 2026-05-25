@@ -62,6 +62,8 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const handleAddProfile = () => {
     const next = createDraftProfile();
     setModelProfiles([...modelProfiles, next]);
+    setDefaultChatModelId(next.id);
+    setDefaultSelectionModelId(next.id);
     setSelectedProfileId(next.id);
     setProfileDraft(next);
     setSaveStatus("New profile created. Fill in the fields and click Save Profile.");
@@ -75,6 +77,8 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const handleSaveProfile = () => {
     if (!profileDraft) return;
     updateModelProfile(profileDraft.id, profileDraft);
+    setDefaultChatModelId(profileDraft.id);
+    setDefaultSelectionModelId(profileDraft.id);
     setSaveStatus("Profile saved.");
   };
 
