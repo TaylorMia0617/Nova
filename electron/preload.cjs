@@ -33,6 +33,7 @@ contextBridge.exposeInMainWorld("novelHost", {
   writeTerminal: (terminalId, data) => ipcRenderer.invoke("terminal:write", terminalId, data),
   resizeTerminal: (terminalId, cols, rows) => ipcRenderer.invoke("terminal:resize", terminalId, cols, rows),
   disposeTerminal: (terminalId) => ipcRenderer.invoke("terminal:dispose", terminalId),
+  printToPDF: (html) => ipcRenderer.invoke("export:printToPDF", html),
   onTerminalData: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on("terminal:data", listener);

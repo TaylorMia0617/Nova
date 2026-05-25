@@ -107,7 +107,7 @@ async function callResponsesApi(options: AiRequestOptions, systemPrompt: string,
       model: modelProfile.model,
       instructions: systemPrompt,
       input: buildOpenAIResponsesInput(finalUserMessage, conversationHistory),
-      max_output_tokens: 1200,
+      max_output_tokens: 8192,
       temperature: taskType === "chat" ? 0.7 : 0.45,
     }),
   });
@@ -150,7 +150,7 @@ async function callChatCompletionsApi(options: AiRequestOptions, systemPrompt: s
     body: JSON.stringify({
       model: modelProfile.model,
       messages: buildChatCompletionMessages(systemPrompt, finalUserMessage, conversationHistory),
-      [tokenLimitKey]: 1200,
+      [tokenLimitKey]: 8192,
       temperature: taskType === "chat" ? 0.7 : 0.45,
     }),
   });
