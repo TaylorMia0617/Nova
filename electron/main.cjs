@@ -177,7 +177,7 @@ function quoteCmdArg(value) {
   const stringValue = String(value);
   if (!stringValue.length) return "\"\"";
   if (!/[\s\"&|<>^()]/.test(stringValue)) return stringValue;
-  return `"${stringValue.replace(/"/g, "\"\"")}"`;
+  return `"${stringValue.replace(/"/g, "\"\"")}"`; 
 }
 
 function buildShellStyleInvocation(command, args = []) {
@@ -678,6 +678,8 @@ async function createWindow() {
   } else {
     await win.loadFile(path.join(__dirname, "../dist/index.html"));
   }
+
+  return win;
 }
 
 app.whenReady().then(async () => {
@@ -702,6 +704,8 @@ app.on("window-all-closed", () => {
     app.quit();
   }
 });
+
+// ─── IPC Handlers ─────────────────────────────────────────────────────────────
 
 ipcMain.handle("fs:pickWorkspace", async () => {
   const result = await dialog.showOpenDialog({
@@ -747,7 +751,6 @@ ipcMain.handle("settings:read", async (_event, name) => {
   if (!(await pathExists(settingsPath))) {
     return null;
   }
-
   return fs.readFile(settingsPath, "utf8");
 });
 
@@ -764,22 +767,18 @@ ipcMain.handle("settings:delete", async (_event, name) => {
 
 ipcMain.handle("fs:createFile", async (_event, filePath) => {
   const { normalizedPath } = getValidatedEntryName(filePath);
-
   if (await pathExists(normalizedPath)) {
     throw new Error("A file or folder with that name already exists.");
   }
-
   const handle = await fs.open(normalizedPath, "wx");
   await handle.close();
 });
 
 ipcMain.handle("fs:createFolder", async (_event, folderPath) => {
   const { normalizedPath } = getValidatedEntryName(folderPath);
-
   if (await pathExists(normalizedPath)) {
     throw new Error("A file or folder with that name already exists.");
   }
-
   await fs.mkdir(normalizedPath);
 });
 
@@ -803,7 +802,6 @@ ipcMain.handle("fs:duplicateFile", async (_event, sourcePath) => {
   for (let index = 1; index < 1000; index += 1) {
     const candidateName = index === 1 ? `${baseName} Copy${extension}` : `${baseName} Copy ${index}${extension}`;
     const candidatePath = assertWorkspacePath(path.join(directory, candidateName));
-
     if (!(await pathExists(candidatePath))) {
       await fs.copyFile(normalizedSource, candidatePath);
       return candidatePath;
@@ -839,7 +837,6 @@ ipcMain.handle("ai:readConversation", async (_event, conversationId) => {
   if (!(await pathExists(filePath))) {
     return null;
   }
-
   const content = await fs.readFile(filePath, "utf8");
   return JSON.parse(content);
 });
@@ -870,7 +867,6 @@ ipcMain.handle("ai:deleteConversation", async (_event, conversationId) => {
   if (await pathExists(filePath)) {
     await fs.rm(filePath, { force: true });
   }
-
   const currentIndex = await readConversationIndex();
   const nextIndex = currentIndex.filter((item) => item.id !== conversationId);
   return writeConversationIndex(nextIndex);
@@ -954,6 +950,34 @@ ipcMain.handle("terminal:dispose", async (_event, terminalId) => {
   terminal.kill();
   terminals.delete(terminalId);
 });
+
+// PDF 导出：用隐藏窗口渲染 HTML，调用 Electron 原生 printToPDF
+// 替代 jspdf + html2canvas，导出的 PDF 文字可选中
+ipcMain.handle("export:printToPDF", async (_event, html) => {
+  const pdfWin = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      javascript: false,
+    },
+  });
+
+  try {
+    await pdfWin.loadURL(
+      `data:text/html;charset=utf-8,${encodeURIComponent(html)}`
+    );
+
+    const data = await pdfWin.webContents.printToPDF({
+      printBackground: true,
+      pageSize: "A4",
+      marginsType: 1,
+    });
+
+    return data;
+  } finally {
+    pdfWin.close();
+  }
+});
+
 async function ensureWorkspaceSortLoaded() {
   if (compareNodeNames) return;
 

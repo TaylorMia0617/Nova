@@ -1,0 +1,20 @@
+directories:
+  output: release-dev
+  buildResources: build
+appId: com.novelassistance.app
+productName: Novel Assistance
+npmRebuild: false
+asarUnpack:
+  - node_modules/node-pty/**/*
+files:
+  - filter:
+      - dist/**/*
+      - electron/**/*
+      - shared/**/*
+      - node_modules/node-pty/**/*
+      - package.json
+win:
+  target:
+    - nsis
+    - portable
+electronVersion: 31.7.7

@@ -270,121 +270,80 @@ function renderBlockHtml(block: DocumentBlock) {
   if (block.type === "heading") {
     return `<h${block.level}>${escapeHtml(block.text)}</h${block.level}>`;
   }
-
   if (block.type === "blockquote") {
     return `<blockquote>${escapeHtml(block.text).replace(/\n/g, "<br/>")}</blockquote>`;
   }
-
   if (block.type === "code") {
     return `<pre><code>${escapeHtml(block.text)}</code></pre>`;
   }
-
   if (block.type === "list") {
     const tag = block.ordered ? "ol" : "ul";
     return `<${tag}>${block.items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</${tag}>`;
   }
-
   return `<p>${escapeHtml(block.text)}</p>`;
 }
 
 function buildExportHtml(title: string, blocks: DocumentBlock[], template: ExportTemplate) {
   return `
-    <div style="
-      width: 794px;
-      background: white;
-      color: #121826;
-      padding: ${template.page.marginTop}px ${template.page.marginRight}px ${template.page.marginBottom}px ${template.page.marginLeft}px;
-      font-family: ${template.typography.bodyFont};
-      font-size: ${template.typography.bodySize}pt;
-      line-height: ${template.typography.lineHeight};
-      box-sizing: border-box;
-    ">
-      <h1 style="
-        font-family: ${template.typography.titleFont};
-        font-size: ${template.typography.titleSize}pt;
-        margin: 0 0 28px 0;
-      ">${escapeHtml(title)}</h1>
-      <style>
-        h1, h2, h3 { font-family: ${template.typography.titleFont}; margin: 20px 0 10px; }
-        h1 { font-size: ${template.typography.headingSize.h1}pt; }
-        h2 { font-size: ${template.typography.headingSize.h2}pt; }
-        h3 { font-size: ${template.typography.headingSize.h3}pt; }
-        p { margin: 0 0 12px 0; }
-        blockquote {
-          margin: 14px 0;
-          padding-left: 18px;
-          border-left: 4px solid #a0aec0;
-          color: #334155;
-        }
-        pre {
-          margin: 14px 0;
-          padding: 14px 16px;
-          background: #f3f6fb;
-          border-radius: 10px;
-          overflow: hidden;
-          white-space: pre-wrap;
-          word-break: break-word;
-          font-family: 'Cascadia Code', 'Consolas', monospace;
-        }
-        ul, ol { margin: 10px 0 14px 24px; padding: 0; }
-        li { margin: 6px 0; }
-      </style>
-      ${blocks.map((block) => renderBlockHtml(block)).join("")}
-    </div>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body {
+            width: 794px;
+            background: white;
+            color: #121826;
+            padding: ${template.page.marginTop}px ${template.page.marginRight}px ${template.page.marginBottom}px ${template.page.marginLeft}px;
+            font-family: ${template.typography.bodyFont};
+            font-size: ${template.typography.bodySize}pt;
+            line-height: ${template.typography.lineHeight};
+            box-sizing: border-box;
+            margin: 0;
+          }
+          h1, h2, h3 { font-family: ${template.typography.titleFont}; margin: 20px 0 10px; }
+          h1 { font-size: ${template.typography.headingSize.h1}pt; }
+          h2 { font-size: ${template.typography.headingSize.h2}pt; }
+          h3 { font-size: ${template.typography.headingSize.h3}pt; }
+          p { margin: 0 0 12px 0; }
+          blockquote {
+            margin: 14px 0;
+            padding-left: 18px;
+            border-left: 4px solid #a0aec0;
+            color: #334155;
+          }
+          pre {
+            margin: 14px 0;
+            padding: 14px 16px;
+            background: #f3f6fb;
+            border-radius: 10px;
+            overflow: hidden;
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-family: 'Cascadia Code', 'Consolas', monospace;
+          }
+          ul, ol { margin: 10px 0 14px 24px; padding: 0; }
+          li { margin: 6px 0; }
+          .doc-title {
+            font-family: ${template.typography.titleFont};
+            font-size: ${template.typography.titleSize}pt;
+            font-weight: bold;
+            margin: 0 0 28px 0;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="doc-title">${escapeHtml(title)}</div>
+        ${blocks.map((block) => renderBlockHtml(block)).join("")}
+      </body>
+    </html>
   `;
 }
 
 async function exportAsPdf(filename: string, title: string, blocks: DocumentBlock[], template: ExportTemplate) {
-  const [{ default: jsPDF }, { default: html2canvas }] = await Promise.all([import("jspdf"), import("html2canvas")]);
-
-  const container = document.createElement("div");
-  container.style.position = "fixed";
-  container.style.left = "-100000px";
-  container.style.top = "0";
-  container.style.zIndex = "-1";
-  container.innerHTML = buildExportHtml(title, blocks, template);
-  document.body.appendChild(container);
-
-  try {
-    const target = container.firstElementChild as HTMLElement | null;
-    if (!target) {
-      throw new Error("Failed to render export preview.");
-    }
-
-    const canvas = await html2canvas(target, {
-      backgroundColor: "#ffffff",
-      scale: 2,
-      useCORS: true,
-    });
-
-    const imgData = canvas.toDataURL("image/png");
-    const pdf = new jsPDF({
-      unit: "pt",
-      format: "a4",
-    });
-
-    const pageWidth = pdf.internal.pageSize.getWidth();
-    const pageHeight = pdf.internal.pageSize.getHeight();
-    const imgWidth = pageWidth;
-    const imgHeight = (canvas.height * imgWidth) / canvas.width;
-
-    let heightLeft = imgHeight;
-    let position = 0;
-
-    pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
-    heightLeft -= pageHeight;
-
-    while (heightLeft > 0) {
-      position = heightLeft - imgHeight;
-      pdf.addPage();
-      pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
-      heightLeft -= pageHeight;
-    }
-
-    pdf.save(filename);
-  } finally {
-    document.body.removeChild(container);
-  }
+  const html = buildExportHtml(title, blocks, template);
+  const buffer: ArrayBuffer = await (window as any).novelHost.printToPDF(html);
+  const blob = new Blob([buffer], { type: "application/pdf" });
+  saveBlob(filename, blob);
 }
 
 export async function exportDocument(options: {
@@ -403,6 +362,7 @@ export async function exportDocument(options: {
   }
 
   const blocks = parseDocumentStructure(content);
+
   if (format === "docx") {
     await exportAsDocx(`${filenameBase}.docx`, title, blocks, template);
     return;

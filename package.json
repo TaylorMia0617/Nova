@@ -1,5 +1,7 @@
 {
   "name": "novel-assistance",
+  "description":"诺瓦",
+  "Author":"Shiro狐",
   "version": "0.0.7",
   "type": "module",
   "main": "electron/main.cjs",
@@ -16,10 +18,7 @@
     "@monaco-editor/react": "^4.6.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
-    "canvg": "^4.0.3",
     "docx": "^9.6.1",
-    "html2canvas": "^1.4.1",
-    "jspdf": "^4.2.1",
     "lucide-react": "^0.400.0",
     "node-pty": "^1.1.0",
     "react": "^19.0.0",
@@ -40,8 +39,7 @@
     "productName": "Novel Assistance",
     "npmRebuild": false,
     "asarUnpack": [
-      "node_modules/node-pty/**/*",
-      "node_modules/monaco-editor/**/*"
+      "node_modules/node-pty/**/*"
     ],
     "files": [
       "dist/**/*",
@@ -57,7 +55,7 @@
       ]
     },
     "directories": {
-      "output": "release-build",
+      "output": "release-dev",
       "buildResources": "build"
     }
   }

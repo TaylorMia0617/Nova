@@ -6,7 +6,6 @@ productName: Novel Assistance
 npmRebuild: false
 asarUnpack:
   - node_modules/node-pty/**/*
-  - node_modules/monaco-editor/**/*
 files:
   - filter:
       - dist/**/*
