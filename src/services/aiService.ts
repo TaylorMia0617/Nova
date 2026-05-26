@@ -97,15 +97,27 @@ async function parseErrorMessage(response: Response) {
   }
 }
 
+function buildRequestHeaders(modelProfile: ModelProfile) {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${modelProfile.apiKey}`,
+  };
+  if (modelProfile.headers?.length) {
+    for (const h of modelProfile.headers) {
+      if (h.key.trim()) {
+        headers[h.key.trim()] = h.value;
+      }
+    }
+  }
+  return headers;
+}
+
 async function callResponsesApi(options: AiRequestOptions, systemPrompt: string, finalUserMessage: string) {
   const { modelProfile, taskType, conversationHistory } = options;
 
   const response = await fetch(modelProfile.baseUrl, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${modelProfile.apiKey}`,
-    },
+    headers: buildRequestHeaders(modelProfile),
     body: JSON.stringify({
       model: modelProfile.model,
       instructions: systemPrompt,
@@ -146,10 +158,7 @@ async function callChatCompletionsApi(options: AiRequestOptions, systemPrompt: s
 
   const response = await fetch(modelProfile.baseUrl, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${modelProfile.apiKey}`,
-    },
+    headers: buildRequestHeaders(modelProfile),
     body: JSON.stringify({
       model: modelProfile.model,
       messages: buildChatCompletionMessages(systemPrompt, finalUserMessage, conversationHistory),

@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -208,6 +208,32 @@ fn move_path(source_path: String, destination_folder_path: String) -> Result<Str
     path_to_string(&target)
 }
 
+fn get_global_config_path() -> Result<PathBuf, String> {
+    let home_dir = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
+    let config_dir = home_dir.join(".config").join("nova");
+    Ok(config_dir.join("NovaApi.json"))
+}
+
+#[tauri::command]
+fn read_global_api_config() -> Result<String, String> {
+    let config_path = get_global_config_path()?;
+    
+    if !config_path.exists() {
+        return Ok(String::new());
+    }
+    
+    fs::read_to_string(&config_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn write_global_api_config(content: String) -> Result<(), String> {
+    let config_path = get_global_config_path()?;
+    let parent_dir = config_path.parent().ok_or_else(|| "Cannot determine config directory".to_string())?;
+    
+    fs::create_dir_all(parent_dir).map_err(|error| error.to_string())?;
+    fs::write(&config_path, content).map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -222,7 +248,9 @@ pub fn run() {
             rename_path,
             delete_path,
             duplicate_file,
-            move_path
+            move_path,
+            read_global_api_config,
+            write_global_api_config
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

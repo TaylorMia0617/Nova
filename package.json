@@ -2,7 +2,7 @@
   "name": "Nova",
   "description":"AI小说创作助手",
   "Author":"Shiro狐",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {

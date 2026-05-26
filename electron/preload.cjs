@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld("novelHost", {
   readGlobalSettings: (name) => ipcRenderer.invoke("settings:read", name),
   writeGlobalSettings: (name, content) => ipcRenderer.invoke("settings:write", name, content),
   deleteGlobalSettings: (name) => ipcRenderer.invoke("settings:delete", name),
+  readGlobalApiConfig: () => ipcRenderer.invoke("settings:readGlobalApiConfig"),
+  writeGlobalApiConfig: (content) => ipcRenderer.invoke("settings:writeGlobalApiConfig", content),
   createFile: (filePath) => ipcRenderer.invoke("fs:createFile", filePath),
   createFolder: (folderPath) => ipcRenderer.invoke("fs:createFolder", folderPath),
   renamePath: (currentPath, newName) => ipcRenderer.invoke("fs:renamePath", currentPath, newName),

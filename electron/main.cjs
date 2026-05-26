@@ -42,6 +42,10 @@ function getGlobalSettingsPath(name = "novel-assistance-settings") {
   return path.join(app.getPath("userData"), GLOBAL_SETTINGS_DIR_NAME, `${safeName}.json`);
 }
 
+function getGlobalApiConfigPath() {
+  return path.join(os.homedir(), ".config", "nova", "NovaApi.json");
+}
+
 function expandWindowsEnv(value) {
   return value.replace(/%([^%]+)%/g, (_match, name) => process.env[name] || "");
 }
@@ -763,6 +767,20 @@ ipcMain.handle("settings:write", async (_event, name, content) => {
 ipcMain.handle("settings:delete", async (_event, name) => {
   const settingsPath = getGlobalSettingsPath(name);
   await fs.rm(settingsPath, { force: true });
+});
+
+ipcMain.handle("settings:readGlobalApiConfig", async () => {
+  const configPath = getGlobalApiConfigPath();
+  if (!(await pathExists(configPath))) {
+    return null;
+  }
+  return fs.readFile(configPath, "utf8");
+});
+
+ipcMain.handle("settings:writeGlobalApiConfig", async (_event, content) => {
+  const configPath = getGlobalApiConfigPath();
+  await fs.mkdir(path.dirname(configPath), { recursive: true });
+  await fs.writeFile(configPath, content, "utf8");
 });
 
 ipcMain.handle("fs:createFile", async (_event, filePath) => {

@@ -50,6 +50,8 @@ interface NovelHostApi {
   watchWorkspace?: (rootPath: string) => Promise<void>;
   unwatchWorkspace?: (rootPath: string) => Promise<void>;
   onWorkspaceChanged?: (callback: (payload: { rootPath: string; changedPath: string | null }) => void) => () => void;
+  readGlobalApiConfig?: () => Promise<string>;
+  writeGlobalApiConfig?: (content: string) => Promise<void>;
 }
 
 type AnyDirectoryHandle = FileSystemDirectoryHandle & {
@@ -550,4 +552,20 @@ export async function movePath(sourcePath: string, destinationFolderPath: string
   rebuildRegistryForRename(sourcePath, nextPath);
   registerDirectoryHandle(nextPath, asDirectoryHandle(nextDirectory));
   return nextPath;
+}
+
+export async function readGlobalApiConfig(): Promise<string | null> {
+  const host = getHostApi();
+  if (host?.readGlobalApiConfig) {
+    const content = await host.readGlobalApiConfig();
+    return content || null;
+  }
+  return null;
+}
+
+export async function writeGlobalApiConfig(content: string): Promise<void> {
+  const host = getHostApi();
+  if (host?.writeGlobalApiConfig) {
+    await host.writeGlobalApiConfig(content);
+  }
 }

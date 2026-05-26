@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import type { ModelProfile, SelectionPromptTemplates } from "../types/ai";
+import { readGlobalApiConfig, writeGlobalApiConfig } from "../services/fileSystemService";
 
 type PromptKey = keyof SelectionPromptTemplates;
 
@@ -54,6 +55,8 @@ const getGlobalSettingsHost = () =>
           readGlobalSettings?: (name: string) => Promise<string | null>;
           writeGlobalSettings?: (name: string, content: string) => Promise<void>;
           deleteGlobalSettings?: (name: string) => Promise<void>;
+          readGlobalApiConfig?: () => Promise<string>;
+          writeGlobalApiConfig?: (content: string) => Promise<void>;
         };
       }).novelHost ?? null);
 
@@ -70,10 +73,15 @@ const globalSettingsStorage = {
     const host = getGlobalSettingsHost();
     if (host?.writeGlobalSettings) {
       await host.writeGlobalSettings(name, value);
-      return;
+    } else {
+      localStorage.setItem(name, value);
     }
 
-    localStorage.setItem(name, value);
+    if (host?.writeGlobalApiConfig) {
+      host.writeGlobalApiConfig(value).catch((err) =>
+        console.warn("Failed to sync settings to global config file:", err)
+      );
+    }
   },
   removeItem: async (name: string): Promise<void> => {
     const host = getGlobalSettingsHost();
@@ -85,6 +93,62 @@ const globalSettingsStorage = {
     localStorage.removeItem(name);
   },
 };
+
+async function loadFromFile(): Promise<string | null> {
+  try {
+    return await readGlobalApiConfig();
+  } catch (error) {
+    console.warn("Failed to load settings from global config file:", error);
+    return null;
+  }
+}
+
+export async function syncFromFile(): Promise<boolean> {
+  try {
+    const fileContent = await readGlobalApiConfig();
+    if (!fileContent) return false;
+
+    const parsed = JSON.parse(fileContent);
+    const currentState = useSettingsStore.getState();
+
+    const hasChanges =
+      JSON.stringify(parsed.modelProfiles) !== JSON.stringify(currentState.modelProfiles) ||
+      JSON.stringify(parsed.selectionPromptTemplates) !==
+        JSON.stringify(currentState.selectionPromptTemplates) ||
+      JSON.stringify(parsed.defaultChatModelId) !==
+        JSON.stringify(currentState.defaultChatModelId) ||
+      JSON.stringify(parsed.defaultSelectionModelId) !==
+        JSON.stringify(currentState.defaultSelectionModelId) ||
+      parsed.chatMaxTokens !== currentState.chatMaxTokens;
+
+    if (hasChanges) {
+      useSettingsStore.setState(parsed);
+      return true;
+    }
+    return false;
+  } catch (error) {
+    console.warn("Failed to sync settings from global config file:", error);
+    return false;
+  }
+}
+
+export async function exportToFile(): Promise<boolean> {
+  try {
+    const state = useSettingsStore.getState();
+    const dataToExport = {
+      modelProfiles: state.modelProfiles.map(sanitizeProfile),
+      defaultChatModelId: state.defaultChatModelId,
+      defaultSelectionModelId: state.defaultSelectionModelId,
+      selectionPromptTemplates: state.selectionPromptTemplates,
+      chatMaxTokens: state.chatMaxTokens,
+    };
+    await writeGlobalApiConfig(JSON.stringify(dataToExport, null, 2));
+    return true;
+  } catch (error) {
+    console.warn("Failed to export settings to global config file:", error);
+    return false;
+  }
+}
 
 export const useSettingsStore = create<SettingsState>()(
   persist(
@@ -129,7 +193,9 @@ export const useSettingsStore = create<SettingsState>()(
             defaultChatModelId:
               state.defaultChatModelId === id ? safeProfiles[0].id : state.defaultChatModelId,
             defaultSelectionModelId:
-              state.defaultSelectionModelId === id ? safeProfiles[0].id : state.defaultSelectionModelId,
+              state.defaultSelectionModelId === id
+                ? safeProfiles[0].id
+                : state.defaultSelectionModelId,
           };
         }),
       setDefaultChatModelId: (id) => set({ defaultChatModelId: id }),
@@ -157,6 +223,31 @@ export const useSettingsStore = create<SettingsState>()(
         selectionPromptTemplates: state.selectionPromptTemplates,
         chatMaxTokens: state.chatMaxTokens,
       }),
+      onRehydrateStorage: () => {
+        return (_state, error) => {
+          if (!error) {
+            loadFromFile().then((fileContent) => {
+              if (fileContent) {
+                try {
+                  const parsed = JSON.parse(fileContent);
+                  const currentState = useSettingsStore.getState();
+                  const hasChanges =
+                    JSON.stringify(parsed.modelProfiles) !==
+                      JSON.stringify(currentState.modelProfiles) ||
+                    JSON.stringify(parsed.selectionPromptTemplates) !==
+                      JSON.stringify(currentState.selectionPromptTemplates);
+
+                  if (hasChanges) {
+                    useSettingsStore.setState(parsed);
+                  }
+                } catch (e) {
+                  console.warn("Failed to parse global config file:", e);
+                }
+              }
+            });
+          }
+        };
+      },
     }
   )
 );
