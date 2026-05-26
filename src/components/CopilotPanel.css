@@ -303,6 +303,7 @@
 
 .copilot-footer-note {
   display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
   padding: 0 16px 12px;
@@ -333,4 +334,126 @@
   border-radius: 999px;
   z-index: 1500;
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.3);
+}
+
+.copilot-settings-button {
+  background: transparent;
+  border: none;
+  color: #7f8ea6;
+  cursor: pointer;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+  transition: color 0.2s;
+}
+
+.copilot-settings-button:hover {
+  color: #c8d8f0;
+}
+
+.copilot-settings-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+
+.copilot-settings-dialog {
+  background: #161d2a;
+  border: 1px solid #2d3f5a;
+  border-radius: 14px;
+  padding: 20px;
+  min-width: 300px;
+  max-width: 400px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+}
+
+.copilot-settings-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.copilot-settings-header h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #edf3ff;
+}
+
+.copilot-settings-header button {
+  background: transparent;
+  border: none;
+  color: #8ea1bd;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+}
+
+.copilot-settings-header button:hover {
+  color: #edf3ff;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.copilot-settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.copilot-settings-field span {
+  font-size: 13px;
+  color: #b0c2da;
+}
+
+.copilot-settings-field input {
+  background: #0d1420;
+  border: 1px solid #314158;
+  color: #dce7f5;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.copilot-settings-field input:focus {
+  outline: none;
+  border-color: #4f8cff;
+}
+
+.copilot-settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.copilot-settings-actions button {
+  padding: 7px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  border: none;
+  background: linear-gradient(135deg, #2b68bf 0%, #3d8df6 100%);
+  color: #ffffff;
+  transition: filter 0.2s;
+}
+
+.copilot-settings-actions button:hover {
+  filter: brightness(1.08);
+}
+
+.copilot-settings-actions button.secondary {
+  background: #1e2a3c;
+  color: #b0c2da;
+}
+
+.copilot-settings-actions button.secondary:hover {
+  background: #283848;
 }
