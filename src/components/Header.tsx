@@ -33,7 +33,7 @@ const Header: React.FC = () => {
       <header className="header">
         <div className="header-left">
           <div>
-            <h1 className="app-title">NovelAssistance</h1>
+            <h1 className="app-title">Nova/诺瓦</h1>
             <span className="app-subtitle">
               {rootName ? `Workspace: ${rootName}` : "Electron writing workspace"}
             </span>

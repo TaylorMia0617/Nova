@@ -9,12 +9,14 @@ interface SettingsState {
   defaultChatModelId: string;
   defaultSelectionModelId: string;
   selectionPromptTemplates: SelectionPromptTemplates;
+  chatMaxTokens: number;
   setModelProfiles: (profiles: ModelProfile[]) => void;
   updateModelProfile: (id: string, patch: Partial<ModelProfile>) => void;
   removeModelProfile: (id: string) => void;
   setDefaultChatModelId: (id: string) => void;
   setDefaultSelectionModelId: (id: string) => void;
   setSelectionPromptTemplate: (key: PromptKey, value: string) => void;
+  setChatMaxTokens: (value: number) => void;
   getModelProfileById: (id: string | null | undefined) => ModelProfile | null;
 }
 
@@ -91,6 +93,7 @@ export const useSettingsStore = create<SettingsState>()(
       defaultChatModelId: DEFAULT_PROFILE.id,
       defaultSelectionModelId: DEFAULT_PROFILE.id,
       selectionPromptTemplates: DEFAULT_PROMPTS,
+      chatMaxTokens: 8192,
       setModelProfiles: (profiles) =>
         set((state) => {
           const nextProfiles = profiles.length > 0 ? profiles : [DEFAULT_PROFILE];
@@ -138,6 +141,7 @@ export const useSettingsStore = create<SettingsState>()(
             [key]: value,
           },
         })),
+      setChatMaxTokens: (value) => set({ chatMaxTokens: value }),
       getModelProfileById: (id) => {
         if (!id) return null;
         return get().modelProfiles.find((profile) => profile.id === id) ?? null;
@@ -151,6 +155,7 @@ export const useSettingsStore = create<SettingsState>()(
         defaultChatModelId: state.defaultChatModelId,
         defaultSelectionModelId: state.defaultSelectionModelId,
         selectionPromptTemplates: state.selectionPromptTemplates,
+        chatMaxTokens: state.chatMaxTokens,
       }),
     }
   )

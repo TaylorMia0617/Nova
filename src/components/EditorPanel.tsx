@@ -35,10 +35,10 @@ const SKILL_FILE_NAME = "\u62db\u5f0f\u5217\u8868.txt";
 const WORLD_FILE_NAME = "\u4e16\u754c\u89c2.txt";
 const EDITOR_THEME = "novel-assistance-dark";
 const DESCRIPTION_LIMIT = 20;
-const TYPING_SUGGEST_DELAY_MS = 1000;
-const PUNCTUATION_SUGGEST_DELAY_MS = 2000;
+const TYPING_SUGGEST_DELAY_MS = 300;
+const IDLE_SUGGEST_DELAY_MS = 5000;
+const SUGGEST_COOLDOWN_MS = 300000;
 const AUTO_SAVE_DELAY_MS = 3000;
-const REFERENCE_PUNCTUATION = /[。！？!?；;]$/;
 const DEFAULT_EDITOR_FONT_FAMILY = "'Noto Serif SC', 'Source Han Serif SC', Georgia, serif";
 const DEFAULT_EDITOR_FONT_SIZE = 14;
 const TXT_MERGE_EXTENSIONS = new Set([".txt", ".md", ".markdown"]);
@@ -199,6 +199,8 @@ const EditorPanel: React.FC = () => {
   const editorContainerRef = useRef<HTMLDivElement | null>(null);
   const completionDisposableRef = useRef<Array<{ dispose: () => void }>>([]);
   const suggestionTimeoutRef = useRef<number | null>(null);
+  const suggestionCooldownUntilRef = useRef<number>(0);
+  const idleTimeoutRef = useRef<number | null>(null);
   const autoSaveTimeoutRef = useRef<number | null>(null);
   const alignmentBlocksByPathRef = useRef<Record<string, AlignmentBlock[]>>({});
   const alignmentDecorationIdsRef = useRef<string[]>([]);
@@ -290,22 +292,30 @@ const EditorPanel: React.FC = () => {
 
     if (isReferenceFile) return null;
 
-    const plainMatch = beforeCursor.match(/[A-Za-z0-9_\u4e00-\u9fff-]+$/);
-    const partial = plainMatch ? plainMatch[0] : "";
+    // Include middle dot (· U+00B7, U+30FB) for names like "艾莉丝·玛丽亚·弗里尔"
+    const plainMatch = beforeCursor.match(/[A-Za-z0-9_\u4e00-\u9fff\u00b7\u30fb-]+$/);
+    const token = plainMatch ? plainMatch[0] : "";
+
+    // Find shortest suffix of token that matches a reference entry prefix
+    // e.g. token="他觉得艾" → try "艾"→✓ → partial="艾"
+    let partial = "";
+    if (token) {
+      for (let i = token.length - 1; i >= 0; i--) {
+        const suffix = token.slice(i).toLowerCase();
+        if (referenceEntries.some((entry) => entry.name.toLowerCase().startsWith(suffix))) {
+          partial = token.slice(i);
+          break;
+        }
+      }
+    }
+
+    if (!partial) return null;
 
     return {
       partial: partial.toLowerCase(),
       insertMode: "plain" as const,
       startColumn: position.column - partial.length,
     };
-  };
-
-  const getInsertedTextFromChanges = (changes: Array<{ text: string }>) => changes.map((change) => change.text).join("");
-
-  const getSuggestionDelay = (insertedText: string) => {
-    const trimmed = insertedText.trimEnd();
-    if (!trimmed) return TYPING_SUGGEST_DELAY_MS;
-    return REFERENCE_PUNCTUATION.test(trimmed) ? PUNCTUATION_SUGGEST_DELAY_MS : TYPING_SUGGEST_DELAY_MS;
   };
 
   const getSuggestionScore = (entryName: string, partial: string) => {
@@ -338,7 +348,7 @@ const EditorPanel: React.FC = () => {
         triggerCharacters: ["{"],
         provideCompletionItems: (model: any, position: any) => {
           const context = getSuggestionContext(model, position);
-          if (!context || (context.insertMode === "plain" && referenceEntries.length === 0)) {
+          if (!context || !context.partial) {
             return { suggestions: [] };
           }
 
@@ -349,10 +359,17 @@ const EditorPanel: React.FC = () => {
             position.column
           );
 
-          const matchingEntries = context.partial
-            ? referenceEntries.filter((entry) => entry.name.toLowerCase().includes(context.partial))
-            : referenceEntries;
-          const candidateEntries = matchingEntries.length > 0 ? matchingEntries : referenceEntries;
+          const matchingEntries = referenceEntries.filter((entry) =>
+            entry.name.toLowerCase().startsWith(context.partial)
+          );
+
+          const candidateEntries = matchingEntries.filter(
+            (entry) => entry.name.toLowerCase() !== context.partial
+          );
+
+          if (candidateEntries.length === 0) {
+            return { suggestions: [] };
+          }
 
           const suggestions = candidateEntries
             .slice()
@@ -366,8 +383,7 @@ const EditorPanel: React.FC = () => {
               label: entry.name,
               kind: getCompletionKind(monaco, entry.category),
               insertText: context.insertMode === "brace" ? `{{${entry.name}}}` : entry.name,
-              filterText:
-                matchingEntries.length > 0 || !context.partial ? entry.name : `${context.partial} ${entry.name}`,
+              filterText: entry.name,
               detail: `${getCategoryLabel(entry.category)} ${getShortDescription(entry.description)}`,
               documentation: getShortDescription(entry.description),
               range,
@@ -565,6 +581,7 @@ const EditorPanel: React.FC = () => {
         taskType: mode,
         userMessage: selectedText,
         documentContext: model.getValue(),
+        documentFileName: activeFile?.name,
         conversationHistory: [],
         selectionPrompt: prompt,
       });
@@ -677,15 +694,60 @@ const EditorPanel: React.FC = () => {
       }, 0);
     });
 
-    editor.onDidChangeModelContent((event: any) => {
-      if (suggestionTimeoutRef.current) window.clearTimeout(suggestionTimeoutRef.current);
-      const insertedText = getInsertedTextFromChanges(event.changes ?? []);
-      suggestionTimeoutRef.current = window.setTimeout(() => {
-        const trimmed = insertedText.trimEnd();
-        if (!trimmed || REFERENCE_PUNCTUATION.test(trimmed) || /[A-Za-z0-9_\u4e00-\u9fff-]+$/.test(trimmed)) {
-          triggerReferenceSuggestions();
+    editor.onKeyDown((e: any) => {
+      if (e.keyCode === monaco.KeyCode.Escape) {
+        const editorDom = editor.getDomNode();
+        const suggestWidget = editorDom?.querySelector(".suggest-widget");
+        if (suggestWidget && suggestWidget.classList.contains("visible")) {
+          suggestionCooldownUntilRef.current = Date.now() + SUGGEST_COOLDOWN_MS;
         }
-      }, getSuggestionDelay(insertedText));
+      }
+    });
+
+    editor.onDidChangeModelContent(() => {
+      if (suggestionTimeoutRef.current) window.clearTimeout(suggestionTimeoutRef.current);
+      if (idleTimeoutRef.current) window.clearTimeout(idleTimeoutRef.current);
+
+      // Typing trigger: short delay, check if partial matches entries
+      suggestionTimeoutRef.current = window.setTimeout(() => {
+        const editor = editorRef.current;
+        const model = editor?.getModel();
+        const position = editor?.getPosition();
+        if (!model || !position) return;
+        const context = getSuggestionContext(model, position);
+        if (context && context.partial) {
+          const hasMatch = referenceEntries.some(
+            (entry) =>
+              entry.name.toLowerCase().startsWith(context.partial) &&
+              entry.name.toLowerCase() !== context.partial
+          );
+          if (hasMatch) {
+            suggestionCooldownUntilRef.current = 0;
+            triggerReferenceSuggestions();
+          }
+        }
+      }, TYPING_SUGGEST_DELAY_MS);
+
+      // Idle trigger: 5 seconds, respects cooldown
+      idleTimeoutRef.current = window.setTimeout(() => {
+        if (Date.now() < suggestionCooldownUntilRef.current) return;
+        const editor = editorRef.current;
+        const model = editor?.getModel();
+        const position = editor?.getPosition();
+        if (!model || !position) return;
+        const context = getSuggestionContext(model, position);
+        if (context && context.partial) {
+          const hasMatch = referenceEntries.some(
+            (entry) =>
+              entry.name.toLowerCase().startsWith(context.partial) &&
+              entry.name.toLowerCase() !== context.partial
+          );
+          if (hasMatch) {
+            triggerReferenceSuggestions();
+          }
+        }
+      }, IDLE_SUGGEST_DELAY_MS);
+
       syncHeadingState();
     });
   };
@@ -766,6 +828,7 @@ const EditorPanel: React.FC = () => {
     return () => {
       completionDisposableRef.current.forEach((disposable) => disposable.dispose());
       if (suggestionTimeoutRef.current) window.clearTimeout(suggestionTimeoutRef.current);
+      if (idleTimeoutRef.current) window.clearTimeout(idleTimeoutRef.current);
       if (autoSaveTimeoutRef.current) window.clearTimeout(autoSaveTimeoutRef.current);
       registerEditorBridge(null);
     };
@@ -1021,9 +1084,9 @@ const EditorPanel: React.FC = () => {
               },
               folding: !isReferenceFile,
               showFoldingControls: "mouseover",
-              quickSuggestions: true,
-              suggestOnTriggerCharacters: true,
-              acceptSuggestionOnEnter: "smart",
+              quickSuggestions: false,
+              suggestOnTriggerCharacters: false,
+              acceptSuggestionOnEnter: "off",
               formatOnPaste: true,
               formatOnType: true,
               smoothScrolling: true,

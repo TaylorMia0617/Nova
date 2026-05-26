@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { MessageSquarePlus, Paperclip, Send, Sparkles, Trash2, X } from "lucide-react";
+import { MessageSquarePlus, Paperclip, Send, Settings, Sparkles, Trash2, X } from "lucide-react";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useFileStore } from "../stores/fileStore";
 import { callAI } from "../services/aiService";
@@ -41,7 +41,7 @@ function buildTitleFromMessage(content: string) {
 
 const CopilotPanel: React.FC = () => {
   const { activeFile, rootPath } = useFileStore();
-  const { modelProfiles, defaultChatModelId, getModelProfileById } = useSettingsStore();
+  const { modelProfiles, defaultChatModelId, getModelProfileById, chatMaxTokens, setChatMaxTokens } = useSettingsStore();
   const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
   const [activeConversation, setActiveConversation] = useState<ConversationRecord | null>(null);
   const [input, setInput] = useState("");
@@ -49,6 +49,8 @@ const CopilotPanel: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [selectionToolbar, setSelectionToolbar] = useState<{ text: string; x: number; y: number } | null>(null);
   const [statusText, setStatusText] = useState("");
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [tempMaxTokens, setTempMaxTokens] = useState(String(chatMaxTokens));
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const lastDefaultChatModelIdRef = useRef(defaultChatModelId);
 
@@ -209,6 +211,8 @@ const CopilotPanel: React.FC = () => {
         taskType: "chat",
         userMessage: userMessage.content,
         documentContext: activeFile?.content || getEditorContent() || "",
+        documentFileName: activeFile?.name,
+        maxTokens: chatMaxTokens,
         conversationHistory: nextMessages.slice(-6, -1),
         attachments: draftAttachments,
       });
@@ -457,7 +461,59 @@ const CopilotPanel: React.FC = () => {
         <div className="copilot-footer-note">
           <span>{currentModel ? `Model: ${currentModel.label}` : "No model selected"}</span>
           <span>{activeFile ? `Context: ${activeFile.name}` : "No active file context"}</span>
+          <button
+            className="copilot-settings-button"
+            onClick={() => {
+              setTempMaxTokens(String(chatMaxTokens));
+              setIsSettingsOpen(true);
+            }}
+            title="Copilot settings"
+          >
+            <Settings size={12} />
+          </button>
         </div>
+        {isSettingsOpen && (
+          <div className="copilot-settings-backdrop" onClick={() => setIsSettingsOpen(false)}>
+            <div className="copilot-settings-dialog" onClick={(e) => e.stopPropagation()}>
+              <div className="copilot-settings-header">
+                <h3>Copilot Settings</h3>
+                <button onClick={() => setIsSettingsOpen(false)}>
+                  <X size={16} />
+                </button>
+              </div>
+              <label className="copilot-settings-field">
+                <span>Max Tokens</span>
+                <input
+                  type="number"
+                  min={256}
+                  max={128000}
+                  step={256}
+                  value={tempMaxTokens}
+                  onChange={(e) => setTempMaxTokens(e.target.value)}
+                />
+              </label>
+              <div className="copilot-settings-actions">
+                <button
+                  className="secondary"
+                  onClick={() => setIsSettingsOpen(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    const value = parseInt(tempMaxTokens, 10);
+                    if (!isNaN(value) && value >= 256 && value <= 128000) {
+                      setChatMaxTokens(value);
+                    }
+                    setIsSettingsOpen(false);
+                  }}
+                >
+                  Save
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         {statusText && <div className="copilot-status">{statusText}</div>}
       </div>
     </div>
