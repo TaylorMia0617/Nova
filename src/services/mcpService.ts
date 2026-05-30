@@ -1,12 +1,5 @@
 import type { ModelProfile } from "../types/ai";
 
-type JsonRpcRequest = {
-  jsonrpc: "2.0";
-  id: number;
-  method: string;
-  params?: Record<string, unknown>;
-};
-
 type JsonRpcResponse<T = unknown> = {
   jsonrpc: "2.0";
   id: number | string | null;
@@ -19,32 +12,18 @@ type JsonRpcResponse<T = unknown> = {
 
 let requestCounter = 0;
 
-function buildHeaders(profile: ModelProfile, extra?: Record<string, string>) {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    Accept: "application/json, text/event-stream",
-    ...extra,
-  };
-
-  profile.headers.forEach((header) => {
-    if (header.key.trim()) {
-      headers[header.key.trim()] = header.value;
-    }
-  });
-
-  if (profile.apiKey.trim()) {
-    headers.Authorization = `Bearer ${profile.apiKey.trim()}`;
+async function readResponsePayload<T>(response: Response): Promise<T> {
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "Unknown error");
+    throw new Error(`MCP server error: ${response.status} ${response.statusText} - ${errorText}`);
   }
 
-  return headers;
-}
-
-async function readResponsePayload<T>(response: Response): Promise<T> {
   const text = await response.text();
   if (!text.trim()) {
     throw new Error("MCP server returned an empty response.");
   }
 
+  // Handle SSE format
   if (response.headers.get("content-type")?.includes("text/event-stream")) {
     const dataLines = text
       .split(/\r?\n/)
@@ -60,7 +39,11 @@ async function readResponsePayload<T>(response: Response): Promise<T> {
     return JSON.parse(lastData) as T;
   }
 
-  return JSON.parse(text) as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch (e) {
+    throw new Error(`Failed to parse MCP response: ${text.slice(0, 200)}`);
+  }
 }
 
 async function sendJsonRpc<T>(
@@ -72,21 +55,36 @@ async function sendJsonRpc<T>(
     throw new Error("This model profile does not have an MCP server URL.");
   }
 
-  const payload: JsonRpcRequest = {
-    jsonrpc: "2.0",
+  // Build payload with config included for stateless proxy
+  const payload = {
+    jsonrpc: "2.0" as const,
     id: ++requestCounter,
     method,
     params,
+    // Include config for stateless proxy design
+    base_url: profile.baseUrl,
+    api_key: profile.apiKey,
   };
 
-  const response = await fetch(profile.mcpServerUrl, {
-    method: "POST",
-    headers: buildHeaders(profile),
-    body: JSON.stringify(payload),
-  });
-
-  if (!response.ok) {
-    throw new Error(`MCP server error: ${response.status} ${response.statusText}`);
+  let response: Response;
+  try {
+    response = await fetch(profile.mcpServerUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch (error: any) {
+    // Provide more helpful error messages for common issues
+    if (error.message?.includes("Failed to fetch") || error.message?.includes("NetworkError")) {
+      throw new Error(
+        `Failed to connect to MCP server at ${profile.mcpServerUrl}. ` +
+        `This could be due to: CORS restrictions, server unavailable, or invalid URL.`
+      );
+    }
+    throw error;
   }
 
   const data = await readResponsePayload<JsonRpcResponse<T>>(response);

@@ -1,12 +1,20 @@
 import React, { useMemo, useState } from "react";
-import { FolderOpen, SaveAll, Settings } from "lucide-react";
+import { FolderOpen, SaveAll, Settings, Globe } from "lucide-react";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useFileStore } from "../stores/fileStore";
+import { useTranslation } from "../hooks/useTranslation";
+import type { Locale } from "../i18n";
 import SettingsModal from "./SettingsModal";
 import "./Header.css";
 
+const LOCALE_OPTIONS: { value: Locale; label: string }[] = [
+  { value: "zh-CN", label: "中文" },
+  { value: "en-US", label: "English" },
+];
+
 const Header: React.FC = () => {
-  const { modelProfiles, defaultChatModelId, defaultSelectionModelId } = useSettingsStore();
+  const { modelProfiles, defaultChatModelId, defaultSelectionModelId, language, setLanguage } = useSettingsStore();
+  const { t } = useTranslation();
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const {
     rootName,
@@ -33,13 +41,13 @@ const Header: React.FC = () => {
       <header className="header">
         <div className="header-left">
           <div>
-            <h1 className="app-title">Nova/诺瓦</h1>
+            <h1 className="app-title">{t("header.title")}</h1>
             <span className="app-subtitle">
-              {rootName ? `Workspace: ${rootName}` : "Electron writing workspace"}
+              {rootName ? t("header.workspace", { name: rootName }) : t("header.subtitle")}
             </span>
             {rootName && !errorMessage && (
               <div className="workspace-hint">
-                Chat model: {chatModel?.label || "Not configured"} · Selection model: {selectionModel?.label || "Not configured"}
+                {t("header.chatModel")}: {chatModel?.label || t("header.notConfigured")} · {t("header.selectionModel")}: {selectionModel?.label || t("header.notConfigured")}
               </div>
             )}
             {errorMessage && (
@@ -50,17 +58,31 @@ const Header: React.FC = () => {
           </div>
         </div>
         <div className="header-right">
+          <div className="language-selector">
+            <Globe size={14} />
+            <select
+              value={language}
+              onChange={(event) => setLanguage(event.target.value as Locale)}
+              title={t("header.language")}
+            >
+              {LOCALE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
           <button className="workspace-button" onClick={() => void openWorkspace()} disabled={isLoadingWorkspace}>
             <FolderOpen size={16} />
-            <span>{isLoadingWorkspace ? "Opening..." : "Open Workspace"}</span>
+            <span>{isLoadingWorkspace ? t("header.opening") : t("header.openWorkspace")}</span>
           </button>
           <button className="workspace-button" onClick={() => void saveAllFiles()} disabled={dirtyCount === 0}>
             <SaveAll size={16} />
-            <span>{dirtyCount > 0 ? `Save All (${dirtyCount})` : "Save All"}</span>
+            <span>{dirtyCount > 0 ? t("header.saveAllCount", { count: dirtyCount }) : t("header.saveAll")}</span>
           </button>
-          <button className="icon-button settings-launch" title="AI settings" onClick={() => setIsSettingsOpen(true)}>
+          <button className="icon-button settings-launch" title={t("header.settings")} onClick={() => setIsSettingsOpen(true)}>
             <Settings size={20} />
-            <span>Settings</span>
+            <span>{t("header.settings")}</span>
           </button>
         </div>
       </header>

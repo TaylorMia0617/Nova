@@ -1,6 +1,7 @@
 import { Plus, Save, Trash2, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSettingsStore } from "../stores/settingsStore";
+import { useTranslation } from "../hooks/useTranslation";
 import type { ModelProfile } from "../types/ai";
 import { testMcpConnection } from "../services/mcpService";
 import "./SettingsModal.css";
@@ -19,8 +20,10 @@ const createDraftProfile = (): ModelProfile => ({
   transportType: "sse-http",
   mcpServerUrl: "",
   headers: [],
-  rememberSecrets: false,
+  rememberSecrets: true,
 });
+
+const AUTO_SAVE_DELAY = 5000;
 
 const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const {
@@ -28,23 +31,42 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     defaultChatModelId,
     defaultSelectionModelId,
     selectionPromptTemplates,
+    contextMaxLength,
     setModelProfiles,
     updateModelProfile,
     removeModelProfile,
     setDefaultChatModelId,
     setDefaultSelectionModelId,
     setSelectionPromptTemplate,
+    setContextMaxLength,
   } = useSettingsStore();
+  const { t } = useTranslation();
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(modelProfiles[0]?.id ?? null);
   const [profileDraft, setProfileDraft] = useState<ModelProfile | null>(null);
   const [testingProfileId, setTestingProfileId] = useState<string | null>(null);
   const [testStatus, setTestStatus] = useState<string>("");
   const [saveStatus, setSaveStatus] = useState<string>("");
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestDraftRef = useRef<ModelProfile | null>(null);
 
   const selectedProfile = useMemo(
     () => modelProfiles.find((profile) => profile.id === selectedProfileId) ?? modelProfiles[0] ?? null,
     [modelProfiles, selectedProfileId]
   );
+
+  const flushAutoSave = useCallback(() => {
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+    const draft = latestDraftRef.current;
+    if (!draft) return;
+    updateModelProfile(draft.id, draft);
+  }, [updateModelProfile]);
+
+  useEffect(() => {
+    latestDraftRef.current = profileDraft;
+  }, [profileDraft]);
 
   useEffect(() => {
     if (!selectedProfile && modelProfiles[0]) {
@@ -57,6 +79,42 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     setTestStatus("");
   }, [selectedProfile, modelProfiles]);
 
+  useEffect(() => {
+    if (!isOpen) {
+      if (autoSaveTimerRef.current) {
+        clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
+      }
+      return;
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        flushAutoSave();
+      }
+    };
+
+    const handleWindowBlur = () => {
+      flushAutoSave();
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("blur", handleWindowBlur);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("blur", handleWindowBlur);
+    };
+  }, [isOpen, flushAutoSave]);
+
+  useEffect(() => {
+    return () => {
+      if (autoSaveTimerRef.current) {
+        clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = null;
+      }
+    };
+  }, []);
+
   if (!isOpen) return null;
 
   const handleAddProfile = () => {
@@ -66,29 +124,64 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     setDefaultSelectionModelId(next.id);
     setSelectedProfileId(next.id);
     setProfileDraft(next);
-    setSaveStatus("New profile created. Fill in the fields and click Save Profile.");
+    setSaveStatus(t("settings.newProfileCreated"));
+  };
+
+  const scheduleAutoSave = (draft: ModelProfile) => {
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+    }
+    autoSaveTimerRef.current = setTimeout(() => {
+      autoSaveTimerRef.current = null;
+      updateModelProfile(draft.id, draft);
+      setSaveStatus(t("settings.profileSaved"));
+    }, AUTO_SAVE_DELAY);
   };
 
   const updateDraft = (patch: Partial<ModelProfile>) => {
-    setProfileDraft((current) => (current ? { ...current, ...patch } : current));
+    setProfileDraft((current) => {
+      if (!current) return current;
+      const next = { ...current, ...patch };
+      scheduleAutoSave(next);
+      return next;
+    });
     setSaveStatus("");
   };
 
   const handleSaveProfile = () => {
     if (!profileDraft) return;
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
     updateModelProfile(profileDraft.id, profileDraft);
     setDefaultChatModelId(profileDraft.id);
     setDefaultSelectionModelId(profileDraft.id);
-    setSaveStatus("Profile saved.");
+    setSaveStatus(t("settings.profileSaved"));
+  };
+
+  const handleSelectProfile = (id: string) => {
+    if (id === selectedProfileId) return;
+    flushAutoSave();
+    setSelectedProfileId(id);
+  };
+
+  const handleClose = () => {
+    flushAutoSave();
+    onClose();
   };
 
   const handleDeleteProfile = () => {
     if (!selectedProfile) return;
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
     removeModelProfile(selectedProfile.id);
     const nextProfile = modelProfiles.find((profile) => profile.id !== selectedProfile.id) ?? null;
     setSelectedProfileId(nextProfile?.id ?? null);
     setProfileDraft(nextProfile ? { ...nextProfile } : null);
-    setSaveStatus("Profile deleted.");
+    setSaveStatus(t("settings.profileDeleted"));
   };
 
   const handleTest = async () => {
@@ -102,33 +195,33 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         typeof result === "object" && result && "tools" in result && Array.isArray((result as any).tools)
           ? (result as any).tools.length
           : 0;
-      setTestStatus(toolCount > 0 ? `Connected. ${toolCount} tool(s) available.` : "Connected, but no tools were listed.");
+      setTestStatus(toolCount > 0 ? t("settings.connected", { count: toolCount }) : t("settings.connectedNoTools"));
     } catch (error) {
-      setTestStatus(error instanceof Error ? error.message : "Connection test failed.");
+      setTestStatus(error instanceof Error ? error.message : t("settings.connectionFailed"));
     } finally {
       setTestingProfileId(null);
     }
   };
 
   return (
-    <div className="dialog-backdrop settings-backdrop" onClick={onClose}>
+    <div className="dialog-backdrop settings-backdrop" onClick={handleClose}>
       <div className="settings-modal" onClick={(event) => event.stopPropagation()}>
         <div className="settings-header">
           <div>
-            <h2>AI Settings</h2>
-            <p>Configure model profiles, MCP endpoints, and selection prompts.</p>
+            <h2>{t("settings.title")}</h2>
+            <p>{t("settings.description")}</p>
           </div>
-          <button className="icon-button" onClick={onClose} aria-label="Close settings">
+          <button className="icon-button" onClick={handleClose} aria-label="Close settings">
             <X size={18} />
           </button>
         </div>
         <div className="settings-layout">
           <aside className="settings-sidebar">
             <div className="settings-sidebar-header">
-              <h3>Model Profiles</h3>
+              <h3>{t("settings.modelProfiles")}</h3>
               <button onClick={handleAddProfile} className="workspace-button compact-button" type="button">
                 <Plus size={14} />
-                <span>Add</span>
+                <span>{t("settings.add")}</span>
               </button>
             </div>
             <div className="settings-profile-list">
@@ -137,20 +230,34 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                   key={profile.id}
                   type="button"
                   className={`settings-profile-item ${selectedProfile?.id === profile.id ? "active" : ""}`}
-                  onClick={() => setSelectedProfileId(profile.id)}
+                  onClick={() => handleSelectProfile(profile.id)}
                 >
-                  <strong>{profile.label || "Untitled Model"}</strong>
-                  <span>{profile.model || "No model id"}</span>
+                  <strong>{profile.label || t("settings.untitledModel")}</strong>
+                  <span>{profile.model || t("settings.noModelId")}</span>
                 </button>
               ))}
             </div>
           </aside>
           <div className="settings-content">
+            <div className="settings-section">
+              <h3>{t("settings.contextMaxLength")}</h3>
+              <label>
+                <input
+                  type="number"
+                  min={1000}
+                  max={20000}
+                  step={500}
+                  value={contextMaxLength}
+                  onChange={(event) => setContextMaxLength(Number(event.target.value))}
+                />
+                <span>{t("settings.contextMaxLengthHint")}</span>
+              </label>
+            </div>
             {profileDraft ? (
               <>
                 <div className="settings-grid">
                   <label>
-                    <span>Name</span>
+                    <span>{t("settings.name")}</span>
                     <input
                       type="text"
                       value={profileDraft.label}
@@ -159,7 +266,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                     />
                   </label>
                   <label>
-                    <span>Model ID</span>
+                    <span>{t("settings.modelId")}</span>
                     <input
                       type="text"
                       value={profileDraft.model}
@@ -168,7 +275,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                     />
                   </label>
                   <label>
-                    <span>AI Base URL</span>
+                    <span>{t("settings.aiBaseUrl")}</span>
                     <input
                       type="text"
                       value={profileDraft.baseUrl}
@@ -177,7 +284,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                     />
                   </label>
                   <label>
-                    <span>MCP Server URL</span>
+                    <span>{t("settings.mcpServerUrl")}</span>
                     <input
                       type="text"
                       value={profileDraft.mcpServerUrl}
@@ -186,7 +293,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                     />
                   </label>
                   <label className="settings-span-2">
-                    <span>API Key</span>
+                    <span>{t("settings.apiKey")}</span>
                     <input
                       type="password"
                       value={profileDraft.apiKey}
@@ -202,12 +309,12 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                       checked={profileDraft.rememberSecrets}
                       onChange={(event) => updateDraft({ rememberSecrets: event.target.checked })}
                     />
-                    <span>Remember secrets on this device</span>
+                    <span>{t("settings.rememberSecrets")}</span>
                   </label>
                 </div>
                 <div className="settings-row">
                   <label>
-                    <span>Default Chat Model</span>
+                    <span>{t("settings.defaultChatModel")}</span>
                     <select
                       value={defaultChatModelId}
                       onChange={(event) => setDefaultChatModelId(event.target.value)}
@@ -220,7 +327,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                     </select>
                   </label>
                   <label>
-                    <span>Default Selection Model</span>
+                    <span>{t("settings.defaultSelectionModel")}</span>
                     <select
                       value={defaultSelectionModelId}
                       onChange={(event) => setDefaultSelectionModelId(event.target.value)}
@@ -234,9 +341,9 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                   </label>
                 </div>
                 <div className="settings-prompts">
-                  <h3>Selection Prompts</h3>
+                  <h3>{t("settings.selectionPrompts")}</h3>
                   <label>
-                    <span>润色</span>
+                    <span>{t("settings.polish")}</span>
                     <textarea
                       rows={3}
                       value={selectionPromptTemplates.polish}
@@ -244,7 +351,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                     />
                   </label>
                   <label>
-                    <span>纠错</span>
+                    <span>{t("settings.correct")}</span>
                     <textarea
                       rows={3}
                       value={selectionPromptTemplates.correct}
@@ -252,7 +359,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                     />
                   </label>
                   <label>
-                    <span>风格化</span>
+                    <span>{t("settings.stylize")}</span>
                     <textarea
                       rows={3}
                       value={selectionPromptTemplates.stylize}
@@ -263,7 +370,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                 <div className="settings-actions">
                   <button className="workspace-button" onClick={handleSaveProfile} type="button">
                     <Save size={14} />
-                    <span>Save Profile</span>
+                    <span>{t("settings.saveProfile")}</span>
                   </button>
                   <button
                     className="workspace-button"
@@ -272,7 +379,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                     type="button"
                   >
                     <Save size={14} />
-                    <span>{testingProfileId === profileDraft.id ? "Testing..." : "Test MCP Connection"}</span>
+                    <span>{testingProfileId === profileDraft.id ? t("settings.testing") : t("settings.testMcpConnection")}</span>
                   </button>
                   <button
                     className="workspace-button danger-button"
@@ -281,14 +388,14 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                     type="button"
                   >
                     <Trash2 size={14} />
-                    <span>Delete Profile</span>
+                    <span>{t("settings.deleteProfile")}</span>
                   </button>
                 </div>
                 {saveStatus && <div className="settings-status">{saveStatus}</div>}
                 {testStatus && <div className="settings-status">{testStatus}</div>}
               </>
             ) : (
-              <div className="settings-empty">Create a model profile to begin.</div>
+              <div className="settings-empty">{t("settings.createProfile")}</div>
             )}
           </div>
         </div>

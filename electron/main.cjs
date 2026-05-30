@@ -697,6 +697,12 @@ app.whenReady().then(async () => {
 });
 
 app.on("before-quit", () => {
+  for (const [terminalId, terminal] of terminals.entries()) {
+    try {
+      terminal.kill();
+    } catch {}
+    terminals.delete(terminalId);
+  }
   for (const watcher of workspaceWatchers.values()) {
     watcher.close();
   }
@@ -707,6 +713,21 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
     app.quit();
   }
+});
+
+app.on("will-quit", () => {
+  for (const [terminalId, terminal] of terminals.entries()) {
+    try {
+      terminal.kill();
+    } catch {}
+    terminals.delete(terminalId);
+  }
+  for (const watcher of workspaceWatchers.values()) {
+    try {
+      watcher.close();
+    } catch {}
+  }
+  workspaceWatchers.clear();
 });
 
 // ─── IPC Handlers ─────────────────────────────────────────────────────────────
@@ -750,6 +771,22 @@ ipcMain.handle("fs:writeFile", async (_event, filePath, content) => {
   await fs.writeFile(assertWorkspacePath(filePath), content, "utf8");
 });
 
+async function writeWithRetry(filePath, content, maxRetries = 3, delay = 200) {
+  let lastError = null;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      await fs.writeFile(filePath, content, "utf8");
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxRetries - 1 && error.code === "EPERM" || error.code === "EACCES") {
+        await new Promise((resolve) => setTimeout(resolve, delay * (attempt + 1)));
+      }
+    }
+  }
+  throw lastError;
+}
+
 ipcMain.handle("settings:read", async (_event, name) => {
   const settingsPath = getGlobalSettingsPath(name);
   if (!(await pathExists(settingsPath))) {
@@ -761,7 +798,7 @@ ipcMain.handle("settings:read", async (_event, name) => {
 ipcMain.handle("settings:write", async (_event, name, content) => {
   const settingsPath = getGlobalSettingsPath(name);
   await fs.mkdir(path.dirname(settingsPath), { recursive: true });
-  await fs.writeFile(settingsPath, content, "utf8");
+  await writeWithRetry(settingsPath, content);
 });
 
 ipcMain.handle("settings:delete", async (_event, name) => {
@@ -780,7 +817,7 @@ ipcMain.handle("settings:readGlobalApiConfig", async () => {
 ipcMain.handle("settings:writeGlobalApiConfig", async (_event, content) => {
   const configPath = getGlobalApiConfigPath();
   await fs.mkdir(path.dirname(configPath), { recursive: true });
-  await fs.writeFile(configPath, content, "utf8");
+  await writeWithRetry(configPath, content);
 });
 
 ipcMain.handle("fs:createFile", async (_event, filePath) => {
@@ -882,8 +919,14 @@ ipcMain.handle("ai:writeConversation", async (_event, record) => {
 ipcMain.handle("ai:deleteConversation", async (_event, conversationId) => {
   await ensureWorkspaceAppData();
   const filePath = getConversationFilePath(conversationId);
-  if (await pathExists(filePath)) {
-    await fs.rm(filePath, { force: true });
+  try {
+    await fs.unlink(filePath);
+  } catch (unlinkError) {
+    try {
+      await fs.rm(filePath, { force: true });
+    } catch (rmError) {
+      console.warn(`Failed to delete conversation file ${filePath}:`, rmError.message);
+    }
   }
   const currentIndex = await readConversationIndex();
   const nextIndex = currentIndex.filter((item) => item.id !== conversationId);

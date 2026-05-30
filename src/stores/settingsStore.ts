@@ -2,15 +2,20 @@ import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import type { ModelProfile, SelectionPromptTemplates } from "../types/ai";
 import { readGlobalApiConfig, writeGlobalApiConfig } from "../services/fileSystemService";
+import type { Locale } from "../i18n";
+import { setLocale } from "../i18n";
 
 type PromptKey = keyof SelectionPromptTemplates;
 
 interface SettingsState {
+  language: Locale;
   modelProfiles: ModelProfile[];
   defaultChatModelId: string;
   defaultSelectionModelId: string;
   selectionPromptTemplates: SelectionPromptTemplates;
   chatMaxTokens: number;
+  contextMaxLength: number;
+  setLanguage: (locale: Locale) => void;
   setModelProfiles: (profiles: ModelProfile[]) => void;
   updateModelProfile: (id: string, patch: Partial<ModelProfile>) => void;
   removeModelProfile: (id: string) => void;
@@ -18,6 +23,7 @@ interface SettingsState {
   setDefaultSelectionModelId: (id: string) => void;
   setSelectionPromptTemplate: (key: PromptKey, value: string) => void;
   setChatMaxTokens: (value: number) => void;
+  setContextMaxLength: (value: number) => void;
   getModelProfileById: (id: string | null | undefined) => ModelProfile | null;
 }
 
@@ -30,7 +36,7 @@ const DEFAULT_PROFILE: ModelProfile = {
   transportType: "sse-http",
   mcpServerUrl: "",
   headers: [],
-  rememberSecrets: false,
+  rememberSecrets: true,
 };
 
 const DEFAULT_PROMPTS: SelectionPromptTemplates = {
@@ -119,7 +125,8 @@ export async function syncFromFile(): Promise<boolean> {
         JSON.stringify(currentState.defaultChatModelId) ||
       JSON.stringify(parsed.defaultSelectionModelId) !==
         JSON.stringify(currentState.defaultSelectionModelId) ||
-      parsed.chatMaxTokens !== currentState.chatMaxTokens;
+      parsed.chatMaxTokens !== currentState.chatMaxTokens ||
+      parsed.language !== currentState.language;
 
     if (hasChanges) {
       useSettingsStore.setState(parsed);
@@ -136,6 +143,7 @@ export async function exportToFile(): Promise<boolean> {
   try {
     const state = useSettingsStore.getState();
     const dataToExport = {
+      language: state.language,
       modelProfiles: state.modelProfiles.map(sanitizeProfile),
       defaultChatModelId: state.defaultChatModelId,
       defaultSelectionModelId: state.defaultSelectionModelId,
@@ -153,11 +161,17 @@ export async function exportToFile(): Promise<boolean> {
 export const useSettingsStore = create<SettingsState>()(
   persist(
     (set, get) => ({
+      language: "zh-CN" as Locale,
       modelProfiles: [DEFAULT_PROFILE],
       defaultChatModelId: DEFAULT_PROFILE.id,
       defaultSelectionModelId: DEFAULT_PROFILE.id,
       selectionPromptTemplates: DEFAULT_PROMPTS,
       chatMaxTokens: 8192,
+      contextMaxLength: 5000,
+      setLanguage: (locale) => {
+        setLocale(locale);
+        set({ language: locale });
+      },
       setModelProfiles: (profiles) =>
         set((state) => {
           const nextProfiles = profiles.length > 0 ? profiles : [DEFAULT_PROFILE];
@@ -208,6 +222,7 @@ export const useSettingsStore = create<SettingsState>()(
           },
         })),
       setChatMaxTokens: (value) => set({ chatMaxTokens: value }),
+      setContextMaxLength: (value) => set({ contextMaxLength: value }),
       getModelProfileById: (id) => {
         if (!id) return null;
         return get().modelProfiles.find((profile) => profile.id === id) ?? null;
@@ -217,15 +232,19 @@ export const useSettingsStore = create<SettingsState>()(
       name: SETTINGS_STORAGE_NAME,
       storage: createJSONStorage(() => globalSettingsStorage),
       partialize: (state) => ({
+        language: state.language,
         modelProfiles: state.modelProfiles.map(sanitizeProfile),
         defaultChatModelId: state.defaultChatModelId,
         defaultSelectionModelId: state.defaultSelectionModelId,
         selectionPromptTemplates: state.selectionPromptTemplates,
         chatMaxTokens: state.chatMaxTokens,
+        contextMaxLength: state.contextMaxLength,
       }),
       onRehydrateStorage: () => {
         return (_state, error) => {
           if (!error) {
+            const currentLanguage = useSettingsStore.getState().language;
+            setLocale(currentLanguage);
             loadFromFile().then((fileContent) => {
               if (fileContent) {
                 try {

@@ -9,13 +9,13 @@ export default defineConfig(async () => ({
     exclude: ["jspdf", "canvg", "html2canvas", "core-js"],
   },
   build: {
-    rollupOptions: {
+    rolldownOptions: {
       external: (id) => id.startsWith("core-js/modules/"),
       output: {
-        manualChunks: {
-          monaco: ["@monaco-editor/react"],
-          terminal: ["@xterm/xterm", "@xterm/addon-fit"],
-          react: ["react", "react-dom"],
+        manualChunks(id) {
+          if (id.includes("@monaco-editor/react")) return "monaco";
+          if (id.includes("@xterm/xterm") || id.includes("@xterm/addon-fit")) return "terminal";
+          if (id.includes("node_modules/react/") || id.includes("node_modules/react-dom/")) return "react";
         },
       },
     },

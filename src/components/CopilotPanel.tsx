@@ -1,7 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { MessageSquarePlus, Paperclip, Send, Settings, Sparkles, Trash2, X } from "lucide-react";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useFileStore } from "../stores/fileStore";
+import { useTranslation } from "../hooks/useTranslation";
 import { callAI } from "../services/aiService";
 import {
   deleteConversation,
@@ -12,7 +15,7 @@ import {
 } from "../services/conversationService";
 import { selectTextAttachments } from "../services/attachmentService";
 import { getEditorContent, insertTextIntoEditor } from "../services/editorInsertionService";
-import type { ConversationAttachment, ConversationMessage, ConversationRecord, ConversationSummary } from "../types/ai";
+import type { ConversationAttachment, ConversationMessage, ConversationRecord, ConversationSummary, DocumentMeta, MultiFileContext } from "../types/ai";
 import "./CopilotPanel.css";
 
 function createId(prefix: string) {
@@ -40,8 +43,9 @@ function buildTitleFromMessage(content: string) {
 }
 
 const CopilotPanel: React.FC = () => {
-  const { activeFile, rootPath } = useFileStore();
-  const { modelProfiles, defaultChatModelId, getModelProfileById, chatMaxTokens, setChatMaxTokens } = useSettingsStore();
+  const { activeFile, rootPath, getFileChanges, openTabs } = useFileStore();
+  const { modelProfiles, defaultChatModelId, getModelProfileById, chatMaxTokens, setChatMaxTokens, contextMaxLength } = useSettingsStore();
+  const { t } = useTranslation();
   const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
   const [activeConversation, setActiveConversation] = useState<ConversationRecord | null>(null);
   const [input, setInput] = useState("");
@@ -50,7 +54,11 @@ const CopilotPanel: React.FC = () => {
   const [selectionToolbar, setSelectionToolbar] = useState<{ text: string; x: number; y: number } | null>(null);
   const [statusText, setStatusText] = useState("");
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [tempMaxTokens, setTempMaxTokens] = useState(String(chatMaxTokens));
+  const [conversationFileHistory, setConversationFileHistory] = useState<
+    Array<{ meta: DocumentMeta; lastUsed: string }>
+  >([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const lastDefaultChatModelIdRef = useRef(defaultChatModelId);
 
@@ -61,6 +69,44 @@ const CopilotPanel: React.FC = () => {
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  const buildMultiFileContext = (): MultiFileContext | undefined => {
+    if (!activeFile) return undefined;
+
+    const activeMeta: DocumentMeta = {
+      fileName: activeFile.name,
+      filePath: activeFile.path,
+      charCount: activeFile.savedContent.length,
+      lineCount: activeFile.savedContent.split('\n').length,
+      wordCount: activeFile.savedContent.length,
+    };
+
+    const otherFiles = openTabs
+      .filter(tab => tab.path !== activeFile.path)
+      .slice(0, 5)
+      .map(tab => ({
+        meta: {
+          fileName: tab.name,
+          filePath: tab.path,
+          charCount: tab.savedContent.length,
+          lineCount: tab.savedContent.split('\n').length,
+          wordCount: tab.savedContent.length,
+        },
+        preview: tab.savedContent.slice(0, 500),
+      }));
+
+    const fileChanges = getFileChanges(activeFile.path);
+
+    return {
+      activeFile: {
+        meta: activeMeta,
+        content: activeFile.savedContent,
+        recentChanges: fileChanges,
+      },
+      otherOpenFiles: otherFiles,
+      conversationFiles: conversationFileHistory,
+    };
   };
 
   const loadConversation = async (conversationId: string) => {
@@ -111,7 +157,7 @@ const CopilotPanel: React.FC = () => {
         setActiveConversation(null);
         setInput("");
         setDraftAttachments([]);
-        setStatusText("Open a workspace to enable saved conversations.");
+        setStatusText(t("copilot.openWorkspace"));
         return;
       }
 
@@ -206,6 +252,8 @@ const CopilotPanel: React.FC = () => {
     await persistConversation(draftRecord);
 
     try {
+      const multiFileContext = buildMultiFileContext();
+
       const response = await callAI({
         modelProfile: currentModel,
         taskType: "chat",
@@ -215,7 +263,36 @@ const CopilotPanel: React.FC = () => {
         maxTokens: chatMaxTokens,
         conversationHistory: nextMessages.slice(-6, -1),
         attachments: draftAttachments,
+        multiFileContext,
+        contextMaxLength,
       });
+
+      if (activeFile) {
+        const existing = conversationFileHistory.find(f => f.meta.filePath === activeFile.path);
+        if (existing) {
+          setConversationFileHistory(prev =>
+            prev.map(f =>
+              f.meta.filePath === activeFile.path
+                ? { ...f, lastUsed: new Date().toISOString() }
+                : f
+            )
+          );
+        } else {
+          setConversationFileHistory(prev => [
+            ...prev,
+            {
+              meta: {
+                fileName: activeFile.name,
+                filePath: activeFile.path,
+                charCount: activeFile.savedContent.length,
+                lineCount: activeFile.savedContent.split('\n').length,
+                wordCount: activeFile.savedContent.length,
+              },
+              lastUsed: new Date().toISOString(),
+            }
+          ]);
+        }
+      }
 
       const assistantMessage: ConversationMessage = {
         id: createId("msg"),
@@ -236,19 +313,25 @@ const CopilotPanel: React.FC = () => {
     }
   };
 
-  const handleDeleteConversation = async () => {
+  const handleConfirmDelete = async () => {
+    setIsDeleteConfirmOpen(false);
     if (!activeConversation) return;
-    const summaries = await deleteConversation(activeConversation.id);
-    setConversationSummaries(summaries);
-    if (summaries[0]) {
-      await loadConversation(summaries[0].id);
-      return;
-    }
 
-    const draft = createConversation(defaultChatModelId, activeFile?.path);
-    setActiveConversation(draft);
-    setInput("");
-    setDraftAttachments([]);
+    try {
+      const summaries = await deleteConversation(activeConversation.id);
+      setConversationSummaries(summaries);
+      if (summaries[0]) {
+        await loadConversation(summaries[0].id);
+        return;
+      }
+
+      const draft = createConversation(defaultChatModelId, activeFile?.path);
+      setActiveConversation(draft);
+      setInput("");
+      setDraftAttachments([]);
+    } catch (error) {
+      setStatusText(error instanceof Error ? error.message : "Failed to delete conversation.");
+    }
   };
 
   const handleInsertToEditor = (content: string) => {
@@ -280,14 +363,14 @@ const CopilotPanel: React.FC = () => {
     <div className="copilot-panel">
       <div className="panel-header copilot-header">
         <div className="copilot-header-main">
-          <h2>AI Copilot</h2>
-          <span>{activeConversation?.title || "Conversation"}</span>
+          <h2>{t("copilot.title")}</h2>
+          <span>{activeConversation?.title || t("copilot.conversation")}</span>
         </div>
         <div className="panel-actions">
-          <button onClick={() => void handleNewConversation()} title="New conversation">
+          <button onClick={() => void handleNewConversation()} title={t("copilot.newConversation")}>
             <MessageSquarePlus size={16} />
           </button>
-          <button onClick={handleDeleteConversation} title="Delete conversation" disabled={!activeConversation}>
+          <button onClick={() => setIsDeleteConfirmOpen(true)} title={t("copilot.deleteConversation")} disabled={!activeConversation}>
             <Trash2 size={16} />
           </button>
         </div>
@@ -297,13 +380,13 @@ const CopilotPanel: React.FC = () => {
           className="copilot-select"
           title={
             conversationSummaries.find((summary) => summary.id === selectedConversationId)?.title ||
-            "No saved conversations"
+            t("copilot.noSavedConversations")
           }
           value={selectedConversationId}
           onChange={(event) => void loadConversation(event.target.value)}
           disabled={conversationSummaries.length === 0}
         >
-          {conversationSummaries.length === 0 && <option value="">No saved conversations</option>}
+          {conversationSummaries.length === 0 && <option value="">{t("copilot.noSavedConversations")}</option>}
           {conversationSummaries.map((summary) => (
             <option key={summary.id} value={summary.id} title={summary.title}>
               {summary.title}
@@ -314,7 +397,7 @@ const CopilotPanel: React.FC = () => {
           className="copilot-select"
           title={
             modelProfiles.find((profile) => profile.id === (activeConversation?.modelId || defaultChatModelId))
-              ?.label || "No model selected"
+              ?.label || t("copilot.noModelSelected")
           }
           value={activeConversation?.modelId || defaultChatModelId}
           onChange={(event) => {
@@ -337,8 +420,8 @@ const CopilotPanel: React.FC = () => {
         <div className="messages">
           {(activeConversation?.messages.length ?? 0) === 0 && (
             <div className="empty-chat">
-              <p>Start a conversation with your writing copilot</p>
-              <p className="hint">Each workspace saves its own conversations inside `.novel-assistance`.</p>
+              <p>{t("copilot.startConversation")}</p>
+              <p className="hint">{t("copilot.workspaceHint")}</p>
             </div>
           )}
           {activeConversation?.messages.map((msg) => (
@@ -348,7 +431,9 @@ const CopilotPanel: React.FC = () => {
                   <span>{msg.role}</span>
                   <time>{new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
                 </div>
-                <div className="message-text">{msg.content}</div>
+                <div className="message-text">
+                  <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
+                </div>
                 {msg.attachments && msg.attachments.length > 0 && (
                   <div className="message-attachments">
                     {msg.attachments.map((attachment) => (
@@ -360,7 +445,7 @@ const CopilotPanel: React.FC = () => {
                 )}
                 {msg.role === "assistant" && (
                   <button className="insert-button" onClick={() => handleInsertToEditor(msg.content)}>
-                    Insert to Editor
+                    {t("copilot.insertToEditor")}
                   </button>
                 )}
               </div>
@@ -370,7 +455,7 @@ const CopilotPanel: React.FC = () => {
             <div className="message assistant">
               <div className="message-content">
                 <div className="message-role">assistant</div>
-                <div className="message-text loading">Thinking...</div>
+                <div className="message-text loading">{t("copilot.thinking")}</div>
               </div>
             </div>
           )}
@@ -386,7 +471,7 @@ const CopilotPanel: React.FC = () => {
             }}
           >
             <Sparkles size={14} />
-            <span>Insert selection into editor</span>
+            <span>{t("copilot.insertSelection")}</span>
           </button>
         )}
         <div className="input-area">
@@ -406,7 +491,7 @@ const CopilotPanel: React.FC = () => {
               disabled={isLoading}
             >
               <Paperclip size={14} />
-              <span>Attach File</span>
+              <span>{t("copilot.attachFile")}</span>
             </button>
             {draftAttachments.length > 0 && (
               <button
@@ -415,7 +500,7 @@ const CopilotPanel: React.FC = () => {
                 onClick={() => setDraftAttachments([])}
                 disabled={isLoading}
               >
-                Clear Attachments
+                {t("copilot.clearAttachments")}
               </button>
             )}
           </div>
@@ -446,7 +531,7 @@ const CopilotPanel: React.FC = () => {
               }
             }}
             onKeyDown={handleKeyPress}
-            placeholder={currentModel ? "Ask AI to help with your writing..." : "Configure a model first"}
+            placeholder={currentModel ? t("copilot.askAI") : t("copilot.configureModel")}
             disabled={!currentModel || isLoading}
             rows={4}
           />
@@ -459,15 +544,15 @@ const CopilotPanel: React.FC = () => {
           </button>
         </div>
         <div className="copilot-footer-note">
-          <span>{currentModel ? `Model: ${currentModel.label}` : "No model selected"}</span>
-          <span>{activeFile ? `Context: ${activeFile.name}` : "No active file context"}</span>
+          <span>{currentModel ? `${t("copilot.model")}: ${currentModel.label}` : t("copilot.noModelSelected")}</span>
+          <span>{activeFile ? `${t("copilot.context")}: ${activeFile.name}` : t("copilot.noActiveFileContext")}</span>
           <button
             className="copilot-settings-button"
             onClick={() => {
               setTempMaxTokens(String(chatMaxTokens));
               setIsSettingsOpen(true);
             }}
-            title="Copilot settings"
+            title={t("copilot.settings")}
           >
             <Settings size={12} />
           </button>
@@ -476,13 +561,13 @@ const CopilotPanel: React.FC = () => {
           <div className="copilot-settings-backdrop" onClick={() => setIsSettingsOpen(false)}>
             <div className="copilot-settings-dialog" onClick={(e) => e.stopPropagation()}>
               <div className="copilot-settings-header">
-                <h3>Copilot Settings</h3>
+                <h3>{t("copilot.settings")}</h3>
                 <button onClick={() => setIsSettingsOpen(false)}>
                   <X size={16} />
                 </button>
               </div>
               <label className="copilot-settings-field">
-                <span>Max Tokens</span>
+                <span>{t("copilot.maxTokens")}</span>
                 <input
                   type="number"
                   min={256}
@@ -497,7 +582,7 @@ const CopilotPanel: React.FC = () => {
                   className="secondary"
                   onClick={() => setIsSettingsOpen(false)}
                 >
-                  Cancel
+                  {t("copilot.cancel")}
                 </button>
                 <button
                   onClick={() => {
@@ -508,7 +593,34 @@ const CopilotPanel: React.FC = () => {
                     setIsSettingsOpen(false);
                   }}
                 >
-                  Save
+                  {t("copilot.save")}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {isDeleteConfirmOpen && (
+          <div className="copilot-settings-backdrop" onClick={() => setIsDeleteConfirmOpen(false)}>
+            <div className="copilot-settings-dialog" onClick={(e) => e.stopPropagation()}>
+              <div className="copilot-settings-header">
+                <h3>{t("copilot.deleteConfirmTitle")}</h3>
+                <button onClick={() => setIsDeleteConfirmOpen(false)}>
+                  <X size={16} />
+                </button>
+              </div>
+              <p className="delete-confirm-message">{t("copilot.deleteConfirmMessage")}</p>
+              <div className="copilot-settings-actions">
+                <button
+                  className="secondary"
+                  onClick={() => setIsDeleteConfirmOpen(false)}
+                >
+                  {t("copilot.cancel")}
+                </button>
+                <button
+                  className="danger-button"
+                  onClick={() => void handleConfirmDelete()}
+                >
+                  {t("copilot.deleteConversation")}
                 </button>
               </div>
             </div>

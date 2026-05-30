@@ -14,6 +14,7 @@ import {
   type WorkspaceNode,
   writeFile,
 } from "../services/fileSystemService";
+import type { FileChange } from "../types/ai";
 
 const SETTINGS_FOLDER_NAME = "settings";
 const CHARACTER_FILE_NAME = "\u4eba\u7269\u5217\u8868.txt";
@@ -94,6 +95,7 @@ interface FileState {
   worldFilePath: string | null;
   isLoadingWorkspace: boolean;
   errorMessage: string | null;
+  fileChanges: Map<string, FileChange[]>;
   setErrorMessage: (message: string | null) => void;
   openWorkspace: () => Promise<void>;
   refreshWorkspace: () => Promise<void>;
@@ -111,6 +113,9 @@ interface FileState {
   duplicateFile: (path: string) => Promise<void>;
   deleteFile: (path: string) => Promise<void>;
   moveFile: (sourcePath: string, destinationFolderPath: string) => Promise<void>;
+  trackFileChange: (path: string, oldContent: string, newContent: string) => void;
+  getFileChanges: (path: string) => FileChange[];
+  clearFileChanges: (path: string) => void;
 }
 
 function getNodeByPath(nodes: WorkspaceNode[], path: string): WorkspaceNode | null {
@@ -400,7 +405,52 @@ export const useFileStore = create<FileState>()((set, get) => ({
   worldFilePath: null,
   isLoadingWorkspace: false,
   errorMessage: null,
+  fileChanges: new Map(),
   setErrorMessage: (message) => set({ errorMessage: message }),
+  trackFileChange: (path, oldContent, newContent) => {
+    const oldLines = oldContent.split('\n');
+    const newLines = newContent.split('\n');
+
+    let startLine = 0;
+    while (startLine < Math.min(oldLines.length, newLines.length) &&
+           oldLines[startLine] === newLines[startLine]) {
+      startLine++;
+    }
+
+    let endLine = Math.max(oldLines.length, newLines.length);
+    while (endLine > startLine &&
+           oldLines[endLine - 1] === newLines[endLine - 1]) {
+      endLine--;
+    }
+
+    if (startLine === endLine) return;
+
+    const change: FileChange = {
+      startLine: startLine + 1,
+      endLine,
+      oldContent: oldLines.slice(startLine, endLine).join('\n'),
+      newContent: newLines.slice(startLine, endLine).join('\n'),
+      timestamp: new Date().toISOString(),
+    };
+
+    set((state) => {
+      const changes = state.fileChanges.get(path) || [];
+      const newChanges = [...changes, change].slice(-20);
+      const newMap = new Map(state.fileChanges);
+      newMap.set(path, newChanges);
+      return { fileChanges: newMap };
+    });
+  },
+  getFileChanges: (path) => {
+    return get().fileChanges.get(path) || [];
+  },
+  clearFileChanges: (path) => {
+    set((state) => {
+      const newMap = new Map(state.fileChanges);
+      newMap.delete(path);
+      return { fileChanges: newMap };
+    });
+  },
   openWorkspace: async () => {
     set({ isLoadingWorkspace: true, errorMessage: null });
 
@@ -624,6 +674,11 @@ export const useFileStore = create<FileState>()((set, get) => ({
   },
   updateFileContent: (path, content) => {
     set((state) => {
+      const tab = state.openTabs.find((t) => t.path === path);
+      if (tab && tab.content !== content) {
+        state.trackFileChange(path, tab.content, content);
+      }
+
       const nextTabs = state.openTabs.map((tab) =>
         tab.path === path
           ? {

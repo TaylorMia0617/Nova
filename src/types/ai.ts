@@ -59,3 +59,35 @@ export interface SelectionRequest {
   selectedText: string;
   documentContext: string;
 }
+
+export interface DocumentMeta {
+  fileName: string;
+  filePath: string;
+  charCount: number;
+  lineCount: number;
+  wordCount: number;
+}
+
+export interface FileChange {
+  startLine: number;
+  endLine: number;
+  oldContent: string;
+  newContent: string;
+  timestamp: string;
+}
+
+export interface MultiFileContext {
+  activeFile: {
+    meta: DocumentMeta;
+    content: string;
+    recentChanges: FileChange[];
+  };
+  otherOpenFiles: Array<{
+    meta: DocumentMeta;
+    preview: string;
+  }>;
+  conversationFiles: Array<{
+    meta: DocumentMeta;
+    lastUsed: string;
+  }>;
+}

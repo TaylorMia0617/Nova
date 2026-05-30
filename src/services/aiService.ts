@@ -1,5 +1,5 @@
 import { runMcpSearch } from "./mcpService";
-import type { AiTaskType, ConversationAttachment, ConversationMessage, ModelProfile } from "../types/ai";
+import type { AiTaskType, ConversationAttachment, ConversationMessage, DocumentMeta, FileChange, ModelProfile, MultiFileContext } from "../types/ai";
 import { serializeAttachmentsForPrompt } from "./attachmentService";
 
 interface AiRequestOptions {
@@ -12,26 +12,94 @@ interface AiRequestOptions {
   conversationHistory: ConversationMessage[];
   selectionPrompt?: string;
   attachments?: ConversationAttachment[];
+  multiFileContext?: MultiFileContext;
+  contextMaxLength?: number;
 }
 
-function buildSystemPrompt(taskType: AiTaskType, context: string, selectionPrompt?: string, fileName?: string) {
-  const fileNameLine = fileName ? `Current file: ${fileName}\n` : "";
-  const base = `You are a creative writing assistant helping a novelist.
-You help with structure, scene writing, line editing, continuity, and narrative clarity.
-Always return plain text with no surrounding markdown fences.
-${fileNameLine}Current document context:
-${context.slice(-3000)}`;
+function smartTruncate(content: string, maxLength: number): string {
+  if (content.length <= maxLength) return content;
 
-  if (taskType === "chat") {
-    return `${base}
+  const headLength = Math.floor(maxLength * 0.1);
+  const tailLength = maxLength - headLength - 80;
 
-When relevant, use the browsing or search context that has already been retrieved from MCP tools.`;
+  return content.slice(0, headLength) +
+    `\n\n... [truncated ${content.length - maxLength} characters] ...\n\n` +
+    content.slice(-tailLength);
+}
+
+function buildChangesContext(
+  fullContent: string,
+  changes: FileChange[],
+  maxLength: number
+): string {
+  if (fullContent.length <= maxLength) {
+    return fullContent;
   }
 
-  return `${base}
+  const changesSummary = changes.map(change => {
+    const lineInfo = `Lines ${change.startLine}-${change.endLine}`;
+    return `[${lineInfo}]\n${change.newContent}`;
+  }).join('\n\n');
 
-${selectionPrompt || ""}
-Return only the rewritten text.`;
+  const headLength = Math.floor(maxLength * 0.2);
+  const head = fullContent.slice(0, headLength);
+
+  return `${head}\n\n... [showing recent changes] ...\n\n${changesSummary}`;
+}
+
+function buildDocumentContext(
+  content: string,
+  recentChanges: FileChange[],
+  maxLength: number
+): string {
+  if (content.length <= maxLength) {
+    return content;
+  }
+
+  if (recentChanges.length > 0) {
+    return buildChangesContext(content, recentChanges, maxLength);
+  }
+
+  return smartTruncate(content, maxLength);
+}
+
+function buildSystemPrompt(
+  taskType: AiTaskType,
+  context: string,
+  meta?: DocumentMeta,
+  otherFiles?: Array<{ meta: DocumentMeta; preview: string }>,
+  conversationFiles?: Array<{ meta: DocumentMeta; lastUsed: string }>,
+  selectionPrompt?: string
+) {
+  const base = `You are a creative writing assistant helping a novelist.
+You help with structure, scene writing, line editing, continuity, and narrative clarity.
+You may use markdown formatting (bold, italic, headings, lists, tables, code blocks) to structure your response when appropriate.`;
+
+  const metaInfo = meta ? `
+Current file: ${meta.fileName}
+Path: ${meta.filePath}
+Stats: ${meta.charCount} characters, ${meta.lineCount} lines, ${meta.wordCount} words
+` : "";
+
+  const otherFilesInfo = otherFiles?.length
+    ? `\nOther open files:\n${otherFiles.map(f =>
+        `- ${f.meta.fileName} (${f.meta.charCount} chars): ${f.preview}...`
+      ).join('\n')}`
+    : "";
+
+  const conversationFilesInfo = conversationFiles?.length
+    ? `\nFiles discussed in this conversation:\n${conversationFiles.map(f =>
+        `- ${f.meta.fileName} (last used: ${new Date(f.lastUsed).toLocaleString()})`
+      ).join('\n')}`
+    : "";
+
+  const taskSpecificInfo = taskType === "chat"
+    ? "\n\nWhen relevant, use the browsing or search context that has already been retrieved from MCP tools."
+    : `\n\n${selectionPrompt || ""}\nReturn only the rewritten text.`;
+
+  return `${base}${metaInfo}${otherFilesInfo}${conversationFilesInfo}${taskSpecificInfo}
+Current document content:
+${context}`;
 }
 
 function buildOpenAIResponsesInput(userMessage: string, conversationHistory: ConversationMessage[]) {
@@ -192,8 +260,25 @@ async function callChatCompletionsApi(options: AiRequestOptions, systemPrompt: s
 }
 
 async function callOpenAiCompatible(options: AiRequestOptions, mcpContext = "") {
-  const { taskType, userMessage, documentContext, selectionPrompt, attachments = [], modelProfile } = options;
-  const systemPrompt = buildSystemPrompt(taskType, documentContext, selectionPrompt, options.documentFileName);
+  const { taskType, userMessage, selectionPrompt, attachments = [], modelProfile, multiFileContext, contextMaxLength = 5000 } = options;
+
+  let documentContext = options.documentContext;
+  if (multiFileContext) {
+    documentContext = buildDocumentContext(
+      multiFileContext.activeFile.content,
+      multiFileContext.activeFile.recentChanges,
+      contextMaxLength
+    );
+  }
+
+  const systemPrompt = buildSystemPrompt(
+    taskType,
+    documentContext,
+    multiFileContext?.activeFile.meta,
+    multiFileContext?.otherOpenFiles,
+    multiFileContext?.conversationFiles,
+    selectionPrompt
+  );
   const finalUserMessage = getFinalUserMessage(userMessage, mcpContext, attachments);
 
   if (!isMimoModel(modelProfile.model) && isResponsesUrl(modelProfile.baseUrl)) {
