@@ -24,6 +24,7 @@ export interface ConversationMessage {
   content: string;
   createdAt: string;
   attachments?: ConversationAttachment[];
+  skills?: ChatSkills;
 }
 
 export interface ConversationAttachment {
@@ -50,6 +51,13 @@ export interface ConversationRecord extends ConversationSummary {
   draftInput?: string;
   contextFilePath?: string | null;
   lastInsertedText?: string | null;
+  boundFileCaches?: FileContentCache[];
+  chatSkills?: ChatSkills;
+}
+
+export interface ChatSkills {
+  enableWebSearch: boolean;
+  thinkingDepth: "off" | "low" | "medium" | "high";
 }
 
 export type AiTaskType = "chat" | "polish" | "correct" | "stylize";
@@ -76,17 +84,24 @@ export interface FileChange {
   timestamp: string;
 }
 
+export interface FileContentCache {
+  filePath: string;
+  content: string;
+  lastSentAt: string;
+}
+
 export interface MultiFileContext {
   activeFile: {
     meta: DocumentMeta;
     content: string;
+    cachedContent: string | null;
     recentChanges: FileChange[];
   };
-  otherOpenFiles: Array<{
+  otherBoundFiles: Array<{
     meta: DocumentMeta;
-    preview: string;
+    recentChanges: FileChange[];
   }>;
-  conversationFiles: Array<{
+  allBoundFiles: Array<{
     meta: DocumentMeta;
     lastUsed: string;
   }>;

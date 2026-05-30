@@ -3,10 +3,8 @@
   justify-content: space-between;
   align-items: center;
   padding: 14px 20px;
-  background:
-    linear-gradient(90deg, rgba(15, 19, 27, 0.96), rgba(20, 28, 42, 0.96)),
-    #11161e;
-  border-bottom: 1px solid #2a3444;
+  background: linear-gradient(90deg, rgba(90, 158, 143, 0.15), rgba(90, 158, 143, 0.05));
+  border-bottom: 1px solid #2d3748;
   min-height: 72px;
 }
 
@@ -19,26 +17,26 @@
 .app-title {
   font-size: 20px;
   font-weight: 600;
-  color: #f8fbff;
+  color: #5a9e8f;
   margin: 0;
 }
 
 .app-subtitle {
   font-size: 12px;
-  color: #90a0b9;
+  color: #a0aec0;
 }
 
 .workspace-hint {
   margin-top: 6px;
   font-size: 12px;
-  color: #9ec2ff;
+  color: #5a9e8f;
 }
 
 .workspace-error {
   margin-top: 6px;
   max-width: 420px;
   font-size: 12px;
-  color: #ffb4b4;
+  color: #fc8181;
   line-height: 1.4;
   cursor: pointer;
 }
@@ -53,16 +51,16 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  background: #1b2532;
-  color: #e8eef8;
+  background: #2d3748;
+  color: #e2e8f0;
   padding: 8px 12px;
-  border: 1px solid #2f4058;
+  border: 1px solid #4a5568;
   border-radius: 10px;
   font-size: 12px;
 }
 
 .workspace-button:hover:not(:disabled) {
-  background: #223044;
+  background: #4a5568;
 }
 
 .workspace-button:disabled {
@@ -75,16 +73,16 @@
   align-items: center;
   gap: 6px;
   font-size: 11px;
-  color: #a9b7ca;
+  color: #a0aec0;
 }
 
 .remember-key-toggle input {
-  accent-color: #007acc;
+  accent-color: #5a9e8f;
 }
 
 .icon-button {
   background: transparent;
-  color: #d7e3f5;
+  color: #e2e8f0;
   padding: 8px 10px;
   border-radius: 10px;
   transition: background-color 0.2s;
@@ -94,29 +92,29 @@
 }
 
 .icon-button:hover {
-  background-color: #223044;
+  background-color: #4a5568;
   color: #ffffff;
 }
 
 .settings-launch {
-  border: 1px solid #2f4058;
+  border: 1px solid #4a5568;
 }
 
 .language-selector {
   display: flex;
   align-items: center;
   gap: 6px;
-  background: #1b2532;
-  border: 1px solid #2f4058;
+  background: #2d3748;
+  border: 1px solid #4a5568;
   border-radius: 10px;
   padding: 4px 8px;
-  color: #8ea1bd;
+  color: #a0aec0;
 }
 
 .language-selector select {
   background: transparent;
   border: none;
-  color: #dce7f5;
+  color: #e2e8f0;
   font-size: 12px;
   cursor: pointer;
   outline: none;
@@ -124,6 +122,6 @@
 }
 
 .language-selector select option {
-  background: #1b2532;
-  color: #dce7f5;
+  background: #2d3748;
+  color: #e2e8f0;
 }

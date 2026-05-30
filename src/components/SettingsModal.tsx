@@ -32,6 +32,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     defaultSelectionModelId,
     selectionPromptTemplates,
     contextMaxLength,
+    tavilyApiKey,
     setModelProfiles,
     updateModelProfile,
     removeModelProfile,
@@ -39,8 +40,10 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     setDefaultSelectionModelId,
     setSelectionPromptTemplate,
     setContextMaxLength,
+    setTavilyApiKey,
   } = useSettingsStore();
   const { t } = useTranslation();
+  const [activeTab, setActiveTab] = useState<"models" | "search">("models");
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(modelProfiles[0]?.id ?? null);
   const [profileDraft, setProfileDraft] = useState<ModelProfile | null>(null);
   const [testingProfileId, setTestingProfileId] = useState<string | null>(null);
@@ -217,43 +220,85 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
         </div>
         <div className="settings-layout">
           <aside className="settings-sidebar">
-            <div className="settings-sidebar-header">
-              <h3>{t("settings.modelProfiles")}</h3>
-              <button onClick={handleAddProfile} className="workspace-button compact-button" type="button">
-                <Plus size={14} />
-                <span>{t("settings.add")}</span>
+            <div className="settings-sidebar-tabs">
+              <button
+                type="button"
+                className={`tab-button ${activeTab === "models" ? "active" : ""}`}
+                onClick={() => setActiveTab("models")}
+              >
+                {t("settings.modelProfiles")}
+              </button>
+              <button
+                type="button"
+                className={`tab-button ${activeTab === "search" ? "active" : ""}`}
+                onClick={() => setActiveTab("search")}
+              >
+                {t("settings.searchSettings")}
               </button>
             </div>
-            <div className="settings-profile-list">
-              {modelProfiles.map((profile) => (
-                <button
-                  key={profile.id}
-                  type="button"
-                  className={`settings-profile-item ${selectedProfile?.id === profile.id ? "active" : ""}`}
-                  onClick={() => handleSelectProfile(profile.id)}
-                >
-                  <strong>{profile.label || t("settings.untitledModel")}</strong>
-                  <span>{profile.model || t("settings.noModelId")}</span>
-                </button>
-              ))}
-            </div>
+            {activeTab === "models" && (
+              <>
+                <div className="settings-sidebar-header">
+                  <h3>{t("settings.modelProfiles")}</h3>
+                  <button onClick={handleAddProfile} className="workspace-button compact-button" type="button">
+                    <Plus size={14} />
+                    <span>{t("settings.add")}</span>
+                  </button>
+                </div>
+                <div className="settings-profile-list">
+                  {modelProfiles.map((profile) => (
+                    <button
+                      key={profile.id}
+                      type="button"
+                      className={`settings-profile-item ${selectedProfile?.id === profile.id ? "active" : ""}`}
+                      onClick={() => handleSelectProfile(profile.id)}
+                    >
+                      <strong>{profile.label || t("settings.untitledModel")}</strong>
+                      <span>{profile.model || t("settings.noModelId")}</span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
           </aside>
           <div className="settings-content">
-            <div className="settings-section">
-              <h3>{t("settings.contextMaxLength")}</h3>
-              <label>
-                <input
-                  type="number"
-                  min={1000}
-                  max={20000}
-                  step={500}
-                  value={contextMaxLength}
-                  onChange={(event) => setContextMaxLength(Number(event.target.value))}
-                />
-                <span>{t("settings.contextMaxLengthHint")}</span>
-              </label>
-            </div>
-            {profileDraft ? (
+            {activeTab === "search" ? (
+              <div className="settings-section">
+                <h3>{t("settings.tavilyConfig")}</h3>
+                <label>
+                  <span>{t("settings.tavilyApiKey")}</span>
+                  <input
+                    type="password"
+                    value={tavilyApiKey}
+                    onChange={(event) => setTavilyApiKey(event.target.value)}
+                    placeholder="tvly-..."
+                    autoComplete="new-password"
+                  />
+                </label>
+                <div className="settings-hint">
+                  <span>{t("settings.tavilyApiKeyHint")}</span>
+                  <a href="https://app.tavily.com" target="_blank" rel="noopener noreferrer">
+                    app.tavily.com
+                  </a>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="settings-section">
+                  <h3>{t("settings.contextMaxLength")}</h3>
+                  <label>
+                    <input
+                      type="number"
+                      min={1000}
+                      max={20000}
+                      step={500}
+                      value={contextMaxLength}
+                      onChange={(event) => setContextMaxLength(Number(event.target.value))}
+                    />
+                    <span>{t("settings.contextMaxLengthHint")}</span>
+                  </label>
+                </div>
+                {profileDraft ? (
               <>
                 <div className="settings-grid">
                   <label>
@@ -396,6 +441,8 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
               </>
             ) : (
               <div className="settings-empty">{t("settings.createProfile")}</div>
+            )}
+            </>
             )}
           </div>
         </div>

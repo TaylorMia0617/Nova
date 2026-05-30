@@ -41,6 +41,12 @@ const zhCN: TranslationDict = {
     save: "保存",
     deleteConfirmTitle: "删除对话",
     deleteConfirmMessage: "确定要删除此对话吗？此操作不可撤销。",
+    search: "联网搜索",
+    thinkingDepth: "深度思考",
+    off: "关",
+    low: "低",
+    medium: "中",
+    high: "高",
   },
   settings: {
     title: "AI 设置",
@@ -74,6 +80,10 @@ const zhCN: TranslationDict = {
     connectionFailed: "连接测试失败。",
     contextMaxLength: "上下文最大长度",
     contextMaxLengthHint: "字符（推荐：3000-10000）",
+    searchSettings: "搜索设置",
+    tavilyConfig: "Tavily 搜索配置",
+    tavilyApiKey: "Tavily API Key",
+    tavilyApiKeyHint: "用于联网搜索功能，需在 tavily.com 注册获取",
   },
   editor: {
     loading: "加载编辑器...",

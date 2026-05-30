@@ -1,5 +1,6 @@
 import { runMcpSearch } from "./mcpService";
-import type { AiTaskType, ConversationAttachment, ConversationMessage, DocumentMeta, FileChange, ModelProfile, MultiFileContext } from "../types/ai";
+import { searchWithTavily } from "./searchService";
+import type { AiTaskType, ChatSkills, ConversationAttachment, ConversationMessage, DocumentMeta, FileChange, ModelProfile, MultiFileContext } from "../types/ai";
 import { serializeAttachmentsForPrompt } from "./attachmentService";
 
 interface AiRequestOptions {
@@ -14,6 +15,7 @@ interface AiRequestOptions {
   attachments?: ConversationAttachment[];
   multiFileContext?: MultiFileContext;
   contextMaxLength?: number;
+  skills?: ChatSkills;
 }
 
 function smartTruncate(content: string, maxLength: number): string {
@@ -28,47 +30,45 @@ function smartTruncate(content: string, maxLength: number): string {
 }
 
 function buildChangesContext(
-  fullContent: string,
+  _fullContent: string,
   changes: FileChange[],
   maxLength: number
 ): string {
-  if (fullContent.length <= maxLength) {
-    return fullContent;
-  }
-
   const changesSummary = changes.map(change => {
     const lineInfo = `Lines ${change.startLine}-${change.endLine}`;
     return `[${lineInfo}]\n${change.newContent}`;
   }).join('\n\n');
 
-  const headLength = Math.floor(maxLength * 0.2);
-  const head = fullContent.slice(0, headLength);
+  if (changesSummary.length <= maxLength) {
+    return changesSummary;
+  }
 
-  return `${head}\n\n... [showing recent changes] ...\n\n${changesSummary}`;
+  return smartTruncate(changesSummary, maxLength);
 }
 
 function buildDocumentContext(
   content: string,
+  cachedContent: string | null,
   recentChanges: FileChange[],
   maxLength: number
 ): string {
-  if (content.length <= maxLength) {
-    return content;
+  if (!cachedContent) {
+    return smartTruncate(content, maxLength);
   }
 
-  if (recentChanges.length > 0) {
-    return buildChangesContext(content, recentChanges, maxLength);
+  if (recentChanges.length === 0) {
+    return smartTruncate(content, maxLength);
   }
 
-  return smartTruncate(content, maxLength);
+  return buildChangesContext(content, recentChanges, maxLength);
 }
 
 function buildSystemPrompt(
   taskType: AiTaskType,
   context: string,
   meta?: DocumentMeta,
-  otherFiles?: Array<{ meta: DocumentMeta; preview: string }>,
-  conversationFiles?: Array<{ meta: DocumentMeta; lastUsed: string }>,
+  otherBoundFiles?: Array<{ meta: DocumentMeta; recentChanges: FileChange[] }>,
+  allBoundFiles?: Array<{ meta: DocumentMeta; lastUsed: string }>,
   selectionPrompt?: string
 ) {
   const base = `You are a creative writing assistant helping a novelist.
@@ -81,14 +81,18 @@ Path: ${meta.filePath}
 Stats: ${meta.charCount} characters, ${meta.lineCount} lines, ${meta.wordCount} words
 ` : "";
 
-  const otherFilesInfo = otherFiles?.length
-    ? `\nOther open files:\n${otherFiles.map(f =>
-        `- ${f.meta.fileName} (${f.meta.charCount} chars): ${f.preview}...`
-      ).join('\n')}`
+  const otherBoundFilesInfo = otherBoundFiles?.length
+    ? `\nOther bound files with changes:\n${otherBoundFiles.map(f => {
+        if (f.recentChanges.length === 0) return null;
+        const changesText = f.recentChanges.map(c =>
+          `  Lines ${c.startLine}-${c.endLine}: ${c.newContent.slice(0, 100)}...`
+        ).join('\n');
+        return `- ${f.meta.fileName}:\n${changesText}`;
+      }).filter(Boolean).join('\n')}`
     : "";
 
-  const conversationFilesInfo = conversationFiles?.length
-    ? `\nFiles discussed in this conversation:\n${conversationFiles.map(f =>
+  const allBoundFilesInfo = allBoundFiles?.length
+    ? `\nAll files bound to this conversation:\n${allBoundFiles.map(f =>
         `- ${f.meta.fileName} (last used: ${new Date(f.lastUsed).toLocaleString()})`
       ).join('\n')}`
     : "";
@@ -97,7 +101,7 @@ Stats: ${meta.charCount} characters, ${meta.lineCount} lines, ${meta.wordCount} 
     ? "\n\nWhen relevant, use the browsing or search context that has already been retrieved from MCP tools."
     : `\n\n${selectionPrompt || ""}\nReturn only the rewritten text.`;
 
-  return `${base}${metaInfo}${otherFilesInfo}${conversationFilesInfo}${taskSpecificInfo}
+  return `${base}${metaInfo}${otherBoundFilesInfo}${allBoundFilesInfo}${taskSpecificInfo}
 Current document content:
 ${context}`;
 }
@@ -181,7 +185,12 @@ function buildRequestHeaders(modelProfile: ModelProfile) {
 }
 
 async function callResponsesApi(options: AiRequestOptions, systemPrompt: string, finalUserMessage: string) {
-  const { modelProfile, taskType, conversationHistory } = options;
+  const { modelProfile, conversationHistory, skills } = options;
+
+  const temperature = skills?.thinkingDepth === "low" ? 0.3
+                    : skills?.thinkingDepth === "high" ? 1.0
+                    : skills?.thinkingDepth === "off" ? 0.7
+                    : 0.7;
 
   const response = await fetch(modelProfile.baseUrl, {
     method: "POST",
@@ -191,7 +200,7 @@ async function callResponsesApi(options: AiRequestOptions, systemPrompt: string,
       instructions: systemPrompt,
       input: buildOpenAIResponsesInput(finalUserMessage, conversationHistory),
       max_output_tokens: options.maxTokens || 8192,
-      temperature: taskType === "chat" ? 0.7 : 0.45,
+      temperature,
     }),
   });
 
@@ -221,8 +230,13 @@ async function callResponsesApi(options: AiRequestOptions, systemPrompt: string,
 }
 
 async function callChatCompletionsApi(options: AiRequestOptions, systemPrompt: string, finalUserMessage: string) {
-  const { modelProfile, taskType, conversationHistory } = options;
+  const { modelProfile, conversationHistory, skills } = options;
   const tokenLimitKey = isMimoModel(modelProfile.model) ? "max_completion_tokens" : "max_tokens";
+
+  const temperature = skills?.thinkingDepth === "low" ? 0.3
+                    : skills?.thinkingDepth === "high" ? 1.0
+                    : skills?.thinkingDepth === "off" ? 0.7
+                    : 0.7;
 
   const response = await fetch(modelProfile.baseUrl, {
     method: "POST",
@@ -231,7 +245,7 @@ async function callChatCompletionsApi(options: AiRequestOptions, systemPrompt: s
       model: modelProfile.model,
       messages: buildChatCompletionMessages(systemPrompt, finalUserMessage, conversationHistory),
       [tokenLimitKey]: options.maxTokens || 8192,
-      temperature: taskType === "chat" ? 0.7 : 0.45,
+      temperature,
     }),
   });
 
@@ -266,6 +280,7 @@ async function callOpenAiCompatible(options: AiRequestOptions, mcpContext = "") 
   if (multiFileContext) {
     documentContext = buildDocumentContext(
       multiFileContext.activeFile.content,
+      multiFileContext.activeFile.cachedContent,
       multiFileContext.activeFile.recentChanges,
       contextMaxLength
     );
@@ -275,8 +290,8 @@ async function callOpenAiCompatible(options: AiRequestOptions, mcpContext = "") 
     taskType,
     documentContext,
     multiFileContext?.activeFile.meta,
-    multiFileContext?.otherOpenFiles,
-    multiFileContext?.conversationFiles,
+    multiFileContext?.otherBoundFiles,
+    multiFileContext?.allBoundFiles,
     selectionPrompt
   );
   const finalUserMessage = getFinalUserMessage(userMessage, mcpContext, attachments);
@@ -291,19 +306,34 @@ async function callOpenAiCompatible(options: AiRequestOptions, mcpContext = "") 
 export async function callAI(options: AiRequestOptions): Promise<string> {
   const { modelProfile, taskType, userMessage } = options;
 
-  let mcpContext = "";
+  let searchContext = "";
+
+  // 优先使用 MCP 搜索（如果配置了）
   if (modelProfile.mcpServerUrl.trim()) {
     try {
       const result = await runMcpSearch(modelProfile, userMessage);
       if (result.text.trim()) {
-        mcpContext = `Tool: ${result.toolName}\n${result.text.trim()}`;
+        searchContext = `Tool: ${result.toolName}\n${result.text.trim()}`;
       }
     } catch (error) {
       if (taskType === "chat") {
         throw error;
       }
     }
+  } else {
+    // 使用 Tavily 搜索
+    try {
+      const result = await searchWithTavily(userMessage);
+      if (result.trim()) {
+        searchContext = `Web Search Results:\n${result}`;
+      }
+    } catch (error) {
+      // 搜索失败时提示用户
+      if (taskType === "chat") {
+        throw error;
+      }
+    }
   }
 
-  return callOpenAiCompatible(options, mcpContext);
+  return callOpenAiCompatible(options, searchContext);
 }

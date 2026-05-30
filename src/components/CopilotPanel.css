@@ -413,6 +413,68 @@
   cursor: not-allowed;
 }
 
+.input-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: #1a2230;
+  border-radius: 0 0 14px 14px;
+  border: 1px solid #2b3950;
+  border-top: none;
+}
+
+.skills-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.skill-pill {
+  background: #252c39;
+  border: 1px solid #324057;
+  color: #9bb0cf;
+  border-radius: 16px;
+  padding: 3px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.skill-pill:hover {
+  background: #2d3442;
+  color: #e2ebf7;
+}
+
+.skill-pill.active {
+  background: #255aa7;
+  border-color: #3278d3;
+  color: #ffffff;
+}
+
+.skill-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #9bb0cf;
+}
+
+.skill-select select {
+  background: #111722;
+  border: 1px solid #324057;
+  color: #edf2f8;
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.skill-select select:focus {
+  outline: none;
+  border-color: #4f8cff;
+}
+
 .copilot-footer-note {
   display: flex;
   align-items: center;

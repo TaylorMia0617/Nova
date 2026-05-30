@@ -41,6 +41,12 @@ const enUS: TranslationDict = {
     save: "Save",
     deleteConfirmTitle: "Delete Conversation",
     deleteConfirmMessage: "Are you sure you want to delete this conversation? This action cannot be undone.",
+    search: "Search",
+    thinkingDepth: "Thinking",
+    off: "Off",
+    low: "Low",
+    medium: "Medium",
+    high: "High",
   },
   settings: {
     title: "AI Settings",
@@ -74,6 +80,10 @@ const enUS: TranslationDict = {
     connectionFailed: "Connection test failed.",
     contextMaxLength: "Context Max Length",
     contextMaxLengthHint: "characters (recommended: 3000-10000)",
+    searchSettings: "Search Settings",
+    tavilyConfig: "Tavily Search Configuration",
+    tavilyApiKey: "Tavily API Key",
+    tavilyApiKeyHint: "For web search, register at tavily.com",
   },
   editor: {
     loading: "Loading editor...",

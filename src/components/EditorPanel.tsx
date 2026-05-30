@@ -39,7 +39,7 @@ const TYPING_SUGGEST_DELAY_MS = 300;
 const IDLE_SUGGEST_DELAY_MS = 5000;
 const SUGGEST_COOLDOWN_MS = 300000;
 const AUTO_SAVE_DELAY_MS = 3000;
-const DEFAULT_EDITOR_FONT_FAMILY = "'Noto Serif SC', 'Source Han Serif SC', Georgia, serif";
+const DEFAULT_EDITOR_FONT_FAMILY = "'SimHei', '黑体', 'Microsoft YaHei', sans-serif";
 const DEFAULT_EDITOR_FONT_SIZE = 14;
 const TXT_MERGE_EXTENSIONS = new Set([".txt", ".md", ".markdown"]);
 
@@ -208,6 +208,7 @@ const EditorPanel: React.FC = () => {
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 });
   const [selectionLength, setSelectionLength] = useState(0);
   const [wordWrap, setWordWrap] = useState<"on" | "off">("on");
+  const [fontSize, setFontSize] = useState(DEFAULT_EDITOR_FONT_SIZE);
   const [lastSavedAt, setLastSavedAt] = useState<string>("Not saved yet");
   const [activeHeadingState, setActiveHeadingState] = useState<HeadingState>("body");
   const [selectionPopup, setSelectionPopup] = useState<SelectionPopupState | null>(null);
@@ -1001,6 +1002,25 @@ const EditorPanel: React.FC = () => {
             <button className={toolbarButtonClass()} onClick={() => applyAlignment("right")} title="Align Right" disabled={!activeFile}>
               <AlignRight size={16} />
             </button>
+            <div className="font-size-control">
+              <button
+                className={toolbarButtonClass()}
+                onClick={() => setFontSize(prev => Math.max(12, prev - 2))}
+                title="Decrease Font Size"
+                disabled={!activeFile}
+              >
+                -
+              </button>
+              <span className="font-size-display">{fontSize}px</span>
+              <button
+                className={toolbarButtonClass()}
+                onClick={() => setFontSize(prev => Math.min(24, prev + 2))}
+                title="Increase Font Size"
+                disabled={!activeFile}
+              >
+                +
+              </button>
+            </div>
           </div>
           <button onClick={() => void handleSave()} title="Save" disabled={!activeFile}>
             <Save size={16} />
@@ -1071,7 +1091,7 @@ const EditorPanel: React.FC = () => {
             options={{
               minimap: { enabled: true },
               fontFamily: DEFAULT_EDITOR_FONT_FAMILY,
-              fontSize: DEFAULT_EDITOR_FONT_SIZE,
+              fontSize,
               lineNumbers: "on",
               scrollBeyondLastLine: true,
               automaticLayout: true,

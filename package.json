@@ -2,7 +2,7 @@
   "name": "Nova",
   "description": "AI小说创作助手",
   "Author": "Shiro狐",
-  "version": "0.0.10",
+  "version": "0.0.11",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -38,7 +38,7 @@
   },
   "build": {
     "appId": "com.novelassistance.app",
-    "productName": "Novel Assistance",
+    "productName": "Nova",
     "npmRebuild": false,
     "asarUnpack": [
       "node_modules/node-pty/**/*"

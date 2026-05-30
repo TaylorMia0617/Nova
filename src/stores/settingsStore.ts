@@ -15,6 +15,7 @@ interface SettingsState {
   selectionPromptTemplates: SelectionPromptTemplates;
   chatMaxTokens: number;
   contextMaxLength: number;
+  tavilyApiKey: string;
   setLanguage: (locale: Locale) => void;
   setModelProfiles: (profiles: ModelProfile[]) => void;
   updateModelProfile: (id: string, patch: Partial<ModelProfile>) => void;
@@ -24,6 +25,7 @@ interface SettingsState {
   setSelectionPromptTemplate: (key: PromptKey, value: string) => void;
   setChatMaxTokens: (value: number) => void;
   setContextMaxLength: (value: number) => void;
+  setTavilyApiKey: (value: string) => void;
   getModelProfileById: (id: string | null | undefined) => ModelProfile | null;
 }
 
@@ -168,6 +170,7 @@ export const useSettingsStore = create<SettingsState>()(
       selectionPromptTemplates: DEFAULT_PROMPTS,
       chatMaxTokens: 8192,
       contextMaxLength: 5000,
+      tavilyApiKey: "",
       setLanguage: (locale) => {
         setLocale(locale);
         set({ language: locale });
@@ -223,6 +226,7 @@ export const useSettingsStore = create<SettingsState>()(
         })),
       setChatMaxTokens: (value) => set({ chatMaxTokens: value }),
       setContextMaxLength: (value) => set({ contextMaxLength: value }),
+      setTavilyApiKey: (value) => set({ tavilyApiKey: value }),
       getModelProfileById: (id) => {
         if (!id) return null;
         return get().modelProfiles.find((profile) => profile.id === id) ?? null;
@@ -239,6 +243,7 @@ export const useSettingsStore = create<SettingsState>()(
         selectionPromptTemplates: state.selectionPromptTemplates,
         chatMaxTokens: state.chatMaxTokens,
         contextMaxLength: state.contextMaxLength,
+        tavilyApiKey: state.tavilyApiKey,
       }),
       onRehydrateStorage: () => {
         return (_state, error) => {

@@ -15,7 +15,7 @@ import {
 } from "../services/conversationService";
 import { selectTextAttachments } from "../services/attachmentService";
 import { getEditorContent, insertTextIntoEditor } from "../services/editorInsertionService";
-import type { ConversationAttachment, ConversationMessage, ConversationRecord, ConversationSummary, DocumentMeta, MultiFileContext } from "../types/ai";
+import type { ChatSkills, ConversationAttachment, ConversationMessage, ConversationRecord, ConversationSummary, FileChange, FileContentCache, MultiFileContext } from "../types/ai";
 import "./CopilotPanel.css";
 
 function createId(prefix: string) {
@@ -43,7 +43,7 @@ function buildTitleFromMessage(content: string) {
 }
 
 const CopilotPanel: React.FC = () => {
-  const { activeFile, rootPath, getFileChanges, openTabs } = useFileStore();
+  const { activeFile, rootPath, openTabs } = useFileStore();
   const { modelProfiles, defaultChatModelId, getModelProfileById, chatMaxTokens, setChatMaxTokens, contextMaxLength } = useSettingsStore();
   const { t } = useTranslation();
   const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
@@ -56,9 +56,11 @@ const CopilotPanel: React.FC = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [tempMaxTokens, setTempMaxTokens] = useState(String(chatMaxTokens));
-  const [conversationFileHistory, setConversationFileHistory] = useState<
-    Array<{ meta: DocumentMeta; lastUsed: string }>
-  >([]);
+  const [fileCaches, setFileCaches] = useState<Map<string, FileContentCache>>(new Map());
+  const [chatSkills, setChatSkills] = useState<ChatSkills>({
+    enableWebSearch: false,
+    thinkingDepth: "off",
+  });
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const lastDefaultChatModelIdRef = useRef(defaultChatModelId);
 
@@ -71,41 +73,147 @@ const CopilotPanel: React.FC = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
+  const MAX_FILE_CACHE_SIZE = 10 * 1024 * 1024;
+
+  const shouldCacheFile = (content: string): boolean => {
+    return content.length <= MAX_FILE_CACHE_SIZE;
+  };
+
+  const getFileSizeWarning = (content: string): string | null => {
+    if (content.length > MAX_FILE_CACHE_SIZE) {
+      const sizeMB = (content.length / 1024 / 1024).toFixed(2);
+      return `文件大小 ${sizeMB}MB 超过缓存限制（10MB），AI将无法追踪此文件的变更`;
+    }
+    return null;
+  };
+
+  const getFileCache = (filePath: string): FileContentCache | undefined => {
+    return fileCaches.get(filePath);
+  };
+
+  const updateFileCache = (filePath: string, content: string) => {
+    setFileCaches(prev => {
+      const next = new Map(prev);
+      next.set(filePath, {
+        filePath,
+        content,
+        lastSentAt: new Date().toISOString(),
+      });
+      return next;
+    });
+  };
+
+  const calculateChanges = (oldContent: string, newContent: string): FileChange[] => {
+    if (oldContent === newContent) return [];
+
+    const oldLines = oldContent.split('\n');
+    const newLines = newContent.split('\n');
+
+    const changes: FileChange[] = [];
+
+    let startLine = 0;
+    while (startLine < Math.min(oldLines.length, newLines.length) &&
+           oldLines[startLine] === newLines[startLine]) {
+      startLine++;
+    }
+
+    let endLine = Math.max(oldLines.length, newLines.length);
+    while (endLine > startLine &&
+           oldLines[endLine - 1] === newLines[endLine - 1]) {
+      endLine--;
+    }
+
+    if (startLine < endLine) {
+      changes.push({
+        startLine: startLine + 1,
+        endLine,
+        oldContent: oldLines.slice(startLine, endLine).join('\n'),
+        newContent: newLines.slice(startLine, endLine).join('\n'),
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    return changes;
+  };
+
   const buildMultiFileContext = (): MultiFileContext | undefined => {
     if (!activeFile) return undefined;
 
-    const activeMeta: DocumentMeta = {
-      fileName: activeFile.name,
-      filePath: activeFile.path,
-      charCount: activeFile.savedContent.length,
-      lineCount: activeFile.savedContent.split('\n').length,
-      wordCount: activeFile.savedContent.length,
-    };
+    const currentContent = activeFile.content;
 
-    const otherFiles = openTabs
-      .filter(tab => tab.path !== activeFile.path)
-      .slice(0, 5)
-      .map(tab => ({
-        meta: {
-          fileName: tab.name,
-          filePath: tab.path,
-          charCount: tab.savedContent.length,
-          lineCount: tab.savedContent.split('\n').length,
-          wordCount: tab.savedContent.length,
+    if (!shouldCacheFile(currentContent)) {
+      return {
+        activeFile: {
+          meta: {
+            fileName: activeFile.name,
+            filePath: activeFile.path,
+            charCount: currentContent.length,
+            lineCount: currentContent.split('\n').length,
+            wordCount: currentContent.length,
+          },
+          content: currentContent,
+          cachedContent: null,
+          recentChanges: [],
         },
-        preview: tab.savedContent.slice(0, 500),
-      }));
+        otherBoundFiles: [],
+        allBoundFiles: [],
+      };
+    }
 
-    const fileChanges = getFileChanges(activeFile.path);
+    const activeFileCache = getFileCache(activeFile.path);
+    const activeCachedContent = activeFileCache?.content ?? null;
+
+    const activeChanges = activeCachedContent
+      ? calculateChanges(activeCachedContent, currentContent)
+      : [];
+
+    updateFileCache(activeFile.path, currentContent);
+
+    const otherBoundFiles = Array.from(fileCaches.entries())
+      .filter(([path]) => path !== activeFile.path)
+      .slice(0, 5)
+      .map(([path, cache]) => {
+        const tab = openTabs.find(t => t.path === path);
+        const tabContent = tab?.content ?? cache.content;
+
+        return {
+          meta: {
+            fileName: path.split(/[/\\]/).pop() || path,
+            filePath: path,
+            charCount: tabContent.length,
+            lineCount: tabContent.split('\n').length,
+            wordCount: tabContent.length,
+          },
+          recentChanges: calculateChanges(cache.content, tabContent),
+        };
+      });
+
+    const allBoundFiles = Array.from(fileCaches.values()).map(cache => ({
+      meta: {
+        fileName: cache.filePath.split(/[/\\]/).pop() || cache.filePath,
+        filePath: cache.filePath,
+        charCount: cache.content.length,
+        lineCount: cache.content.split('\n').length,
+        wordCount: cache.content.length,
+      },
+      lastUsed: cache.lastSentAt,
+    }));
 
     return {
       activeFile: {
-        meta: activeMeta,
-        content: activeFile.savedContent,
-        recentChanges: fileChanges,
+        meta: {
+          fileName: activeFile.name,
+          filePath: activeFile.path,
+          charCount: currentContent.length,
+          lineCount: currentContent.split('\n').length,
+          wordCount: currentContent.length,
+        },
+        content: currentContent,
+        cachedContent: activeCachedContent,
+        recentChanges: activeChanges,
       },
-      otherOpenFiles: otherFiles,
-      conversationFiles: conversationFileHistory,
+      otherBoundFiles,
+      allBoundFiles,
     };
   };
 
@@ -121,6 +229,31 @@ const CopilotPanel: React.FC = () => {
     const nextSummaries = await writeConversation(record);
     setConversationSummaries(nextSummaries);
     setActiveConversation(record);
+  };
+
+  const persistFileCaches = async () => {
+    if (!activeConversation) return;
+
+    const cachesArray = Array.from(fileCaches.values());
+    const updatedRecord = {
+      ...activeConversation,
+      boundFileCaches: cachesArray,
+      updatedAt: new Date().toISOString(),
+    };
+
+    await persistConversation(updatedRecord);
+  };
+
+  const persistChatSkills = async () => {
+    if (!activeConversation) return;
+
+    const updatedRecord = {
+      ...activeConversation,
+      chatSkills,
+      updatedAt: new Date().toISOString(),
+    };
+
+    await persistConversation(updatedRecord);
   };
 
   useEffect(() => {
@@ -149,6 +282,29 @@ const CopilotPanel: React.FC = () => {
   useEffect(() => {
     scrollToBottom();
   }, [activeConversation?.messages, isLoading]);
+
+  useEffect(() => {
+    if (activeConversation?.boundFileCaches) {
+      const cachesMap = new Map<string, FileContentCache>();
+      activeConversation.boundFileCaches.forEach(cache => {
+        cachesMap.set(cache.filePath, cache);
+      });
+      setFileCaches(cachesMap);
+    } else {
+      setFileCaches(new Map());
+    }
+  }, [activeConversation?.id]);
+
+  useEffect(() => {
+    if (activeConversation?.chatSkills) {
+      setChatSkills(activeConversation.chatSkills);
+    } else {
+      setChatSkills({
+        enableWebSearch: false,
+        thinkingDepth: "off",
+      });
+    }
+  }, [activeConversation?.id]);
 
   useEffect(() => {
     const bootstrap = async () => {
@@ -233,6 +389,7 @@ const CopilotPanel: React.FC = () => {
       content: input.trim(),
       createdAt: new Date().toISOString(),
       attachments: draftAttachments,
+      skills: chatSkills,
     };
 
     const nextMessages = [...activeConversation.messages, userMessage];
@@ -252,6 +409,11 @@ const CopilotPanel: React.FC = () => {
     await persistConversation(draftRecord);
 
     try {
+      const fileSizeWarning = activeFile ? getFileSizeWarning(activeFile.content) : null;
+      if (fileSizeWarning) {
+        setStatusText(fileSizeWarning);
+      }
+
       const multiFileContext = buildMultiFileContext();
 
       const response = await callAI({
@@ -265,34 +427,11 @@ const CopilotPanel: React.FC = () => {
         attachments: draftAttachments,
         multiFileContext,
         contextMaxLength,
+        skills: chatSkills,
       });
 
-      if (activeFile) {
-        const existing = conversationFileHistory.find(f => f.meta.filePath === activeFile.path);
-        if (existing) {
-          setConversationFileHistory(prev =>
-            prev.map(f =>
-              f.meta.filePath === activeFile.path
-                ? { ...f, lastUsed: new Date().toISOString() }
-                : f
-            )
-          );
-        } else {
-          setConversationFileHistory(prev => [
-            ...prev,
-            {
-              meta: {
-                fileName: activeFile.name,
-                filePath: activeFile.path,
-                charCount: activeFile.savedContent.length,
-                lineCount: activeFile.savedContent.split('\n').length,
-                wordCount: activeFile.savedContent.length,
-              },
-              lastUsed: new Date().toISOString(),
-            }
-          ]);
-        }
-      }
+      await persistFileCaches();
+      await persistChatSkills();
 
       const assistantMessage: ConversationMessage = {
         id: createId("msg"),
@@ -320,6 +459,8 @@ const CopilotPanel: React.FC = () => {
     try {
       const summaries = await deleteConversation(activeConversation.id);
       setConversationSummaries(summaries);
+      setFileCaches(new Map());
+
       if (summaries[0]) {
         await loadConversation(summaries[0].id);
         return;
@@ -519,7 +660,7 @@ const CopilotPanel: React.FC = () => {
               ))}
             </div>
           )}
-          <textarea
+           <textarea
             value={input}
             onChange={(e) => {
               setInput(e.target.value);
@@ -535,13 +676,44 @@ const CopilotPanel: React.FC = () => {
             disabled={!currentModel || isLoading}
             rows={4}
           />
-          <button
-            onClick={() => void handleSendMessage()}
-            disabled={!input.trim() || !currentModel || isLoading}
-            className="send-button"
-          >
-            <Send size={16} />
-          </button>
+          <div className="input-footer">
+            <div className="skills-toolbar">
+              <button
+                type="button"
+                className={`skill-pill ${chatSkills.enableWebSearch ? "active" : ""}`}
+                onClick={() => setChatSkills(prev => ({
+                  ...prev,
+                  enableWebSearch: !prev.enableWebSearch,
+                }))}
+              >
+                {t("copilot.search")}
+              </button>
+
+              <div className="skill-select">
+                <span>{t("copilot.thinkingDepth")}</span>
+                <select
+                  value={chatSkills.thinkingDepth}
+                  onChange={(e) => setChatSkills(prev => ({
+                    ...prev,
+                    thinkingDepth: e.target.value as ChatSkills["thinkingDepth"],
+                  }))}
+                >
+                  <option value="off">{t("copilot.off")}</option>
+                  <option value="low">{t("copilot.low")}</option>
+                  <option value="medium">{t("copilot.medium")}</option>
+                  <option value="high">{t("copilot.high")}</option>
+                </select>
+              </div>
+            </div>
+
+            <button
+              onClick={() => void handleSendMessage()}
+              disabled={!input.trim() || !currentModel || isLoading}
+              className="send-button"
+            >
+              <Send size={16} />
+            </button>
+          </div>
         </div>
         <div className="copilot-footer-note">
           <span>{currentModel ? `${t("copilot.model")}: ${currentModel.label}` : t("copilot.noModelSelected")}</span>

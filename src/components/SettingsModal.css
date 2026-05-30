@@ -50,6 +50,34 @@
   gap: 14px;
 }
 
+.settings-sidebar-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tab-button {
+  text-align: left;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: transparent;
+  color: #9bb0cf;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+
+.tab-button:hover {
+  background: #1d2430;
+  color: #e2ebf7;
+}
+
+.tab-button.active {
+  background: #255aa7;
+  color: #ffffff;
+}
+
 .settings-sidebar-header,
 .settings-actions,
 .settings-row {
@@ -135,6 +163,24 @@
   outline: none;
   border-color: #4f8cff;
   box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.18);
+}
+
+.settings-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: #7f8ea6;
+}
+
+.settings-hint a {
+  color: #4f8cff;
+  text-decoration: none;
+}
+
+.settings-hint a:hover {
+  text-decoration: underline;
 }
 
 .settings-grid {
