@@ -1,10 +1,11 @@
 import React, { useMemo, useState } from "react";
-import { FolderOpen, SaveAll, Settings, Globe, Minus, Square, X, Sparkles } from "lucide-react";
+import { FolderOpen, SaveAll, Settings, Globe, Minus, Square, X } from "lucide-react";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useFileStore } from "../stores/fileStore";
 import { useTranslation } from "../hooks/useTranslation";
 import type { Locale } from "../i18n";
 import SettingsModal from "./SettingsModal";
+import icon from "../assets/icon.png";
 import "./Header.css";
 
 const LOCALE_OPTIONS: { value: Locale; label: string }[] = [
@@ -46,7 +47,7 @@ const Header: React.FC = () => {
       <header className="header">
         <div className="header-left">
           <div className="header-logo">
-            <Sparkles size={18} />
+            <img src={icon} alt="Logo" className="header-icon" />
           </div>
           <div className="mode-toggle">
             <button

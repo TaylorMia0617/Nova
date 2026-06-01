@@ -244,21 +244,30 @@ function getWorkspaceAppDataPaths() {
   const dataPath = path.join(currentWorkspaceRoot, ".novel-assistance");
   const conversationsPath = path.join(dataPath, "conversations");
   const indexPath = path.join(conversationsPath, "index.json");
+  const referenceDataPath = path.join(dataPath, "data");
+  const referenceListsPath = path.join(referenceDataPath, "lists.json");
 
   return {
     rootPath: currentWorkspaceRoot,
     dataPath,
     conversationsPath,
     indexPath,
+    referenceDataPath,
+    referenceListsPath,
   };
 }
 
 async function ensureWorkspaceAppData() {
   const paths = getWorkspaceAppDataPaths();
   await fs.mkdir(paths.conversationsPath, { recursive: true });
+  await fs.mkdir(paths.referenceDataPath, { recursive: true });
 
   if (!(await pathExists(paths.indexPath))) {
     await fs.writeFile(paths.indexPath, "[]", "utf8");
+  }
+
+  if (!(await pathExists(paths.referenceListsPath))) {
+    await fs.writeFile(paths.referenceListsPath, "[]", "utf8");
   }
 
   return paths;
@@ -284,6 +293,75 @@ async function writeConversationIndex(index) {
 function getConversationFilePath(conversationId) {
   const { conversationsPath } = getWorkspaceAppDataPaths();
   return path.join(conversationsPath, `${conversationId}.json`);
+}
+
+// 参考列表管理函数
+function getReferenceListFilePath(listId) {
+  const { referenceDataPath } = getWorkspaceAppDataPaths();
+  return path.join(referenceDataPath, `list-${listId}.json`);
+}
+
+async function readReferenceListsIndex() {
+  const { referenceListsPath } = await ensureWorkspaceAppData();
+  try {
+    const content = await fs.readFile(referenceListsPath, "utf8");
+    const parsed = JSON.parse(content);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function writeReferenceListsIndex(index) {
+  const { referenceListsPath } = await ensureWorkspaceAppData();
+  await fs.writeFile(referenceListsPath, JSON.stringify(index, null, 2), "utf8");
+  return index;
+}
+
+async function readReferenceList(listId) {
+  const filePath = getReferenceListFilePath(listId);
+  try {
+    const content = await fs.readFile(filePath, "utf8");
+    return JSON.parse(content);
+  } catch {
+    return null;
+  }
+}
+
+async function writeReferenceList(list) {
+  const filePath = getReferenceListFilePath(list.id);
+  await fs.writeFile(filePath, JSON.stringify(list, null, 2), "utf8");
+  
+  // 更新索引
+  const index = await readReferenceListsIndex();
+  const existingIndex = index.findIndex(item => item.id === list.id);
+  const indexItem = {
+    id: list.id,
+    name: list.name,
+    createdAt: existingIndex >= 0 ? index[existingIndex].createdAt : new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  
+  if (existingIndex >= 0) {
+    index[existingIndex] = indexItem;
+  } else {
+    index.push(indexItem);
+  }
+  
+  await writeReferenceListsIndex(index);
+  return list;
+}
+
+async function deleteReferenceList(listId) {
+  const filePath = getReferenceListFilePath(listId);
+  try {
+    await fs.unlink(filePath);
+  } catch {}
+  
+  // 更新索引
+  const index = await readReferenceListsIndex();
+  const newIndex = index.filter(item => item.id !== listId);
+  await writeReferenceListsIndex(newIndex);
 }
 
 async function testMcpConnection(profile) {
@@ -845,6 +923,23 @@ ipcMain.handle("settings:writeGlobalApiConfig", async (_event, content) => {
   const configPath = getGlobalApiConfigPath();
   await fs.mkdir(path.dirname(configPath), { recursive: true });
   await writeWithRetry(configPath, content);
+});
+
+// 参考列表管理 IPC 处理器
+ipcMain.handle("reference:getLists", async () => {
+  return readReferenceListsIndex();
+});
+
+ipcMain.handle("reference:getList", async (_event, listId) => {
+  return readReferenceList(listId);
+});
+
+ipcMain.handle("reference:saveList", async (_event, list) => {
+  return writeReferenceList(list);
+});
+
+ipcMain.handle("reference:deleteList", async (_event, listId) => {
+  return deleteReferenceList(listId);
 });
 
 ipcMain.handle("fs:createFile", async (_event, filePath) => {

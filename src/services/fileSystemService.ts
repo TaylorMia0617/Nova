@@ -58,6 +58,27 @@ interface NovelHostApi {
   onWorkspaceChanged?: (callback: (payload: { rootPath: string; changedPath: string | null }) => void) => () => void;
   readGlobalApiConfig?: () => Promise<string>;
   writeGlobalApiConfig?: (content: string) => Promise<void>;
+  // 参考列表管理
+  getReferenceLists?: () => Promise<ReferenceListIndex[]>;
+  getReferenceList?: (listId: string) => Promise<ReferenceListData | null>;
+  saveReferenceList?: (list: ReferenceListData) => Promise<ReferenceListData>;
+  deleteReferenceList?: (listId: string) => Promise<void>;
+}
+
+export interface ReferenceListIndex {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReferenceListData {
+  id: string;
+  name: string;
+  items: Array<{
+    key: string;
+    value: string;
+  }>;
 }
 
 type AnyDirectoryHandle = FileSystemDirectoryHandle & {
@@ -574,4 +595,37 @@ export async function writeGlobalApiConfig(content: string): Promise<void> {
   if (host?.writeGlobalApiConfig) {
     await host.writeGlobalApiConfig(content);
   }
+}
+
+// 参考列表管理函数
+export async function getReferenceLists(): Promise<ReferenceListIndex[]> {
+  const host = getHostApi();
+  if (host?.getReferenceLists) {
+    return host.getReferenceLists();
+  }
+  return [];
+}
+
+export async function getReferenceList(listId: string): Promise<ReferenceListData | null> {
+  const host = getHostApi();
+  if (host?.getReferenceList) {
+    return host.getReferenceList(listId);
+  }
+  return null;
+}
+
+export async function saveReferenceList(list: ReferenceListData): Promise<ReferenceListData> {
+  const host = getHostApi();
+  if (host?.saveReferenceList) {
+    return host.saveReferenceList(list);
+  }
+  throw new Error("Reference list management is not available.");
+}
+
+export async function deleteReferenceList(listId: string): Promise<void> {
+  const host = getHostApi();
+  if (host?.deleteReferenceList) {
+    return host.deleteReferenceList(listId);
+  }
+  throw new Error("Reference list management is not available.");
 }

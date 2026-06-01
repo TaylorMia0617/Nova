@@ -13,10 +13,13 @@ import {
   renamePath,
   type WorkspaceNode,
   writeFile,
+  getReferenceLists as getReferenceListsFromDisk,
+  getReferenceList as getReferenceListFromDisk,
+  saveReferenceList as saveReferenceListToDisk,
+  deleteReferenceList as deleteReferenceListFromDisk,
+  type ReferenceListData,
 } from "../services/fileSystemService";
 import type { FileChange } from "../types/ai";
-
-const SETTINGS_FOLDER_NAME = "Settings";
 
 export interface OpenFileTab {
   path: string;
@@ -26,13 +29,10 @@ export interface OpenFileTab {
   isDirty: boolean;
 }
 
-export interface NamedEntry {
+export interface ReferenceEntry {
   name: string;
   description?: string;
-}
-
-export interface ReferenceEntry extends NamedEntry {
-  sourceFile?: string;
+  sourceList?: string;
 }
 
 interface FileState {
@@ -42,7 +42,8 @@ interface FileState {
   activeFile: OpenFileTab | null;
   openTabs: OpenFileTab[];
   referenceEntries: ReferenceEntry[];
-  referenceFilePaths: string[];
+  referenceLists: ReferenceListData[];
+  selectedListId: string | null;
   isLoadingWorkspace: boolean;
   errorMessage: string | null;
   fileChanges: Map<string, FileChange[]>;
@@ -63,7 +64,10 @@ interface FileState {
   duplicateFile: (path: string) => Promise<void>;
   deleteFile: (path: string) => Promise<void>;
   moveFile: (sourcePath: string, destinationFolderPath: string) => Promise<void>;
-  createConfigFile: (fileName: string) => Promise<void>;
+  loadReferenceLists: () => Promise<void>;
+  saveReferenceList: (list: ReferenceListData) => Promise<void>;
+  deleteReferenceList: (listId: string) => Promise<void>;
+  setSelectedListId: (listId: string | null) => void;
   trackFileChange: (path: string, oldContent: string, newContent: string) => void;
   getFileChanges: (path: string) => FileChange[];
   clearFileChanges: (path: string) => void;
@@ -183,119 +187,18 @@ function filterTabsOutsidePath(tabs: OpenFileTab[], deletedPath: string): OpenFi
   return tabs.filter((tab) => !isSameOrDescendantPath(tab.path, deletedPath));
 }
 
-function findFolderPath(nodes: WorkspaceNode[], folderName: string): string | null {
-  for (const node of nodes) {
-    if (node.type === "folder" && node.name.toLowerCase() === folderName.toLowerCase()) {
-      return node.path;
-    }
-    if (node.children) {
-      const found = findFolderPath(node.children, folderName);
-      if (found) return found;
-    }
-  }
-  return null;
-}
-
-function parseNamedEntries(content: string): NamedEntry[] {
-  return content
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line): NamedEntry | null => {
-      const match = line.match(/^\{\{(.+?)\}\}(?:\s+(.+))?$/);
-      if (!match) return null;
-      return {
-        name: match[1].trim(),
-        description: (match[2] ?? "").trim(),
-      };
-    })
-    .filter((entry): entry is NamedEntry => entry !== null);
-}
-
-function reloadSingleReferenceFile(
-  currentEntries: ReferenceEntry[],
-  currentFilePaths: string[],
-  filePath: string,
-  content: string
-): ReferenceEntry[] {
-  if (!currentFilePaths.includes(filePath)) {
-    return currentEntries;
-  }
-
-  const fileName = filePath.split(/[/\\]/).pop() ?? "";
-  const newEntries = parseNamedEntries(content).map(entry => ({
-    ...entry,
-    sourceFile: fileName,
-  }));
-
-  const otherEntries = currentEntries.filter(e => e.sourceFile !== fileName);
-  return [...otherEntries, ...newEntries];
-}
-
-async function loadAllReferenceFiles(
-  nodes: WorkspaceNode[]
-): Promise<{ entries: ReferenceEntry[]; filePaths: string[] }> {
-  const settingsPath = findFolderPath(nodes, SETTINGS_FOLDER_NAME);
-  console.log("[Reference] Looking for settings folder:", SETTINGS_FOLDER_NAME, "→ found:", settingsPath);
-
-  if (!settingsPath) {
-    console.log("[Reference] No settings folder found, returning empty");
-    return { entries: [], filePaths: [] };
-  }
-
+function buildReferenceEntriesFromLists(lists: ReferenceListData[]): ReferenceEntry[] {
   const entries: ReferenceEntry[] = [];
-  const filePaths: string[] = [];
-
-  const findTxtFiles = (nodeList: WorkspaceNode[]) => {
-    for (const node of nodeList) {
-      if (node.type === "file" && node.name.endsWith(".txt")) {
-        filePaths.push(node.path);
-      }
-      if (node.children) {
-        findTxtFiles(node.children);
-      }
-    }
-  };
-
-  const settingsNode = getNodeByPath(nodes, settingsPath);
-  console.log("[Reference] Settings node:", settingsNode?.name, "isLoaded:", settingsNode?.isLoaded, "hasChildren:", !!settingsNode?.children);
-
-  if (settingsNode) {
-    // 如果 settings 文件夹的 children 是 undefined，需要先加载它
-    if (!settingsNode.children) {
-      try {
-        console.log("[Reference] Loading settings folder contents...");
-        const children = await readDirectory(settingsPath);
-        console.log("[Reference] Loaded", children.length, "children:", children.map(c => c.name));
-        findTxtFiles(children);
-      } catch (err) {
-        console.error("[Reference] Failed to load settings folder:", err);
-        return { entries: [], filePaths: [] };
-      }
-    } else {
-      console.log("[Reference] Settings folder already loaded, children:", settingsNode.children.map(c => c.name));
-      findTxtFiles(settingsNode.children);
+  for (const list of lists) {
+    for (const item of list.items) {
+      entries.push({
+        name: item.key,
+        description: item.value,
+        sourceList: list.name,
+      });
     }
   }
-
-  console.log("[Reference] Found txt files:", filePaths);
-
-  for (const filePath of filePaths) {
-    try {
-      const content = await readFile(filePath);
-      const fileName = filePath.split(/[/\\]/).pop() ?? "";
-      const namedEntries = parseNamedEntries(content);
-      console.log("[Reference] File:", fileName, "→ entries:", namedEntries.length, namedEntries);
-      for (const entry of namedEntries) {
-        entries.push({ ...entry, sourceFile: fileName });
-      }
-    } catch (err) {
-      console.error("[Reference] Failed to read file:", filePath, err);
-    }
-  }
-
-  console.log("[Reference] Total reference entries:", entries.length, entries);
-  return { entries, filePaths };
+  return entries;
 }
 
 export const useFileStore = create<FileState>()((set, get) => ({
@@ -305,7 +208,8 @@ export const useFileStore = create<FileState>()((set, get) => ({
   activeFile: null,
   openTabs: [],
   referenceEntries: [],
-  referenceFilePaths: [],
+  referenceLists: [],
+  selectedListId: null,
   isLoadingWorkspace: false,
   errorMessage: null,
   fileChanges: new Map(),
@@ -366,26 +270,21 @@ export const useFileStore = create<FileState>()((set, get) => ({
 
       const workspace = await loadWorkspace(selectedPath);
 
-      // 如果 Settings 文件夹不存在，自动创建它
-      const settingsPath = findFolderPath(workspace.nodes, SETTINGS_FOLDER_NAME);
-      if (!settingsPath) {
-        const newSettingsPath = joinPath(workspace.rootPath, SETTINGS_FOLDER_NAME);
-        try {
-          await createFolderOnDisk(newSettingsPath);
-          // 重新加载工作区以包含新创建的 Settings 文件夹
-          const updatedWorkspace = await loadWorkspace(selectedPath);
-          workspace.nodes = updatedWorkspace.nodes;
-        } catch (error) {
-          // 如果文件夹已存在，忽略错误
-          const message = error instanceof Error ? error.message : String(error);
-          if (!message.includes("already exists")) {
-            console.error("[OpenWorkspace] Failed to create Settings folder:", error);
-          }
-        }
+      // 加载参考列表
+      let referenceLists: ReferenceListData[] = [];
+      try {
+        const listIndex = await getReferenceListsFromDisk();
+        referenceLists = await Promise.all(
+          listIndex.map(async (index) => {
+            const list = await getReferenceListFromDisk(index.id);
+            return list || { id: index.id, name: index.name, items: [] };
+          })
+        );
+      } catch (err) {
+        console.error("[OpenWorkspace] Failed to load reference lists:", err);
       }
 
-      const { entries: referenceEntries, filePaths: referenceFilePaths } = 
-        await loadAllReferenceFiles(workspace.nodes);
+      const referenceEntries = buildReferenceEntriesFromLists(referenceLists);
 
       set({
         rootPath: workspace.rootPath,
@@ -394,7 +293,8 @@ export const useFileStore = create<FileState>()((set, get) => ({
         openTabs: [],
         activeFile: null,
         referenceEntries,
-        referenceFilePaths,
+        referenceLists,
+        selectedListId: referenceLists[0]?.id ?? null,
         errorMessage: null,
         isLoadingWorkspace: false,
       });
@@ -470,8 +370,22 @@ export const useFileStore = create<FileState>()((set, get) => ({
           ? validTabs.find((tab) => tab.path === activeFile.path) ?? null
           : validTabs[0] ?? null;
 
-      const { entries: referenceEntries, filePaths: referenceFilePaths } = 
-        await loadAllReferenceFiles(workspace.nodes);
+      // 刷新参考列表（只更新 referenceLists，不更新 referenceEntries）
+      let referenceLists = get().referenceLists;
+      try {
+        const listIndex = await getReferenceListsFromDisk();
+        referenceLists = await Promise.all(
+          listIndex.map(async (index) => {
+            const list = await getReferenceListFromDisk(index.id);
+            return list || { id: index.id, name: index.name, items: [] };
+          })
+        );
+      } catch (err) {
+        console.error("[RefreshWorkspace] Failed to load reference lists:", err);
+      }
+
+      // 不更新 referenceEntries，保持缓存
+      const referenceEntries = get().referenceEntries;
 
       set({
         rootName: workspace.rootName,
@@ -479,7 +393,7 @@ export const useFileStore = create<FileState>()((set, get) => ({
         openTabs: validTabs,
         activeFile: nextActiveFile,
         referenceEntries,
-        referenceFilePaths,
+        referenceLists,
         errorMessage: null,
       });
     } catch (error) {
@@ -508,21 +422,11 @@ export const useFileStore = create<FileState>()((set, get) => ({
         isDirty: false,
       };
 
-      set((state) => {
-        const nextReferenceEntries = reloadSingleReferenceFile(
-          state.referenceEntries,
-          state.referenceFilePaths,
-          path,
-          content
-        );
-
-        return {
-          openTabs: [...state.openTabs, newTab],
-          activeFile: newTab,
-          referenceEntries: nextReferenceEntries,
-          errorMessage: null,
-        };
-      });
+      set((state) => ({
+        openTabs: [...state.openTabs, newTab],
+        activeFile: newTab,
+        errorMessage: null,
+      }));
     } catch (error) {
       set({
         errorMessage: error instanceof Error ? error.message : "Failed to open file.",
@@ -569,17 +473,9 @@ export const useFileStore = create<FileState>()((set, get) => ({
           : tab
       );
 
-      const nextReferenceEntries = reloadSingleReferenceFile(
-        state.referenceEntries,
-        state.referenceFilePaths,
-        path,
-        content
-      );
-
       return {
         openTabs: nextTabs,
         activeFile: nextTabs.find((tab) => tab.path === state.activeFile?.path) ?? null,
-        referenceEntries: nextReferenceEntries,
       };
     });
   },
@@ -604,17 +500,9 @@ export const useFileStore = create<FileState>()((set, get) => ({
             : item
         );
 
-        const nextReferenceEntries = reloadSingleReferenceFile(
-          state.referenceEntries,
-          state.referenceFilePaths,
-          targetPath,
-          tab.content
-        );
-
         return {
           openTabs: nextTabs,
           activeFile: nextTabs.find((item) => item.path === state.activeFile?.path) ?? null,
-          referenceEntries: nextReferenceEntries,
           errorMessage: null,
         };
       });
@@ -679,14 +567,9 @@ export const useFileStore = create<FileState>()((set, get) => ({
         const nextTabs = updateTabsWithRenamedPath(state.openTabs, path, newPath, newName);
         const nextActivePath = state.activeFile?.path?.replace(path, newPath);
 
-        const nextReferenceFilePaths = state.referenceFilePaths.map(fp =>
-          isSameOrDescendantPath(fp, path) ? fp.replace(path, newPath) : fp
-        );
-
         return {
           openTabs: nextTabs,
           activeFile: nextTabs.find((tab) => tab.path === nextActivePath || tab.path === newPath) ?? null,
-          referenceFilePaths: nextReferenceFilePaths,
           errorMessage: null,
         };
       });
@@ -719,20 +602,9 @@ export const useFileStore = create<FileState>()((set, get) => ({
             ? nextTabs.find((tab) => tab.path === state.activeFile?.path) ?? null
             : nextTabs[nextTabs.length - 1] ?? null;
 
-        const nextReferenceFilePaths = state.referenceFilePaths.filter(
-          fp => !isSameOrDescendantPath(fp, path)
-        );
-
-        const deletedFileName = path.split(/[/\\]/).pop() ?? "";
-        const nextReferenceEntries = state.referenceEntries.filter(
-          e => e.sourceFile !== deletedFileName
-        );
-
         return {
           openTabs: nextTabs,
           activeFile: nextActive,
-          referenceFilePaths: nextReferenceFilePaths,
-          referenceEntries: nextReferenceEntries,
           errorMessage: null,
         };
       });
@@ -751,14 +623,9 @@ export const useFileStore = create<FileState>()((set, get) => ({
         const nextTabs = updateTabsWithRenamedPath(state.openTabs, sourcePath, newPath, movedName);
         const nextActivePath = state.activeFile?.path?.replace(sourcePath, newPath);
 
-        const nextReferenceFilePaths = state.referenceFilePaths.map(fp =>
-          isSameOrDescendantPath(fp, sourcePath) ? fp.replace(sourcePath, newPath) : fp
-        );
-
         return {
           openTabs: nextTabs,
           activeFile: nextTabs.find((tab) => tab.path === nextActivePath || tab.path === newPath) ?? null,
-          referenceFilePaths: nextReferenceFilePaths,
           errorMessage: null,
         };
       });
@@ -769,35 +636,66 @@ export const useFileStore = create<FileState>()((set, get) => ({
       });
     }
   },
-  createConfigFile: async (fileName) => {
-    const { rootPath, files } = get();
-    if (!rootPath) return;
-
-    const existingSettingsFolderPath = findFolderPath(files, SETTINGS_FOLDER_NAME);
-    const settingsFolderPath = existingSettingsFolderPath ?? joinPath(rootPath, SETTINGS_FOLDER_NAME);
-
-    if (!existingSettingsFolderPath) {
-      try {
-        await createFolderOnDisk(settingsFolderPath);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (!message.includes("already exists")) {
-          throw error;
-        }
+  loadReferenceLists: async () => {
+    try {
+      const listIndex = await getReferenceListsFromDisk();
+      const referenceLists = await Promise.all(
+        listIndex.map(async (index) => {
+          const list = await getReferenceListFromDisk(index.id);
+          return list || { id: index.id, name: index.name, items: [] };
+        })
+      );
+      const referenceEntries = buildReferenceEntriesFromLists(referenceLists);
+      set({ referenceLists, referenceEntries });
+    } catch (error) {
+      set({
+        errorMessage: error instanceof Error ? error.message : "Failed to load reference lists.",
+      });
+    }
+  },
+  saveReferenceList: async (list) => {
+    try {
+      // 检查名称唯一性
+      const { referenceLists } = get();
+      const existingList = referenceLists.find(l => l.name === list.name && l.id !== list.id);
+      if (existingList) {
+        throw new Error("列表名称已存在");
       }
+
+      await saveReferenceListToDisk(list);
+      await get().loadReferenceLists();
+      
+      // 更新选中的列表
+      if (get().selectedListId === list.id || !get().selectedListId) {
+        set({ selectedListId: list.id });
+      }
+    } catch (error) {
+      set({
+        errorMessage: error instanceof Error ? error.message : "Failed to save reference list.",
+      });
+      throw error;
     }
-
-    const finalFileName = fileName.endsWith('.txt') ? fileName : `${fileName}.txt`;
-    const filePath = joinPath(settingsFolderPath, finalFileName);
-
-    const existingPath = get().referenceFilePaths.find(fp => fp.endsWith(`/${finalFileName}`) || fp.endsWith(`\\${finalFileName}`));
-    if (existingPath) {
-      throw new Error(`文件 "${finalFileName}" 已存在`);
+  },
+  deleteReferenceList: async (listId) => {
+    try {
+      await deleteReferenceListFromDisk(listId);
+      
+      const { referenceLists, selectedListId } = get();
+      const newLists = referenceLists.filter(l => l.id !== listId);
+      const referenceEntries = buildReferenceEntriesFromLists(newLists);
+      
+      set({
+        referenceLists: newLists,
+        referenceEntries,
+        selectedListId: selectedListId === listId ? (newLists[0]?.id ?? null) : selectedListId,
+      });
+    } catch (error) {
+      set({
+        errorMessage: error instanceof Error ? error.message : "Failed to delete reference list.",
+      });
     }
-
-    await createFileOnDisk(filePath);
-    await writeFile(filePath, "");
-
-    await get().refreshWorkspace();
+  },
+  setSelectedListId: (listId) => {
+    set({ selectedListId: listId });
   },
 }));

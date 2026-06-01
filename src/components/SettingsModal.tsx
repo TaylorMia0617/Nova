@@ -33,6 +33,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     selectionPromptTemplates,
     contextMaxLength,
     tavilyApiKey,
+    webSearchLimit,
     setModelProfiles,
     updateModelProfile,
     removeModelProfile,
@@ -41,6 +42,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     setSelectionPromptTemplate,
     setContextMaxLength,
     setTavilyApiKey,
+    setWebSearchLimit,
   } = useSettingsStore();
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<"models" | "search">("models");
@@ -280,6 +282,17 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                     app.tavily.com
                   </a>
                 </div>
+                <label>
+                  <span>{t("settings.webSearchLimit")}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={webSearchLimit}
+                    onChange={(event) => setWebSearchLimit(Number(event.target.value))}
+                  />
+                  <span className="settings-hint">{t("settings.webSearchLimitHint")}</span>
+                </label>
               </div>
             ) : (
               <>

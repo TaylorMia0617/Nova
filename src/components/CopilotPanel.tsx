@@ -15,8 +15,44 @@ import {
 } from "../services/conversationService";
 import { selectTextAttachments } from "../services/attachmentService";
 import { getEditorContent, insertTextIntoEditor } from "../services/editorInsertionService";
+import { runLocalTool } from "../services/mcpService";
+import type { WorkspaceNode } from "../services/fileSystemService";
 import type { ChatSkills, ConversationAttachment, ConversationMessage, ConversationRecord, ConversationSummary, FileChange, FileContentCache, MultiFileContext } from "../types/ai";
 import "./CopilotPanel.css";
+
+// 构建目录结构字符串（隐藏 .novel-assistance/conversations/）
+function buildDirectoryTreeString(nodes: WorkspaceNode[], prefix: string = ""): string {
+  const lines: string[] = [];
+  
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i];
+    const isLast = i === nodes.length - 1;
+    const connector = isLast ? "└── " : "├── ";
+    const childPrefix = isLast ? "    " : "│   ";
+    
+    if (node.type === "folder") {
+      // 如果是 .novel-assistance 文件夹，需要特殊处理子目录
+      if (node.name === ".novel-assistance") {
+        lines.push(`${prefix}${connector}${node.name}/`);
+        if (node.children) {
+          // 过滤掉 conversations 目录
+          const filteredChildren = node.children.filter(child => child.name !== "conversations");
+          if (filteredChildren.length > 0) {
+            lines.push(buildDirectoryTreeString(filteredChildren, prefix + childPrefix));
+          }
+        }
+      } else {
+        lines.push(`${prefix}${connector}${node.name}/`);
+        if (node.children) {
+          lines.push(buildDirectoryTreeString(node.children, prefix + childPrefix));
+        }
+      }
+    } else {
+      lines.push(`${prefix}${connector}${node.name}`);
+    }
+  }
+  return lines.join("\n");
+}
 
 function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
@@ -43,8 +79,8 @@ function buildTitleFromMessage(content: string) {
 }
 
 const CopilotPanel: React.FC = () => {
-  const { activeFile, rootPath, openTabs } = useFileStore();
-  const { modelProfiles, defaultChatModelId, getModelProfileById, chatMaxTokens, setChatMaxTokens, contextMaxLength } = useSettingsStore();
+  const { activeFile, rootPath, openTabs, files } = useFileStore();
+  const { modelProfiles, defaultChatModelId, getModelProfileById, chatMaxTokens, setChatMaxTokens, contextMaxLength, webSearchLimit } = useSettingsStore();
   const { t } = useTranslation();
   const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
   const [activeConversation, setActiveConversation] = useState<ConversationRecord | null>(null);
@@ -57,10 +93,12 @@ const CopilotPanel: React.FC = () => {
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [tempMaxTokens, setTempMaxTokens] = useState(String(chatMaxTokens));
   const [fileCaches, setFileCaches] = useState<Map<string, FileContentCache>>(new Map());
+  const fileCachesRef = useRef<Map<string, FileContentCache>>(new Map());
   const [chatSkills, setChatSkills] = useState<ChatSkills>({
     enableWebSearch: false,
     thinkingDepth: "off",
   });
+  const [webSearchCount, setWebSearchCount] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const lastDefaultChatModelIdRef = useRef(defaultChatModelId);
 
@@ -87,20 +125,17 @@ const CopilotPanel: React.FC = () => {
     return null;
   };
 
-  const getFileCache = (filePath: string): FileContentCache | undefined => {
-    return fileCaches.get(filePath);
-  };
-
   const updateFileCache = (filePath: string, content: string) => {
-    setFileCaches(prev => {
-      const next = new Map(prev);
-      next.set(filePath, {
-        filePath,
-        content,
-        lastSentAt: new Date().toISOString(),
-      });
-      return next;
-    });
+    const newCache = {
+      filePath,
+      content,
+      lastSentAt: new Date().toISOString(),
+    };
+    // 同步更新 ref
+    fileCachesRef.current = new Map(fileCachesRef.current);
+    fileCachesRef.current.set(filePath, newCache);
+    // 异步更新 state（用于 UI 显示）
+    setFileCaches(fileCachesRef.current);
   };
 
   const calculateChanges = (oldContent: string, newContent: string): FileChange[] => {
@@ -160,16 +195,19 @@ const CopilotPanel: React.FC = () => {
       };
     }
 
-    const activeFileCache = getFileCache(activeFile.path);
+    // 使用 ref 获取最新的缓存
+    const activeFileCache = fileCachesRef.current.get(activeFile.path);
     const activeCachedContent = activeFileCache?.content ?? null;
 
     const activeChanges = activeCachedContent
       ? calculateChanges(activeCachedContent, currentContent)
       : [];
 
+    // 同步更新缓存
     updateFileCache(activeFile.path, currentContent);
 
-    const otherBoundFiles = Array.from(fileCaches.entries())
+    // 使用 ref 构建 otherBoundFiles
+    const otherBoundFiles = Array.from(fileCachesRef.current.entries())
       .filter(([path]) => path !== activeFile.path)
       .slice(0, 5)
       .map(([path, cache]) => {
@@ -188,7 +226,8 @@ const CopilotPanel: React.FC = () => {
         };
       });
 
-    const allBoundFiles = Array.from(fileCaches.values()).map(cache => ({
+    // 使用 ref 构建 allBoundFiles
+    const allBoundFiles = Array.from(fileCachesRef.current.values()).map(cache => ({
       meta: {
         fileName: cache.filePath.split(/[/\\]/).pop() || cache.filePath,
         filePath: cache.filePath,
@@ -383,6 +422,9 @@ const CopilotPanel: React.FC = () => {
   const handleSendMessage = async () => {
     if (!input.trim() || !activeConversation || !currentModel || isLoading) return;
 
+    // 重置搜索计数
+    setWebSearchCount(0);
+
     const userMessage: ConversationMessage = {
       id: createId("msg"),
       role: "user",
@@ -414,13 +456,21 @@ const CopilotPanel: React.FC = () => {
         setStatusText(fileSizeWarning);
       }
 
+      // 更新文件缓存
+      if (activeFile) {
+        updateFileCache(activeFile.path, activeFile.content);
+      }
+
       const multiFileContext = buildMultiFileContext();
 
-      const response = await callAI({
+      // 构建目录结构字符串
+      const directoryTree = buildDirectoryTreeString(files);
+
+      let response = await callAI({
         modelProfile: currentModel,
         taskType: "chat",
         userMessage: userMessage.content,
-        documentContext: activeFile?.content || getEditorContent() || "",
+        documentContext: multiFileContext?.activeFile.content || activeFile?.content || getEditorContent() || "",
         documentFileName: activeFile?.name,
         maxTokens: chatMaxTokens,
         conversationHistory: nextMessages.slice(-6, -1),
@@ -428,7 +478,86 @@ const CopilotPanel: React.FC = () => {
         multiFileContext,
         contextMaxLength,
         skills: chatSkills,
+        workspaceRoot: rootPath ?? undefined,
+        directoryTree: directoryTree,
       });
+
+      // 实现多轮工具调用循环
+      let currentResponse = response;
+      const maxIterations = 100; // 最多100轮工具调用
+
+      for (let iteration = 0; iteration < maxIterations; iteration++) {
+        let toolCallMatch = currentResponse.match(/```tool_call\s*\n([\s\S]*?)\n```/);
+        if (!toolCallMatch || !rootPath) break;
+        
+        const toolResults: Array<{ name: string; result: string }> = [];
+        
+        // 执行当前轮次的所有工具调用
+        while (toolCallMatch) {
+          try {
+            const toolCall = JSON.parse(toolCallMatch[1]);
+            const toolResult = await runLocalTool(
+              toolCall.name,
+              toolCall.arguments,
+              rootPath,
+              files,
+              {
+                enableWebSearch: chatSkills.enableWebSearch,
+                searchCount: webSearchCount,
+                searchLimit: webSearchLimit
+              }
+            );
+            
+            // 更新搜索计数
+            if (toolCall.name === "web_search" && !toolResult.result.startsWith("Error")) {
+              setWebSearchCount(prev => prev + 1);
+            }
+            
+            // 记录工具调用结果
+            toolResults.push({ name: toolCall.name, result: toolResult.result });
+            
+            // 移除已处理的工具调用
+            currentResponse = currentResponse.replace(toolCallMatch[0], '');
+            toolCallMatch = currentResponse.match(/```tool_call\s*\n([\s\S]*?)\n```/);
+          } catch (error) {
+            console.error("Tool call error:", error);
+            break;
+          }
+        }
+        
+        // 如果有工具调用结果，将结果反馈给 AI 让它继续处理
+        if (toolResults.length > 0) {
+          const toolContext = toolResults.map(r => `Tool: ${r.name}\nResult: ${r.result}`).join("\n\n");
+          
+          // 更新中间结果显示
+          setStatusText(`Processing tool results (iteration ${iteration + 1})...`);
+          
+          currentResponse = await callAI({
+            modelProfile: currentModel,
+            taskType: "chat",
+            userMessage: `Based on the tool results below, please continue with your task:\n\n${toolContext}`,
+            documentContext: multiFileContext?.activeFile.content || activeFile?.content || getEditorContent() || "",
+            documentFileName: activeFile?.name,
+            maxTokens: chatMaxTokens,
+            conversationHistory: nextMessages.slice(-6, -1),
+            attachments: draftAttachments,
+            multiFileContext,
+            contextMaxLength,
+            skills: chatSkills,
+            workspaceRoot: rootPath ?? undefined,
+            directoryTree: directoryTree,
+          });
+          
+          // 检查 AI 的回复是否包含更多工具调用
+          if (!currentResponse.match(/```tool_call\s*\n([\s\S]*?)\n```/)) {
+            // AI 不再调用工具，显示最终回复
+            break;
+          }
+        }
+      }
+      
+      // 组合最终响应（只显示 AI 的最终回复）
+      response = currentResponse;
 
       await persistFileCaches();
       await persistChatSkills();
@@ -438,6 +567,7 @@ const CopilotPanel: React.FC = () => {
         role: "assistant",
         content: response,
         createdAt: new Date().toISOString(),
+        searchCount: webSearchCount > 0 ? webSearchCount : undefined,
       };
       const finalRecord: ConversationRecord = {
         ...draftRecord,
@@ -588,6 +718,11 @@ const CopilotPanel: React.FC = () => {
                   <button className="insert-button" onClick={() => handleInsertToEditor(msg.content)}>
                     {t("copilot.insertToEditor")}
                   </button>
+                )}
+                {msg.role === "assistant" && msg.searchCount && msg.searchCount > 0 && (
+                  <div className="message-search-count">
+                    {t("copilot.searchCount", { count: msg.searchCount, limit: webSearchLimit })}
+                  </div>
                 )}
               </div>
             </div>

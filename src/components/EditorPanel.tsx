@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
 import {
   AlignCenter,
@@ -14,7 +14,7 @@ import {
   WrapText,
   X,
 } from "lucide-react";
-import { useFileStore } from "../stores/fileStore";
+import { useFileStore, type ReferenceEntry } from "../stores/fileStore";
 import { useSettingsStore } from "../stores/settingsStore";
 import { callAI } from "../services/aiService";
 import { readFile, type WorkspaceNode } from "../services/fileSystemService";
@@ -180,7 +180,6 @@ const EditorPanel: React.FC = () => {
     activeFile,
     openTabs,
     referenceEntries,
-    referenceFilePaths,
     rootPath,
     setActiveFile,
     closeTab,
@@ -218,9 +217,40 @@ const EditorPanel: React.FC = () => {
   const [exportError, setExportError] = useState("");
   const exportTemplates = getExportTemplates();
 
-  const isReferenceFile = activeFile?.path
-    ? referenceFilePaths.includes(activeFile.path)
-    : false;
+  const isReferenceFile = false;
+
+  // 预处理 referenceEntries 为一个 Map，提高查找速度
+  // 存储每个前缀对应的条目列表
+  const referenceEntriesMap = useMemo(() => {
+    const map = new Map<string, ReferenceEntry[]>();
+    for (const entry of referenceEntries) {
+      const lowerName = entry.name.toLowerCase();
+      for (let i = 1; i <= lowerName.length; i++) {
+        const prefix = lowerName.slice(0, i);
+        if (!map.has(prefix)) {
+          map.set(prefix, []);
+        }
+        map.get(prefix)!.push(entry);
+      }
+    }
+    return map;
+  }, [referenceEntries]);
+
+  // 检查是否有匹配的条目（O(1) 操作）
+  const hasMatchingEntry = useCallback((partial: string): boolean => {
+    if (!partial) return false;
+    const entries = referenceEntriesMap.get(partial);
+    if (!entries) return false;
+    return entries.some(entry => entry.name.toLowerCase() !== partial);
+  }, [referenceEntriesMap]);
+
+  // 获取匹配的条目（O(1) 操作）
+  const getMatchingEntries = useCallback((partial: string): ReferenceEntry[] => {
+    if (!partial) return [];
+    const entries = referenceEntriesMap.get(partial);
+    if (!entries) return [];
+    return entries.filter(entry => entry.name.toLowerCase() !== partial);
+  }, [referenceEntriesMap]);
 
   const getCompletionKind = (monaco: any) => {
     return monaco.languages.CompletionItemKind.Reference;
@@ -270,7 +300,7 @@ const EditorPanel: React.FC = () => {
     if (token) {
       for (let i = token.length - 1; i >= 0; i--) {
         const suffix = token.slice(i).toLowerCase();
-        if (referenceEntries.some((entry) => entry.name.toLowerCase().startsWith(suffix))) {
+        if (referenceEntriesMap.has(suffix)) {
           partial = token.slice(i);
           break;
         }
@@ -298,13 +328,11 @@ const EditorPanel: React.FC = () => {
 
   const triggerReferenceSuggestions = () => {
     const editor = editorRef.current;
-    console.log("[Suggestion] triggerReferenceSuggestions called, referenceEntries.length:", referenceEntries.length, "isReferenceFile:", isReferenceFile);
     if (!editor || referenceEntries.length === 0 || isReferenceFile) return;
     const model = editor.getModel();
     const position = editor.getPosition();
     if (!model || !position) return;
     const context = getSuggestionContext(model, position);
-    console.log("[Suggestion] context:", context);
     if (!context) return;
     editor.trigger("reference-suggestions", "editor.action.triggerSuggest", {});
   };
@@ -329,13 +357,8 @@ const EditorPanel: React.FC = () => {
             position.column
           );
 
-          const matchingEntries = referenceEntries.filter((entry) =>
-            entry.name.toLowerCase().startsWith(context.partial)
-          );
-
-          const candidateEntries = matchingEntries.filter(
-            (entry) => entry.name.toLowerCase() !== context.partial
-          );
+          // 使用 getMatchingEntries 获取匹配的条目（O(1) 操作）
+          const candidateEntries = getMatchingEntries(context.partial);
 
           if (candidateEntries.length === 0) {
             return { suggestions: [] };
@@ -354,7 +377,7 @@ const EditorPanel: React.FC = () => {
               kind: getCompletionKind(monaco),
               insertText: context.insertMode === "brace" ? `{{${entry.name}}}` : entry.name,
               filterText: entry.name,
-              detail: entry.description ? getShortDescription(entry.description) : entry.sourceFile ?? "参考",
+              detail: entry.description ? getShortDescription(entry.description) : entry.sourceList ?? "参考",
               documentation: entry.description ?? "",
               range,
             }));
@@ -685,15 +708,9 @@ const EditorPanel: React.FC = () => {
         const position = editor?.getPosition();
         if (!model || !position) return;
         const context = getSuggestionContext(model, position);
-        console.log("[Suggestion] Typing trigger, context:", context, "referenceEntries.length:", referenceEntries.length);
         if (context && context.partial) {
-          const hasMatch = referenceEntries.some(
-            (entry) =>
-              entry.name.toLowerCase().startsWith(context.partial) &&
-              entry.name.toLowerCase() !== context.partial
-          );
-          console.log("[Suggestion] hasMatch:", hasMatch, "partial:", context.partial);
-          if (hasMatch) {
+          // 使用 hasMatchingEntry 检查是否有匹配的条目（O(1) 操作）
+          if (hasMatchingEntry(context.partial)) {
             suggestionCooldownUntilRef.current = 0;
             triggerReferenceSuggestions();
           }
@@ -708,15 +725,9 @@ const EditorPanel: React.FC = () => {
         const position = editor?.getPosition();
         if (!model || !position) return;
         const context = getSuggestionContext(model, position);
-        console.log("[Suggestion] Idle trigger, context:", context, "referenceEntries.length:", referenceEntries.length);
         if (context && context.partial) {
-          const hasMatch = referenceEntries.some(
-            (entry) =>
-              entry.name.toLowerCase().startsWith(context.partial) &&
-              entry.name.toLowerCase() !== context.partial
-          );
-          console.log("[Suggestion] Idle hasMatch:", hasMatch);
-          if (hasMatch) {
+          // 使用 hasMatchingEntry 检查是否有匹配的条目（O(1) 操作）
+          if (hasMatchingEntry(context.partial)) {
             triggerReferenceSuggestions();
           }
         }
@@ -726,11 +737,11 @@ const EditorPanel: React.FC = () => {
     });
   };
 
-  const handleEditorChange = (value: string | undefined) => {
+  const handleEditorChange = useCallback((value: string | undefined) => {
     if (activeFile && value !== undefined) {
       updateFileContent(activeFile.path, value);
     }
-  };
+  }, [activeFile?.path, updateFileContent]);
 
   const handleSave = async () => {
     if (!activeFile) return;

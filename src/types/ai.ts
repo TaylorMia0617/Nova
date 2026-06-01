@@ -25,6 +25,7 @@ export interface ConversationMessage {
   createdAt: string;
   attachments?: ConversationAttachment[];
   skills?: ChatSkills;
+  searchCount?: number;
 }
 
 export interface ConversationAttachment {
@@ -105,4 +106,24 @@ export interface MultiFileContext {
     meta: DocumentMeta;
     lastUsed: string;
   }>;
+}
+
+export interface McpTool {
+  name: string;
+  description: string;
+  inputSchema: {
+    type: string;
+    properties: Record<string, { type: string; description: string }>;
+    required: string[];
+  };
+}
+
+export interface McpToolCall {
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface McpToolResult {
+  toolName: string;
+  result: string;
 }

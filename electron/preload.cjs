@@ -42,6 +42,11 @@ contextBridge.exposeInMainWorld("novelHost", {
   resizeTerminal: (terminalId, cols, rows) => ipcRenderer.invoke("terminal:resize", terminalId, cols, rows),
   disposeTerminal: (terminalId) => ipcRenderer.invoke("terminal:dispose", terminalId),
   printToPDF: (html) => ipcRenderer.invoke("export:printToPDF", html),
+  // 参考列表管理
+  getReferenceLists: () => ipcRenderer.invoke("reference:getLists"),
+  getReferenceList: (listId) => ipcRenderer.invoke("reference:getList", listId),
+  saveReferenceList: (list) => ipcRenderer.invoke("reference:saveList", list),
+  deleteReferenceList: (listId) => ipcRenderer.invoke("reference:deleteList", listId),
   onTerminalData: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on("terminal:data", listener);

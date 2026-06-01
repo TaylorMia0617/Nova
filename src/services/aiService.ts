@@ -1,5 +1,3 @@
-import { runMcpSearch } from "./mcpService";
-import { searchWithTavily } from "./searchService";
 import type { AiTaskType, ChatSkills, ConversationAttachment, ConversationMessage, DocumentMeta, FileChange, ModelProfile, MultiFileContext } from "../types/ai";
 import { serializeAttachmentsForPrompt } from "./attachmentService";
 
@@ -16,6 +14,8 @@ interface AiRequestOptions {
   multiFileContext?: MultiFileContext;
   contextMaxLength?: number;
   skills?: ChatSkills;
+  workspaceRoot?: string;
+  directoryTree?: string;
 }
 
 function smartTruncate(content: string, maxLength: number): string {
@@ -29,38 +29,12 @@ function smartTruncate(content: string, maxLength: number): string {
     content.slice(-tailLength);
 }
 
-function buildChangesContext(
-  _fullContent: string,
-  changes: FileChange[],
-  maxLength: number
-): string {
-  const changesSummary = changes.map(change => {
-    const lineInfo = `Lines ${change.startLine}-${change.endLine}`;
-    return `[${lineInfo}]\n${change.newContent}`;
-  }).join('\n\n');
-
-  if (changesSummary.length <= maxLength) {
-    return changesSummary;
-  }
-
-  return smartTruncate(changesSummary, maxLength);
-}
-
 function buildDocumentContext(
   content: string,
-  cachedContent: string | null,
-  recentChanges: FileChange[],
   maxLength: number
 ): string {
-  if (!cachedContent) {
-    return smartTruncate(content, maxLength);
-  }
-
-  if (recentChanges.length === 0) {
-    return smartTruncate(content, maxLength);
-  }
-
-  return buildChangesContext(content, recentChanges, maxLength);
+  // 始终返回完整内容（截断到 maxLength）
+  return smartTruncate(content, maxLength);
 }
 
 function buildSystemPrompt(
@@ -69,7 +43,10 @@ function buildSystemPrompt(
   meta?: DocumentMeta,
   otherBoundFiles?: Array<{ meta: DocumentMeta; recentChanges: FileChange[] }>,
   allBoundFiles?: Array<{ meta: DocumentMeta; lastUsed: string }>,
-  selectionPrompt?: string
+  selectionPrompt?: string,
+  enableWebSearch: boolean = false,
+  workspaceRoot?: string,
+  directoryTree?: string
 ) {
   const base = `You are a creative writing assistant helping a novelist.
 You help with structure, scene writing, line editing, continuity, and narrative clarity.
@@ -80,6 +57,10 @@ Current file: ${meta.fileName}
 Path: ${meta.filePath}
 Stats: ${meta.charCount} characters, ${meta.lineCount} lines, ${meta.wordCount} words
 ` : "";
+
+  const workspaceInfo = workspaceRoot 
+    ? `\n\nWorkspace root directory: ${workspaceRoot}`
+    : "";
 
   const otherBoundFilesInfo = otherBoundFiles?.length
     ? `\nOther bound files with changes:\n${otherBoundFiles.map(f => {
@@ -97,11 +78,30 @@ Stats: ${meta.charCount} characters, ${meta.lineCount} lines, ${meta.wordCount} 
       ).join('\n')}`
     : "";
 
-  const taskSpecificInfo = taskType === "chat"
-    ? "\n\nWhen relevant, use the browsing or search context that has already been retrieved from MCP tools."
+  const toolInfo = taskType === "chat"
+    ? `\n\nYou have access to the following tools to explore the workspace:
+- list_directory: List files and folders in a directory (supports recursive listing). Use path="" for root directory.
+- read_file: Read file content (max 50KB). Use relative path from workspace root (e.g., "第四章.txt" or "notes/characters.txt").${enableWebSearch ? '\n- web_search: Search the internet for information. Use when you need external knowledge.' : ''}
+
+Use these tools when you need to read files that are not currently bound to this conversation. You can call them by responding with a JSON block like:
+\`\`\`tool_call
+{"name": "list_directory", "arguments": {"path": "", "recursive": true}}
+\`\`\`
+or
+\`\`\`tool_call
+{"name": "read_file", "arguments": {"path": "第四章.txt"}}
+\`\`\`${enableWebSearch ? '\nor\n```tool_call\n{"name": "web_search", "arguments": {"query": "search terms"}}\n```' : ''}`
     : `\n\n${selectionPrompt || ""}\nReturn only the rewritten text.`;
 
-  return `${base}${metaInfo}${otherBoundFilesInfo}${allBoundFilesInfo}${taskSpecificInfo}
+  const directoryInfo = directoryTree
+    ? `\n\nWorkspace directory structure:\n\`\`\`\n${directoryTree}\n\`\`\``
+    : "";
+
+  const taskSpecificInfo = taskType === "chat"
+    ? "\n\nWhen relevant, use the browsing or search context that has already been retrieved from MCP tools."
+    : "";
+
+  return `${base}${metaInfo}${workspaceInfo}${otherBoundFilesInfo}${allBoundFilesInfo}${toolInfo}${directoryInfo}${taskSpecificInfo}
 Current document content:
 ${context}`;
 }
@@ -274,14 +274,12 @@ async function callChatCompletionsApi(options: AiRequestOptions, systemPrompt: s
 }
 
 async function callOpenAiCompatible(options: AiRequestOptions, mcpContext = "") {
-  const { taskType, userMessage, selectionPrompt, attachments = [], modelProfile, multiFileContext, contextMaxLength = 5000 } = options;
+  const { taskType, userMessage, selectionPrompt, attachments = [], modelProfile, multiFileContext, contextMaxLength = 5000, skills, workspaceRoot, directoryTree } = options;
 
   let documentContext = options.documentContext;
   if (multiFileContext) {
     documentContext = buildDocumentContext(
       multiFileContext.activeFile.content,
-      multiFileContext.activeFile.cachedContent,
-      multiFileContext.activeFile.recentChanges,
       contextMaxLength
     );
   }
@@ -292,7 +290,10 @@ async function callOpenAiCompatible(options: AiRequestOptions, mcpContext = "") 
     multiFileContext?.activeFile.meta,
     multiFileContext?.otherBoundFiles,
     multiFileContext?.allBoundFiles,
-    selectionPrompt
+    selectionPrompt,
+    skills?.enableWebSearch ?? false,
+    workspaceRoot,
+    directoryTree
   );
   const finalUserMessage = getFinalUserMessage(userMessage, mcpContext, attachments);
 
@@ -304,36 +305,6 @@ async function callOpenAiCompatible(options: AiRequestOptions, mcpContext = "") 
 }
 
 export async function callAI(options: AiRequestOptions): Promise<string> {
-  const { modelProfile, taskType, userMessage } = options;
-
-  let searchContext = "";
-
-  // 优先使用 MCP 搜索（如果配置了）
-  if (modelProfile.mcpServerUrl.trim()) {
-    try {
-      const result = await runMcpSearch(modelProfile, userMessage);
-      if (result.text.trim()) {
-        searchContext = `Tool: ${result.toolName}\n${result.text.trim()}`;
-      }
-    } catch (error) {
-      if (taskType === "chat") {
-        throw error;
-      }
-    }
-  } else {
-    // 使用 Tavily 搜索
-    try {
-      const result = await searchWithTavily(userMessage);
-      if (result.trim()) {
-        searchContext = `Web Search Results:\n${result}`;
-      }
-    } catch (error) {
-      // 搜索失败时提示用户
-      if (taskType === "chat") {
-        throw error;
-      }
-    }
-  }
-
-  return callOpenAiCompatible(options, searchContext);
+  // 移除自动搜索逻辑，直接调用 AI
+  return callOpenAiCompatible(options);
 }

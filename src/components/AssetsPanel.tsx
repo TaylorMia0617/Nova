@@ -3,19 +3,23 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  Download,
   File,
   FileCog,
   Folder,
   FolderPlus,
   Pencil,
   Plus,
+  Save,
   Search,
   Trash2,
+  Upload,
   X,
 } from "lucide-react";
 import { useFileStore } from "../stores/fileStore";
 import { useTranslation } from "../hooks/useTranslation";
 import type { WorkspaceNode } from "../services/fileSystemService";
+import type { ReferenceListData } from "../services/fileSystemService";
 import { buildWorkspaceIndexes, collectFolderPaths, filterWorkspaceNodes } from "../utils/workspaceTree";
 import "./AssetsPanel.css";
 
@@ -24,22 +28,33 @@ type CreateDialogState =
   | { type: "folder"; targetNodePath: string | null }
   | null;
 
+const createDraftList = (): ReferenceListData => ({
+  id: `list-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+  name: "New List",
+  items: [{ key: "", value: "" }],
+});
+
 const AssetsPanel: React.FC = () => {
   const { t } = useTranslation();
   const {
     files,
     rootPath,
     activeFile,
+    referenceLists,
+    selectedListId,
     ensureFolderLoaded,
     loadFullWorkspaceTree,
     openFile,
     createFile,
     createFolder,
-    createConfigFile,
     deleteFile,
     renameFile,
     duplicateFile,
     moveFile,
+    loadReferenceLists,
+    saveReferenceList,
+    deleteReferenceList,
+    setSelectedListId,
   } = useFileStore();
   const [selectedNodePath, setSelectedNodePath] = useState<string | null>(null);
   const [contextPos, setContextPos] = useState<{ x: number; y: number } | null>(null);
@@ -52,9 +67,11 @@ const AssetsPanel: React.FC = () => {
   const [createValue, setCreateValue] = useState("");
   const [deleteConfirmPath, setDeleteConfirmPath] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
-  const [configFileDialogOpen, setConfigFileDialogOpen] = useState(false);
-  const [configFileName, setConfigFileName] = useState("");
-  const [configFileError, setConfigFileError] = useState("");
+  const [referenceDialogOpen, setReferenceDialogOpen] = useState(false);
+  const [referenceListDraft, setReferenceListDraft] = useState<ReferenceListData | null>(null);
+  const [referenceSearchQuery, setReferenceSearchQuery] = useState("");
+  const [referenceError, setReferenceError] = useState("");
+  const [referenceSaveStatus, setReferenceSaveStatus] = useState("");
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const createInputRef = useRef<HTMLInputElement | null>(null);
   const treeRef = useRef<HTMLDivElement | null>(null);
@@ -87,6 +104,17 @@ const AssetsPanel: React.FC = () => {
     if (!normalizedSearchQuery) return expandedFolders;
     return collectFolderPaths(visibleFiles);
   }, [expandedFolders, normalizedSearchQuery, visibleFiles]);
+
+  const filteredReferenceLists = useMemo(() => {
+    if (!referenceSearchQuery.trim()) return referenceLists;
+    const query = referenceSearchQuery.trim().toLowerCase();
+    return referenceLists.filter(list => list.name.toLowerCase().includes(query));
+  }, [referenceLists, referenceSearchQuery]);
+
+  const selectedList = useMemo(
+    () => referenceLists.find(l => l.id === selectedListId) ?? null,
+    [referenceLists, selectedListId]
+  );
 
   const toggleFolder = async (folderPath: string) => {
     const node = workspaceIndexes.nodeIndex[folderPath] ?? null;
@@ -141,32 +169,170 @@ const AssetsPanel: React.FC = () => {
     setCreateValue("");
   };
 
-  const openConfigFileDialog = () => {
-    setConfigFileDialogOpen(true);
-    setConfigFileName("");
-    setConfigFileError("");
+  const openReferenceDialog = () => {
+    setReferenceDialogOpen(true);
+    setReferenceError("");
+    setReferenceSaveStatus("");
+    setReferenceSearchQuery("");
+    if (selectedList) {
+      setReferenceListDraft({ ...selectedList, items: [...selectedList.items] });
+    } else {
+      const newList = createDraftList();
+      setReferenceListDraft(newList);
+      setSelectedListId(newList.id);
+    }
     setContextPos(null);
   };
 
-  const closeConfigFileDialog = () => {
-    setConfigFileDialogOpen(false);
-    setConfigFileName("");
-    setConfigFileError("");
+  const closeReferenceDialog = () => {
+    setReferenceDialogOpen(false);
+    setReferenceListDraft(null);
+    setReferenceError("");
+    setReferenceSaveStatus("");
   };
 
   const handleCreateConfigFile = async () => {
-    const name = configFileName.trim();
+    if (!referenceListDraft) return;
+
+    const name = referenceListDraft.name.trim();
     if (!name) {
-      setConfigFileError(t("assets.configFileErrorEmpty"));
+      setReferenceError(t("reference.nameRequired"));
       return;
     }
 
+    // 过滤空行
+    const validItems = referenceListDraft.items.filter(item => item.key.trim());
+    const listToSave = { ...referenceListDraft, items: validItems };
+
     try {
-      await createConfigFile(name);
-      closeConfigFileDialog();
+      await saveReferenceList(listToSave);
+      setReferenceSaveStatus(t("reference.saveSuccess"));
+      setReferenceError("");
     } catch (error) {
-      setConfigFileError(error instanceof Error ? error.message : t("assets.configFileErrorCreateFailed"));
+      setReferenceError(error instanceof Error ? error.message : t("reference.saveFailed"));
     }
+  };
+
+  const handleDeleteList = async () => {
+    if (!selectedListId) return;
+    if (window.confirm(t("reference.deleteConfirm"))) {
+      await deleteReferenceList(selectedListId);
+      setReferenceListDraft(null);
+    }
+  };
+
+  const handleAddRow = () => {
+    if (!referenceListDraft) return;
+    setReferenceListDraft({
+      ...referenceListDraft,
+      items: [...referenceListDraft.items, { key: "", value: "" }],
+    });
+  };
+
+  const handleRemoveRow = (index: number) => {
+    if (!referenceListDraft) return;
+    const newItems = referenceListDraft.items.filter((_, i) => i !== index);
+    setReferenceListDraft({
+      ...referenceListDraft,
+      items: newItems.length > 0 ? newItems : [{ key: "", value: "" }],
+    });
+  };
+
+  const handleUpdateRow = (index: number, field: "key" | "value", value: string) => {
+    if (!referenceListDraft) return;
+    const newItems = [...referenceListDraft.items];
+    newItems[index] = { ...newItems[index], [field]: value };
+    setReferenceListDraft({
+      ...referenceListDraft,
+      items: newItems,
+    });
+  };
+
+  const handleImportTxt = async () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".txt";
+    input.multiple = true;
+    
+    input.onchange = async (e) => {
+      const files = (e.target as HTMLInputElement).files;
+      if (!files) return;
+
+      for (const file of files) {
+        const content = await file.text();
+        const items = content
+          .split(/\r?\n/)
+          .map(line => line.trim())
+          .filter(Boolean)
+          .map(line => {
+            const match = line.match(/^\{\{(.+?)\}\}(?:\s+(.+))?$/);
+            if (!match) return null;
+            return {
+              key: match[1].trim(),
+              value: (match[2] ?? "").trim(),
+            };
+          })
+          .filter((item): item is { key: string; value: string } => item !== null);
+
+        // 去重
+        const uniqueItems = items.filter((item, index, self) =>
+          index === self.findIndex(t => t.key === item.key)
+        );
+
+        const newList: ReferenceListData = {
+          id: `list-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+          name: file.name.replace(/\.txt$/, ""),
+          items: uniqueItems,
+        };
+
+        try {
+          await saveReferenceList(newList);
+        } catch (error) {
+          console.error("Failed to import list:", error);
+        }
+      }
+
+      await loadReferenceLists();
+      setReferenceSaveStatus(t("reference.importSuccess"));
+    };
+
+    input.click();
+  };
+
+  const handleExportTxt = () => {
+    if (!referenceListDraft) return;
+
+    const content = referenceListDraft.items
+      .filter(item => item.key.trim())
+      .map(item => `{{${item.key}}}${item.value ? ` ${item.value}` : ""}`)
+      .join("\n");
+
+    const blob = new Blob([content], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${referenceListDraft.name}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setReferenceSaveStatus(t("reference.exportSuccess"));
+  };
+
+  const handleSelectList = (listId: string) => {
+    setSelectedListId(listId);
+    const list = referenceLists.find(l => l.id === listId);
+    if (list) {
+      setReferenceListDraft({ ...list, items: [...list.items] });
+    }
+    setReferenceError("");
+    setReferenceSaveStatus("");
+  };
+
+  const handleNewList = () => {
+    const newList = createDraftList();
+    setReferenceListDraft(newList);
+    setSelectedListId(newList.id);
+    setReferenceError("");
+    setReferenceSaveStatus("");
   };
 
   const submitCreateDialog = async () => {
@@ -394,7 +560,7 @@ const AssetsPanel: React.FC = () => {
           <button onClick={() => openCreateDialog("folder")} title="New Folder" disabled={!rootPath}>
             <FolderPlus size={16} />
           </button>
-          <button onClick={openConfigFileDialog} title="设置配置文件" disabled={!rootPath}>
+          <button onClick={openReferenceDialog} title={t("reference.title")} disabled={!rootPath}>
             <FileCog size={16} />
           </button>
         </div>
@@ -520,35 +686,142 @@ const AssetsPanel: React.FC = () => {
           </div>
         </div>
       )}
-      {configFileDialogOpen && (
-        <div className="dialog-backdrop" onClick={closeConfigFileDialog}>
-          <div
-            className="dialog-card"
-            onClick={(event) => event.stopPropagation()}
-            onKeyDown={(event) => {
-              if (event.key === "Escape") closeConfigFileDialog();
-              if (event.key === "Enter") void handleCreateConfigFile();
-            }}
-          >
-            <h3>{t("assets.createConfigFile")}</h3>
-            <p>{t("assets.createConfigFileHint")}</p>
-            <input
-              className="dialog-input"
-              value={configFileName}
-              onChange={(event) => {
-                setConfigFileName(event.target.value);
-                setConfigFileError("");
-              }}
-              placeholder={t("assets.configFilePlaceholder")}
-            />
-            {configFileError && <p className="config-file-error">{configFileError}</p>}
-            <div className="dialog-actions">
-              <button type="button" className="secondary" onClick={closeConfigFileDialog}>
-                {t("assets.cancel")}
+      {referenceDialogOpen && (
+        <div className="dialog-backdrop settings-backdrop" onClick={closeReferenceDialog}>
+          <div className="settings-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="settings-header">
+              <div className="settings-header-left">
+                <h2>{t("reference.title")}</h2>
+              </div>
+              <button className="icon-button" onClick={closeReferenceDialog} aria-label="Close">
+                <X size={18} />
               </button>
-              <button type="button" onClick={() => void handleCreateConfigFile()} disabled={!configFileName.trim()}>
-                {t("assets.create")}
-              </button>
+            </div>
+            <div className="settings-layout">
+              <aside className="settings-sidebar">
+                <div className="settings-sidebar-header">
+                  <h3>{t("reference.lists")}</h3>
+                  <div className="settings-sidebar-actions">
+                    <button onClick={handleNewList} className="workspace-button compact-button" type="button">
+                      <Plus size={14} />
+                    </button>
+                    <button onClick={() => void handleImportTxt()} className="workspace-button compact-button" type="button" title={t("reference.import")}>
+                      <Upload size={14} />
+                    </button>
+                  </div>
+                </div>
+                <div className="explorer-search" style={{ padding: 0 }}>
+                  <div className="search-input-wrap">
+                    <Search size={14} className="search-icon" />
+                    <input
+                      className="search-input"
+                      value={referenceSearchQuery}
+                      onChange={(event) => setReferenceSearchQuery(event.target.value)}
+                      placeholder={t("reference.searchLists")}
+                    />
+                    {referenceSearchQuery && (
+                      <button
+                        type="button"
+                        className="clear-search-button"
+                        onClick={() => setReferenceSearchQuery("")}
+                      >
+                        <X size={14} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="settings-profile-list">
+                  {filteredReferenceLists.map((list) => (
+                    <button
+                      key={list.id}
+                      type="button"
+                      className={`settings-profile-item ${selectedListId === list.id ? "active" : ""}`}
+                      onClick={() => handleSelectList(list.id)}
+                    >
+                      <strong>{list.name}</strong>
+                      <span>{list.items.length} items</span>
+                    </button>
+                  ))}
+                  {filteredReferenceLists.length === 0 && (
+                    <div className="settings-empty">{t("reference.noLists")}</div>
+                  )}
+                </div>
+              </aside>
+              <div className="settings-content">
+                {referenceListDraft ? (
+                  <>
+                    <div className="settings-section">
+                      <label>
+                        <span>{t("reference.listName")}</span>
+                        <input
+                          type="text"
+                          value={referenceListDraft.name}
+                          onChange={(event) => setReferenceListDraft({ ...referenceListDraft, name: event.target.value })}
+                          autoComplete="off"
+                        />
+                      </label>
+                    </div>
+                    <div className="settings-section">
+                      <div className="reference-table-header">
+                        <span className="reference-table-key">{t("reference.key")}</span>
+                        <span className="reference-table-value">{t("reference.value")}</span>
+                        <span className="reference-table-action"></span>
+                      </div>
+                      <div className="reference-table-body">
+                        {referenceListDraft.items.map((item, index) => (
+                          <div key={index} className="reference-table-row">
+                            <input
+                              className="reference-table-key"
+                              value={item.key}
+                              onChange={(event) => handleUpdateRow(index, "key", event.target.value)}
+                              placeholder={t("reference.keyPlaceholder")}
+                            />
+                            <input
+                              className="reference-table-value"
+                              value={item.value}
+                              onChange={(event) => handleUpdateRow(index, "value", event.target.value)}
+                              placeholder={t("reference.valuePlaceholder")}
+                            />
+                            <button
+                              className="reference-table-delete"
+                              onClick={() => handleRemoveRow(index)}
+                              type="button"
+                            >
+                              <X size={14} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                      <button className="workspace-button compact-button" onClick={handleAddRow} type="button">
+                        <Plus size={14} />
+                        <span>{t("reference.addRow")}</span>
+                      </button>
+                    </div>
+                    <div className="settings-actions">
+                      <button className="workspace-button" onClick={() => void handleCreateConfigFile()} type="button">
+                        <Save size={14} />
+                        <span>{t("reference.save")}</span>
+                      </button>
+                      <button className="workspace-button" onClick={handleExportTxt} type="button">
+                        <Download size={14} />
+                        <span>{t("reference.export")}</span>
+                      </button>
+                      <button
+                        className="workspace-button danger-button"
+                        onClick={() => void handleDeleteList()}
+                        type="button"
+                      >
+                        <Trash2 size={14} />
+                        <span>{t("reference.deleteList")}</span>
+                      </button>
+                    </div>
+                    {referenceSaveStatus && <div className="settings-status">{referenceSaveStatus}</div>}
+                    {referenceError && <div className="settings-status error">{referenceError}</div>}
+                  </>
+                ) : (
+                  <div className="settings-empty">{t("reference.createList")}</div>
+                )}
+              </div>
             </div>
           </div>
         </div>

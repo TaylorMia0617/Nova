@@ -16,6 +16,7 @@ interface SettingsState {
   chatMaxTokens: number;
   contextMaxLength: number;
   tavilyApiKey: string;
+  webSearchLimit: number;
   setLanguage: (locale: Locale) => void;
   setModelProfiles: (profiles: ModelProfile[]) => void;
   updateModelProfile: (id: string, patch: Partial<ModelProfile>) => void;
@@ -26,6 +27,7 @@ interface SettingsState {
   setChatMaxTokens: (value: number) => void;
   setContextMaxLength: (value: number) => void;
   setTavilyApiKey: (value: string) => void;
+  setWebSearchLimit: (value: number) => void;
   getModelProfileById: (id: string | null | undefined) => ModelProfile | null;
 }
 
@@ -171,6 +173,7 @@ export const useSettingsStore = create<SettingsState>()(
       chatMaxTokens: 8192,
       contextMaxLength: 5000,
       tavilyApiKey: "",
+      webSearchLimit: 15,
       setLanguage: (locale) => {
         setLocale(locale);
         set({ language: locale });
@@ -227,6 +230,7 @@ export const useSettingsStore = create<SettingsState>()(
       setChatMaxTokens: (value) => set({ chatMaxTokens: value }),
       setContextMaxLength: (value) => set({ contextMaxLength: value }),
       setTavilyApiKey: (value) => set({ tavilyApiKey: value }),
+      setWebSearchLimit: (value) => set({ webSearchLimit: value }),
       getModelProfileById: (id) => {
         if (!id) return null;
         return get().modelProfiles.find((profile) => profile.id === id) ?? null;
@@ -244,6 +248,7 @@ export const useSettingsStore = create<SettingsState>()(
         chatMaxTokens: state.chatMaxTokens,
         contextMaxLength: state.contextMaxLength,
         tavilyApiKey: state.tavilyApiKey,
+        webSearchLimit: state.webSearchLimit,
       }),
       onRehydrateStorage: () => {
         return (_state, error) => {
