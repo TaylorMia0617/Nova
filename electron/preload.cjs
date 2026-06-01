@@ -2,6 +2,12 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("novelHost", {
   isElectron: true,
+  // Window controls
+  minimize: () => ipcRenderer.invoke("window:minimize"),
+  maximize: () => ipcRenderer.invoke("window:maximize"),
+  close: () => ipcRenderer.invoke("window:close"),
+  isMaximized: () => ipcRenderer.invoke("window:isMaximized"),
+  // File system
   pickWorkspace: () => ipcRenderer.invoke("fs:pickWorkspace"),
   loadWorkspace: (rootPath, options) => ipcRenderer.invoke("fs:loadWorkspace", rootPath, options),
   readDirectory: (directoryPath, options) => ipcRenderer.invoke("fs:readDirectory", directoryPath, options),

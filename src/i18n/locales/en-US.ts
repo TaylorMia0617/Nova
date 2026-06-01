@@ -14,6 +14,8 @@ const enUS: TranslationDict = {
     selectionModel: "Selection model",
     notConfigured: "Not configured",
     language: "Language",
+    copilot: "Copilot",
+    agent: "Agent",
   },
   copilot: {
     title: "AI Copilot",
@@ -94,6 +96,15 @@ const enUS: TranslationDict = {
   assets: {
     openWorkspace: "Open Workspace",
     openWorkspaceHint: "Select a folder to start writing",
+    createConfigFile: "Create Settings File",
+    createConfigFileHint: "Enter a filename to create in the settings folder.",
+    configFilePlaceholder: "e.g.: Character List",
+    configFileErrorEmpty: "Please enter a filename",
+    configFileErrorCreateFailed: "Creation failed",
+    deleteItem: "Delete Item",
+    deleteItemConfirm: "This will permanently delete the selected file or folder.",
+    cancel: "Cancel",
+    create: "Create",
   },
 };
 

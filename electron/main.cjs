@@ -667,7 +667,9 @@ async function createWindow() {
     height: 860,
     minWidth: 960,
     minHeight: 640,
-    backgroundColor: "#1e1e1e",
+    backgroundColor: "#1a1f2e",
+    frame: false,
+    titleBarStyle: "hidden",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -675,6 +677,8 @@ async function createWindow() {
       sandbox: false,
     },
   });
+
+  mainWindow = win;
 
   if (isDev) {
     await win.loadURL("http://127.0.0.1:1420");
@@ -731,6 +735,29 @@ app.on("will-quit", () => {
 });
 
 // ─── IPC Handlers ─────────────────────────────────────────────────────────────
+
+// Window controls
+let mainWindow = null;
+
+ipcMain.handle("window:minimize", () => {
+  mainWindow?.minimize();
+});
+
+ipcMain.handle("window:maximize", () => {
+  if (mainWindow?.isMaximized()) {
+    mainWindow.unmaximize();
+  } else {
+    mainWindow?.maximize();
+  }
+});
+
+ipcMain.handle("window:close", () => {
+  mainWindow?.close();
+});
+
+ipcMain.handle("window:isMaximized", () => {
+  return mainWindow?.isMaximized() ?? false;
+});
 
 ipcMain.handle("fs:pickWorkspace", async () => {
   const result = await dialog.showOpenDialog({

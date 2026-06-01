@@ -4,6 +4,7 @@ import {
   ChevronRight,
   Copy,
   File,
+  FileCog,
   Folder,
   FolderPlus,
   Pencil,
@@ -13,6 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { useFileStore } from "../stores/fileStore";
+import { useTranslation } from "../hooks/useTranslation";
 import type { WorkspaceNode } from "../services/fileSystemService";
 import { buildWorkspaceIndexes, collectFolderPaths, filterWorkspaceNodes } from "../utils/workspaceTree";
 import "./AssetsPanel.css";
@@ -23,6 +25,7 @@ type CreateDialogState =
   | null;
 
 const AssetsPanel: React.FC = () => {
+  const { t } = useTranslation();
   const {
     files,
     rootPath,
@@ -32,6 +35,7 @@ const AssetsPanel: React.FC = () => {
     openFile,
     createFile,
     createFolder,
+    createConfigFile,
     deleteFile,
     renameFile,
     duplicateFile,
@@ -48,6 +52,9 @@ const AssetsPanel: React.FC = () => {
   const [createValue, setCreateValue] = useState("");
   const [deleteConfirmPath, setDeleteConfirmPath] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [configFileDialogOpen, setConfigFileDialogOpen] = useState(false);
+  const [configFileName, setConfigFileName] = useState("");
+  const [configFileError, setConfigFileError] = useState("");
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const createInputRef = useRef<HTMLInputElement | null>(null);
   const treeRef = useRef<HTMLDivElement | null>(null);
@@ -132,6 +139,34 @@ const AssetsPanel: React.FC = () => {
   const closeCreateDialog = () => {
     setCreateDialog(null);
     setCreateValue("");
+  };
+
+  const openConfigFileDialog = () => {
+    setConfigFileDialogOpen(true);
+    setConfigFileName("");
+    setConfigFileError("");
+    setContextPos(null);
+  };
+
+  const closeConfigFileDialog = () => {
+    setConfigFileDialogOpen(false);
+    setConfigFileName("");
+    setConfigFileError("");
+  };
+
+  const handleCreateConfigFile = async () => {
+    const name = configFileName.trim();
+    if (!name) {
+      setConfigFileError(t("assets.configFileErrorEmpty"));
+      return;
+    }
+
+    try {
+      await createConfigFile(name);
+      closeConfigFileDialog();
+    } catch (error) {
+      setConfigFileError(error instanceof Error ? error.message : t("assets.configFileErrorCreateFailed"));
+    }
   };
 
   const submitCreateDialog = async () => {
@@ -359,6 +394,9 @@ const AssetsPanel: React.FC = () => {
           <button onClick={() => openCreateDialog("folder")} title="New Folder" disabled={!rootPath}>
             <FolderPlus size={16} />
           </button>
+          <button onClick={openConfigFileDialog} title="设置配置文件" disabled={!rootPath}>
+            <FileCog size={16} />
+          </button>
         </div>
       </div>
       <div className="explorer-search">
@@ -482,17 +520,50 @@ const AssetsPanel: React.FC = () => {
           </div>
         </div>
       )}
+      {configFileDialogOpen && (
+        <div className="dialog-backdrop" onClick={closeConfigFileDialog}>
+          <div
+            className="dialog-card"
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") closeConfigFileDialog();
+              if (event.key === "Enter") void handleCreateConfigFile();
+            }}
+          >
+            <h3>{t("assets.createConfigFile")}</h3>
+            <p>{t("assets.createConfigFileHint")}</p>
+            <input
+              className="dialog-input"
+              value={configFileName}
+              onChange={(event) => {
+                setConfigFileName(event.target.value);
+                setConfigFileError("");
+              }}
+              placeholder={t("assets.configFilePlaceholder")}
+            />
+            {configFileError && <p className="config-file-error">{configFileError}</p>}
+            <div className="dialog-actions">
+              <button type="button" className="secondary" onClick={closeConfigFileDialog}>
+                {t("assets.cancel")}
+              </button>
+              <button type="button" onClick={() => void handleCreateConfigFile()} disabled={!configFileName.trim()}>
+                {t("assets.create")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {deleteConfirmPath && (
         <div className="dialog-backdrop" onClick={() => setDeleteConfirmPath(null)}>
           <div className="dialog-card" onClick={(event) => event.stopPropagation()}>
-            <h3>Delete Item</h3>
-            <p>This will permanently delete the selected file or folder.</p>
+            <h3>{t("assets.deleteItem")}</h3>
+            <p>{t("assets.deleteItemConfirm")}</p>
             <div className="dialog-actions">
               <button type="button" className="secondary" onClick={() => setDeleteConfirmPath(null)}>
-                Cancel
+                {t("assets.cancel")}
               </button>
               <button type="button" className="danger-action" onClick={() => void confirmDelete()}>
-                Delete
+                {t("assets.deleteItem")}
               </button>
             </div>
           </div>

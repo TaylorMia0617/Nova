@@ -16,49 +16,7 @@ import {
 } from "../services/fileSystemService";
 import type { FileChange } from "../types/ai";
 
-const SETTINGS_FOLDER_NAME = "settings";
-const CHARACTER_FILE_NAME = "\u4eba\u7269\u5217\u8868.txt";
-const PLACE_FILE_NAME = "\u5730\u7406\u540d\u79f0.txt";
-const ITEM_FILE_NAME = "\u9053\u5177\u540d\u79f0.txt";
-const SKILL_FILE_NAME = "\u62db\u5f0f\u5217\u8868.txt";
-const WORLD_FILE_NAME = "\u4e16\u754c\u89c2.txt";
-
-const PROJECT_REFERENCE_DEFINITIONS = [
-  {
-    key: "character",
-    fileName: CHARACTER_FILE_NAME,
-    template: `{{\u6797\u79cb}} \u51b7\u9759\u514b\u5236\u7684\u4fa6\u63a2\uff0c\u89c2\u5bdf\u529b\u6781\u5f3a
-{{\u987e\u5b81}} \u5916\u8868\u6e29\u548c\uff0c\u771f\u5b9e\u8eab\u4efd\u6210\u8c1c
-`,
-  },
-  {
-    key: "place",
-    fileName: PLACE_FILE_NAME,
-    template: `{{\u9ed1\u6cb3\u9547}} \u5e38\u5e74\u96fe\u6c14\u7b3c\u7f69\u7684\u5c0f\u9547\uff0c\u662f\u6545\u4e8b\u7684\u4e3b\u8981\u821e\u53f0
-{{\u957f\u68a6\u68ee\u6797}} \u9760\u8fd1\u9547\u5916\u7684\u539f\u59cb\u68ee\u6797\uff0c\u4f20\u95fb\u9690\u85cf\u7740\u8bb8\u591a\u79d8\u5bc6
-`,
-  },
-  {
-    key: "item",
-    fileName: ITEM_FILE_NAME,
-    template: `{{\u94dc\u949f}} \u53d1\u751f\u5f02\u5e38\u65f6\u4f1a\u81ea\u884c\u54cd\u8d77\u7684\u53e4\u8001\u9053\u5177
-{{\u94f6\u8272\u94a5\u5319}} \u53ef\u4ee5\u6253\u5f00\u65e7\u5b85\u5730\u4e0b\u5ba4\u7684\u552f\u4e00\u94a5\u5319
-`,
-  },
-  {
-    key: "skill",
-    fileName: SKILL_FILE_NAME,
-    template: `{{\u65ad\u6708}} \u4ee5\u6781\u5feb\u5200\u52bf\u5f62\u6210\u7684\u5f27\u5f62\u659c\u65a9
-{{\u8e0f\u98ce\u6b65}} \u77ed\u8ddd\u79bb\u9ad8\u901f\u632a\u79fb\u7684\u8eab\u6cd5
-`,
-  },
-  {
-    key: "world",
-    fileName: WORLD_FILE_NAME,
-    template: `\u5199\u4e0b\u4e16\u754c\u89c2\u80cc\u666f\u3001\u5386\u53f2\u6cbf\u9769\u3001\u9635\u8425\u5173\u7cfb\u4e0e\u89c4\u5219\u8bbe\u5b9a\u3002
-`,
-  },
-] as const;
+const SETTINGS_FOLDER_NAME = "Settings";
 
 export interface OpenFileTab {
   path: string;
@@ -70,11 +28,11 @@ export interface OpenFileTab {
 
 export interface NamedEntry {
   name: string;
-  description: string;
+  description?: string;
 }
 
 export interface ReferenceEntry extends NamedEntry {
-  category: "character" | "place" | "item" | "skill";
+  sourceFile?: string;
 }
 
 interface FileState {
@@ -83,16 +41,8 @@ interface FileState {
   files: WorkspaceNode[];
   activeFile: OpenFileTab | null;
   openTabs: OpenFileTab[];
-  characterEntries: NamedEntry[];
-  placeEntries: NamedEntry[];
-  itemEntries: NamedEntry[];
-  skillEntries: NamedEntry[];
   referenceEntries: ReferenceEntry[];
-  characterFilePath: string | null;
-  placeFilePath: string | null;
-  itemFilePath: string | null;
-  skillFilePath: string | null;
-  worldFilePath: string | null;
+  referenceFilePaths: string[];
   isLoadingWorkspace: boolean;
   errorMessage: string | null;
   fileChanges: Map<string, FileChange[]>;
@@ -113,6 +63,7 @@ interface FileState {
   duplicateFile: (path: string) => Promise<void>;
   deleteFile: (path: string) => Promise<void>;
   moveFile: (sourcePath: string, destinationFolderPath: string) => Promise<void>;
+  createConfigFile: (fileName: string) => Promise<void>;
   trackFileChange: (path: string, oldContent: string, newContent: string) => void;
   getFileChanges: (path: string) => FileChange[];
   clearFileChanges: (path: string) => void;
@@ -232,22 +183,9 @@ function filterTabsOutsidePath(tabs: OpenFileTab[], deletedPath: string): OpenFi
   return tabs.filter((tab) => !isSameOrDescendantPath(tab.path, deletedPath));
 }
 
-function findReferenceFilePath(nodes: WorkspaceNode[], fileName: string): string | null {
-  for (const node of nodes) {
-    if (node.type === "file" && node.name === fileName) {
-      return node.path;
-    }
-    if (node.children) {
-      const found = findReferenceFilePath(node.children, fileName);
-      if (found) return found;
-    }
-  }
-  return null;
-}
-
 function findFolderPath(nodes: WorkspaceNode[], folderName: string): string | null {
   for (const node of nodes) {
-    if (node.type === "folder" && node.name === folderName) {
+    if (node.type === "folder" && node.name.toLowerCase() === folderName.toLowerCase()) {
       return node.path;
     }
     if (node.children) {
@@ -263,128 +201,101 @@ function parseNamedEntries(content: string): NamedEntry[] {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
-    .map((line) => {
-      const match = line.match(/^\{\{(.+?)\}\}\s+(.+)$/);
+    .map((line): NamedEntry | null => {
+      const match = line.match(/^\{\{(.+?)\}\}(?:\s+(.+))?$/);
       if (!match) return null;
       return {
         name: match[1].trim(),
-        description: match[2].trim(),
+        description: (match[2] ?? "").trim(),
       };
     })
     .filter((entry): entry is NamedEntry => entry !== null);
 }
 
-function buildReferenceEntries(
-  characters: NamedEntry[],
-  places: NamedEntry[],
-  items: NamedEntry[],
-  skills: NamedEntry[]
+function reloadSingleReferenceFile(
+  currentEntries: ReferenceEntry[],
+  currentFilePaths: string[],
+  filePath: string,
+  content: string
 ): ReferenceEntry[] {
-  return [
-    ...characters.map((entry) => ({ ...entry, category: "character" as const })),
-    ...places.map((entry) => ({ ...entry, category: "place" as const })),
-    ...items.map((entry) => ({ ...entry, category: "item" as const })),
-    ...skills.map((entry) => ({ ...entry, category: "skill" as const })),
-  ];
+  if (!currentFilePaths.includes(filePath)) {
+    return currentEntries;
+  }
+
+  const fileName = filePath.split(/[/\\]/).pop() ?? "";
+  const newEntries = parseNamedEntries(content).map(entry => ({
+    ...entry,
+    sourceFile: fileName,
+  }));
+
+  const otherEntries = currentEntries.filter(e => e.sourceFile !== fileName);
+  return [...otherEntries, ...newEntries];
 }
 
-async function ensureProjectReferenceFiles(
-  rootPath: string,
-  files: WorkspaceNode[]
-): Promise<{
-  paths: Record<(typeof PROJECT_REFERENCE_DEFINITIONS)[number]["key"], string>;
-  createdMissingFiles: boolean;
-}> {
-  const existingPaths = Object.fromEntries(
-    PROJECT_REFERENCE_DEFINITIONS.map((definition) => [
-      definition.key,
-      findReferenceFilePath(files, definition.fileName),
-    ])
-  ) as Record<(typeof PROJECT_REFERENCE_DEFINITIONS)[number]["key"], string | null>;
+async function loadAllReferenceFiles(
+  nodes: WorkspaceNode[]
+): Promise<{ entries: ReferenceEntry[]; filePaths: string[] }> {
+  const settingsPath = findFolderPath(nodes, SETTINGS_FOLDER_NAME);
+  console.log("[Reference] Looking for settings folder:", SETTINGS_FOLDER_NAME, "→ found:", settingsPath);
 
-  const hasAnyExistingReference = Object.values(existingPaths).some(Boolean);
-  const hasAllExistingReference = PROJECT_REFERENCE_DEFINITIONS.every((definition) => existingPaths[definition.key]);
-
-  if (hasAllExistingReference) {
-    return {
-      paths: Object.fromEntries(
-        PROJECT_REFERENCE_DEFINITIONS.map((definition) => [definition.key, existingPaths[definition.key] as string])
-      ) as Record<(typeof PROJECT_REFERENCE_DEFINITIONS)[number]["key"], string>,
-      createdMissingFiles: false,
-    };
+  if (!settingsPath) {
+    console.log("[Reference] No settings folder found, returning empty");
+    return { entries: [], filePaths: [] };
   }
 
-  const existingSettingsFolderPath = findFolderPath(files, SETTINGS_FOLDER_NAME);
-  const settingsFolderPath = existingSettingsFolderPath ?? joinPath(rootPath, SETTINGS_FOLDER_NAME);
+  const entries: ReferenceEntry[] = [];
+  const filePaths: string[] = [];
 
-  if (!existingSettingsFolderPath) {
-    try {
-      await createFolderOnDisk(settingsFolderPath);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!message.includes("already exists")) {
-        throw error;
+  const findTxtFiles = (nodeList: WorkspaceNode[]) => {
+    for (const node of nodeList) {
+      if (node.type === "file" && node.name.endsWith(".txt")) {
+        filePaths.push(node.path);
+      }
+      if (node.children) {
+        findTxtFiles(node.children);
       }
     }
-  }
+  };
 
-  const result = {} as Record<(typeof PROJECT_REFERENCE_DEFINITIONS)[number]["key"], string>;
-  let createdMissingFiles = !existingSettingsFolderPath;
+  const settingsNode = getNodeByPath(nodes, settingsPath);
+  console.log("[Reference] Settings node:", settingsNode?.name, "isLoaded:", settingsNode?.isLoaded, "hasChildren:", !!settingsNode?.children);
 
-  for (const definition of PROJECT_REFERENCE_DEFINITIONS) {
-    const existingPath = existingPaths[definition.key];
-    if (existingPath) {
-      result[definition.key] = existingPath;
-      continue;
-    }
-
-    const filePath = joinPath(settingsFolderPath, definition.fileName);
-    try {
-      await createFileOnDisk(filePath);
-      await writeFile(filePath, definition.template);
-      createdMissingFiles = true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!message.includes("already exists")) {
-        throw error;
+  if (settingsNode) {
+    // 如果 settings 文件夹的 children 是 undefined，需要先加载它
+    if (!settingsNode.children) {
+      try {
+        console.log("[Reference] Loading settings folder contents...");
+        const children = await readDirectory(settingsPath);
+        console.log("[Reference] Loaded", children.length, "children:", children.map(c => c.name));
+        findTxtFiles(children);
+      } catch (err) {
+        console.error("[Reference] Failed to load settings folder:", err);
+        return { entries: [], filePaths: [] };
       }
+    } else {
+      console.log("[Reference] Settings folder already loaded, children:", settingsNode.children.map(c => c.name));
+      findTxtFiles(settingsNode.children);
     }
-    result[definition.key] = filePath;
   }
 
-  if (!hasAnyExistingReference) {
-    return {
-      paths: result,
-      createdMissingFiles,
-    };
+  console.log("[Reference] Found txt files:", filePaths);
+
+  for (const filePath of filePaths) {
+    try {
+      const content = await readFile(filePath);
+      const fileName = filePath.split(/[/\\]/).pop() ?? "";
+      const namedEntries = parseNamedEntries(content);
+      console.log("[Reference] File:", fileName, "→ entries:", namedEntries.length, namedEntries);
+      for (const entry of namedEntries) {
+        entries.push({ ...entry, sourceFile: fileName });
+      }
+    } catch (err) {
+      console.error("[Reference] Failed to read file:", filePath, err);
+    }
   }
 
-  return {
-    paths: {
-      ...Object.fromEntries(
-        PROJECT_REFERENCE_DEFINITIONS.map((definition) => [
-          definition.key,
-          existingPaths[definition.key] ?? result[definition.key],
-        ])
-      ),
-    } as Record<(typeof PROJECT_REFERENCE_DEFINITIONS)[number]["key"], string>,
-    createdMissingFiles,
-  };
-}
-
-function buildReferenceState(
-  characterEntries: NamedEntry[],
-  placeEntries: NamedEntry[],
-  itemEntries: NamedEntry[],
-  skillEntries: NamedEntry[]
-) {
-  return {
-    characterEntries,
-    placeEntries,
-    itemEntries,
-    skillEntries,
-    referenceEntries: buildReferenceEntries(characterEntries, placeEntries, itemEntries, skillEntries),
-  };
+  console.log("[Reference] Total reference entries:", entries.length, entries);
+  return { entries, filePaths };
 }
 
 export const useFileStore = create<FileState>()((set, get) => ({
@@ -393,16 +304,8 @@ export const useFileStore = create<FileState>()((set, get) => ({
   files: [],
   activeFile: null,
   openTabs: [],
-  characterEntries: [],
-  placeEntries: [],
-  itemEntries: [],
-  skillEntries: [],
   referenceEntries: [],
-  characterFilePath: null,
-  placeFilePath: null,
-  itemFilePath: null,
-  skillFilePath: null,
-  worldFilePath: null,
+  referenceFilePaths: [],
   isLoadingWorkspace: false,
   errorMessage: null,
   fileChanges: new Map(),
@@ -461,26 +364,28 @@ export const useFileStore = create<FileState>()((set, get) => ({
         return;
       }
 
-      let workspace = await loadWorkspace(selectedPath);
-      const { paths: referencePaths, createdMissingFiles } = await ensureProjectReferenceFiles(
-        workspace.rootPath,
-        workspace.nodes
-      );
+      const workspace = await loadWorkspace(selectedPath);
 
-      if (createdMissingFiles) {
-        workspace = await loadWorkspace(selectedPath);
+      // 如果 Settings 文件夹不存在，自动创建它
+      const settingsPath = findFolderPath(workspace.nodes, SETTINGS_FOLDER_NAME);
+      if (!settingsPath) {
+        const newSettingsPath = joinPath(workspace.rootPath, SETTINGS_FOLDER_NAME);
+        try {
+          await createFolderOnDisk(newSettingsPath);
+          // 重新加载工作区以包含新创建的 Settings 文件夹
+          const updatedWorkspace = await loadWorkspace(selectedPath);
+          workspace.nodes = updatedWorkspace.nodes;
+        } catch (error) {
+          // 如果文件夹已存在，忽略错误
+          const message = error instanceof Error ? error.message : String(error);
+          if (!message.includes("already exists")) {
+            console.error("[OpenWorkspace] Failed to create Settings folder:", error);
+          }
+        }
       }
 
-      const [characterContent, placeContent, itemContent, skillContent] = await Promise.all([
-        readFile(referencePaths.character),
-        readFile(referencePaths.place),
-        readFile(referencePaths.item),
-        readFile(referencePaths.skill),
-      ]);
-      const characterEntries = parseNamedEntries(characterContent);
-      const placeEntries = parseNamedEntries(placeContent);
-      const itemEntries = parseNamedEntries(itemContent);
-      const skillEntries = parseNamedEntries(skillContent);
+      const { entries: referenceEntries, filePaths: referenceFilePaths } = 
+        await loadAllReferenceFiles(workspace.nodes);
 
       set({
         rootPath: workspace.rootPath,
@@ -488,12 +393,8 @@ export const useFileStore = create<FileState>()((set, get) => ({
         files: workspace.nodes,
         openTabs: [],
         activeFile: null,
-        characterFilePath: referencePaths.character,
-        placeFilePath: referencePaths.place,
-        itemFilePath: referencePaths.item,
-        skillFilePath: referencePaths.skill,
-        worldFilePath: referencePaths.world,
-        ...buildReferenceState(characterEntries, placeEntries, itemEntries, skillEntries),
+        referenceEntries,
+        referenceFilePaths,
         errorMessage: null,
         isLoadingWorkspace: false,
       });
@@ -569,35 +470,16 @@ export const useFileStore = create<FileState>()((set, get) => ({
           ? validTabs.find((tab) => tab.path === activeFile.path) ?? null
           : validTabs[0] ?? null;
 
-      const characterFilePath = findReferenceFilePath(workspace.nodes, CHARACTER_FILE_NAME);
-      const placeFilePath = findReferenceFilePath(workspace.nodes, PLACE_FILE_NAME);
-      const itemFilePath = findReferenceFilePath(workspace.nodes, ITEM_FILE_NAME);
-      const skillFilePath = findReferenceFilePath(workspace.nodes, SKILL_FILE_NAME);
-      const worldFilePath = findReferenceFilePath(workspace.nodes, WORLD_FILE_NAME);
-
-      const [characterContent, placeContent, itemContent, skillContent] = await Promise.all([
-        characterFilePath ? readFile(characterFilePath) : Promise.resolve(""),
-        placeFilePath ? readFile(placeFilePath) : Promise.resolve(""),
-        itemFilePath ? readFile(itemFilePath) : Promise.resolve(""),
-        skillFilePath ? readFile(skillFilePath) : Promise.resolve(""),
-      ]);
-
-      const characterEntries = characterFilePath ? parseNamedEntries(characterContent) : [];
-      const placeEntries = placeFilePath ? parseNamedEntries(placeContent) : [];
-      const itemEntries = itemFilePath ? parseNamedEntries(itemContent) : [];
-      const skillEntries = skillFilePath ? parseNamedEntries(skillContent) : [];
+      const { entries: referenceEntries, filePaths: referenceFilePaths } = 
+        await loadAllReferenceFiles(workspace.nodes);
 
       set({
         rootName: workspace.rootName,
         files: workspace.nodes,
         openTabs: validTabs,
         activeFile: nextActiveFile,
-        characterFilePath,
-        placeFilePath,
-        itemFilePath,
-        skillFilePath,
-        worldFilePath,
-        ...buildReferenceState(characterEntries, placeEntries, itemEntries, skillEntries),
+        referenceEntries,
+        referenceFilePaths,
         errorMessage: null,
       });
     } catch (error) {
@@ -627,19 +509,17 @@ export const useFileStore = create<FileState>()((set, get) => ({
       };
 
       set((state) => {
-        const nextCharacterEntries =
-          path === state.characterFilePath ? parseNamedEntries(content) : state.characterEntries;
-        const nextPlaceEntries =
-          path === state.placeFilePath ? parseNamedEntries(content) : state.placeEntries;
-        const nextItemEntries =
-          path === state.itemFilePath ? parseNamedEntries(content) : state.itemEntries;
-        const nextSkillEntries =
-          path === state.skillFilePath ? parseNamedEntries(content) : state.skillEntries;
+        const nextReferenceEntries = reloadSingleReferenceFile(
+          state.referenceEntries,
+          state.referenceFilePaths,
+          path,
+          content
+        );
 
         return {
           openTabs: [...state.openTabs, newTab],
           activeFile: newTab,
-          ...buildReferenceState(nextCharacterEntries, nextPlaceEntries, nextItemEntries, nextSkillEntries),
+          referenceEntries: nextReferenceEntries,
           errorMessage: null,
         };
       });
@@ -689,19 +569,17 @@ export const useFileStore = create<FileState>()((set, get) => ({
           : tab
       );
 
-      const nextCharacterEntries =
-        path === state.characterFilePath ? parseNamedEntries(content) : state.characterEntries;
-      const nextPlaceEntries =
-        path === state.placeFilePath ? parseNamedEntries(content) : state.placeEntries;
-      const nextItemEntries =
-        path === state.itemFilePath ? parseNamedEntries(content) : state.itemEntries;
-      const nextSkillEntries =
-        path === state.skillFilePath ? parseNamedEntries(content) : state.skillEntries;
+      const nextReferenceEntries = reloadSingleReferenceFile(
+        state.referenceEntries,
+        state.referenceFilePaths,
+        path,
+        content
+      );
 
       return {
         openTabs: nextTabs,
         activeFile: nextTabs.find((tab) => tab.path === state.activeFile?.path) ?? null,
-        ...buildReferenceState(nextCharacterEntries, nextPlaceEntries, nextItemEntries, nextSkillEntries),
+        referenceEntries: nextReferenceEntries,
       };
     });
   },
@@ -726,19 +604,17 @@ export const useFileStore = create<FileState>()((set, get) => ({
             : item
         );
 
-        const nextCharacterEntries =
-          targetPath === state.characterFilePath ? parseNamedEntries(tab.content) : state.characterEntries;
-        const nextPlaceEntries =
-          targetPath === state.placeFilePath ? parseNamedEntries(tab.content) : state.placeEntries;
-        const nextItemEntries =
-          targetPath === state.itemFilePath ? parseNamedEntries(tab.content) : state.itemEntries;
-        const nextSkillEntries =
-          targetPath === state.skillFilePath ? parseNamedEntries(tab.content) : state.skillEntries;
+        const nextReferenceEntries = reloadSingleReferenceFile(
+          state.referenceEntries,
+          state.referenceFilePaths,
+          targetPath,
+          tab.content
+        );
 
         return {
           openTabs: nextTabs,
           activeFile: nextTabs.find((item) => item.path === state.activeFile?.path) ?? null,
-          ...buildReferenceState(nextCharacterEntries, nextPlaceEntries, nextItemEntries, nextSkillEntries),
+          referenceEntries: nextReferenceEntries,
           errorMessage: null,
         };
       });
@@ -803,29 +679,14 @@ export const useFileStore = create<FileState>()((set, get) => ({
         const nextTabs = updateTabsWithRenamedPath(state.openTabs, path, newPath, newName);
         const nextActivePath = state.activeFile?.path?.replace(path, newPath);
 
+        const nextReferenceFilePaths = state.referenceFilePaths.map(fp =>
+          isSameOrDescendantPath(fp, path) ? fp.replace(path, newPath) : fp
+        );
+
         return {
           openTabs: nextTabs,
           activeFile: nextTabs.find((tab) => tab.path === nextActivePath || tab.path === newPath) ?? null,
-          characterFilePath:
-            state.characterFilePath && isSameOrDescendantPath(state.characterFilePath, path)
-              ? state.characterFilePath.replace(path, newPath)
-              : state.characterFilePath,
-          placeFilePath:
-            state.placeFilePath && isSameOrDescendantPath(state.placeFilePath, path)
-              ? state.placeFilePath.replace(path, newPath)
-              : state.placeFilePath,
-          itemFilePath:
-            state.itemFilePath && isSameOrDescendantPath(state.itemFilePath, path)
-              ? state.itemFilePath.replace(path, newPath)
-              : state.itemFilePath,
-          skillFilePath:
-            state.skillFilePath && isSameOrDescendantPath(state.skillFilePath, path)
-              ? state.skillFilePath.replace(path, newPath)
-              : state.skillFilePath,
-          worldFilePath:
-            state.worldFilePath && isSameOrDescendantPath(state.worldFilePath, path)
-              ? state.worldFilePath.replace(path, newPath)
-              : state.worldFilePath,
+          referenceFilePaths: nextReferenceFilePaths,
           errorMessage: null,
         };
       });
@@ -858,41 +719,20 @@ export const useFileStore = create<FileState>()((set, get) => ({
             ? nextTabs.find((tab) => tab.path === state.activeFile?.path) ?? null
             : nextTabs[nextTabs.length - 1] ?? null;
 
-        const nextCharacterFilePath =
-          state.characterFilePath && isSameOrDescendantPath(state.characterFilePath, path)
-            ? null
-            : state.characterFilePath;
-        const nextPlaceFilePath =
-          state.placeFilePath && isSameOrDescendantPath(state.placeFilePath, path)
-            ? null
-            : state.placeFilePath;
-        const nextItemFilePath =
-          state.itemFilePath && isSameOrDescendantPath(state.itemFilePath, path)
-            ? null
-            : state.itemFilePath;
-        const nextSkillFilePath =
-          state.skillFilePath && isSameOrDescendantPath(state.skillFilePath, path)
-            ? null
-            : state.skillFilePath;
-        const nextWorldFilePath =
-          state.worldFilePath && isSameOrDescendantPath(state.worldFilePath, path)
-            ? null
-            : state.worldFilePath;
+        const nextReferenceFilePaths = state.referenceFilePaths.filter(
+          fp => !isSameOrDescendantPath(fp, path)
+        );
 
-        const nextCharacterEntries = nextCharacterFilePath ? state.characterEntries : [];
-        const nextPlaceEntries = nextPlaceFilePath ? state.placeEntries : [];
-        const nextItemEntries = nextItemFilePath ? state.itemEntries : [];
-        const nextSkillEntries = nextSkillFilePath ? state.skillEntries : [];
+        const deletedFileName = path.split(/[/\\]/).pop() ?? "";
+        const nextReferenceEntries = state.referenceEntries.filter(
+          e => e.sourceFile !== deletedFileName
+        );
 
         return {
           openTabs: nextTabs,
           activeFile: nextActive,
-          characterFilePath: nextCharacterFilePath,
-          placeFilePath: nextPlaceFilePath,
-          itemFilePath: nextItemFilePath,
-          skillFilePath: nextSkillFilePath,
-          worldFilePath: nextWorldFilePath,
-          ...buildReferenceState(nextCharacterEntries, nextPlaceEntries, nextItemEntries, nextSkillEntries),
+          referenceFilePaths: nextReferenceFilePaths,
+          referenceEntries: nextReferenceEntries,
           errorMessage: null,
         };
       });
@@ -911,29 +751,14 @@ export const useFileStore = create<FileState>()((set, get) => ({
         const nextTabs = updateTabsWithRenamedPath(state.openTabs, sourcePath, newPath, movedName);
         const nextActivePath = state.activeFile?.path?.replace(sourcePath, newPath);
 
+        const nextReferenceFilePaths = state.referenceFilePaths.map(fp =>
+          isSameOrDescendantPath(fp, sourcePath) ? fp.replace(sourcePath, newPath) : fp
+        );
+
         return {
           openTabs: nextTabs,
           activeFile: nextTabs.find((tab) => tab.path === nextActivePath || tab.path === newPath) ?? null,
-          characterFilePath:
-            state.characterFilePath && isSameOrDescendantPath(state.characterFilePath, sourcePath)
-              ? state.characterFilePath.replace(sourcePath, newPath)
-              : state.characterFilePath,
-          placeFilePath:
-            state.placeFilePath && isSameOrDescendantPath(state.placeFilePath, sourcePath)
-              ? state.placeFilePath.replace(sourcePath, newPath)
-              : state.placeFilePath,
-          itemFilePath:
-            state.itemFilePath && isSameOrDescendantPath(state.itemFilePath, sourcePath)
-              ? state.itemFilePath.replace(sourcePath, newPath)
-              : state.itemFilePath,
-          skillFilePath:
-            state.skillFilePath && isSameOrDescendantPath(state.skillFilePath, sourcePath)
-              ? state.skillFilePath.replace(sourcePath, newPath)
-              : state.skillFilePath,
-          worldFilePath:
-            state.worldFilePath && isSameOrDescendantPath(state.worldFilePath, sourcePath)
-              ? state.worldFilePath.replace(sourcePath, newPath)
-              : state.worldFilePath,
+          referenceFilePaths: nextReferenceFilePaths,
           errorMessage: null,
         };
       });
@@ -943,5 +768,36 @@ export const useFileStore = create<FileState>()((set, get) => ({
         errorMessage: error instanceof Error ? error.message : "Failed to move path.",
       });
     }
+  },
+  createConfigFile: async (fileName) => {
+    const { rootPath, files } = get();
+    if (!rootPath) return;
+
+    const existingSettingsFolderPath = findFolderPath(files, SETTINGS_FOLDER_NAME);
+    const settingsFolderPath = existingSettingsFolderPath ?? joinPath(rootPath, SETTINGS_FOLDER_NAME);
+
+    if (!existingSettingsFolderPath) {
+      try {
+        await createFolderOnDisk(settingsFolderPath);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.includes("already exists")) {
+          throw error;
+        }
+      }
+    }
+
+    const finalFileName = fileName.endsWith('.txt') ? fileName : `${fileName}.txt`;
+    const filePath = joinPath(settingsFolderPath, finalFileName);
+
+    const existingPath = get().referenceFilePaths.find(fp => fp.endsWith(`/${finalFileName}`) || fp.endsWith(`\\${finalFileName}`));
+    if (existingPath) {
+      throw new Error(`文件 "${finalFileName}" 已存在`);
+    }
+
+    await createFileOnDisk(filePath);
+    await writeFile(filePath, "");
+
+    await get().refreshWorkspace();
   },
 }));

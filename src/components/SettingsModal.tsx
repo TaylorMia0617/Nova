@@ -210,17 +210,9 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     <div className="dialog-backdrop settings-backdrop" onClick={handleClose}>
       <div className="settings-modal" onClick={(event) => event.stopPropagation()}>
         <div className="settings-header">
-          <div>
+          <div className="settings-header-left">
             <h2>{t("settings.title")}</h2>
-            <p>{t("settings.description")}</p>
-          </div>
-          <button className="icon-button" onClick={handleClose} aria-label="Close settings">
-            <X size={18} />
-          </button>
-        </div>
-        <div className="settings-layout">
-          <aside className="settings-sidebar">
-            <div className="settings-sidebar-tabs">
+            <div className="settings-header-tabs">
               <button
                 type="button"
                 className={`tab-button ${activeTab === "models" ? "active" : ""}`}
@@ -236,6 +228,13 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                 {t("settings.searchSettings")}
               </button>
             </div>
+          </div>
+          <button className="icon-button" onClick={handleClose} aria-label="Close settings">
+            <X size={18} />
+          </button>
+        </div>
+        <div className="settings-layout">
+          <aside className="settings-sidebar">
             {activeTab === "models" && (
               <>
                 <div className="settings-sidebar-header">

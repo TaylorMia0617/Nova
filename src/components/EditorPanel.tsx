@@ -28,11 +28,6 @@ import { onWorkspaceChanged, unwatchWorkspace, watchWorkspace } from "../service
 import { compareNodeNames } from "../../shared/workspaceSort.js";
 import "./EditorPanel.css";
 
-const CHARACTER_FILE_NAME = "\u4eba\u7269\u5217\u8868.txt";
-const PLACE_FILE_NAME = "\u5730\u7406\u540d\u79f0.txt";
-const ITEM_FILE_NAME = "\u9053\u5177\u540d\u79f0.txt";
-const SKILL_FILE_NAME = "\u62db\u5f0f\u5217\u8868.txt";
-const WORLD_FILE_NAME = "\u4e16\u754c\u89c2.txt";
 const EDITOR_THEME = "novel-assistance-dark";
 const DESCRIPTION_LIMIT = 20;
 const TYPING_SUGGEST_DELAY_MS = 300;
@@ -185,6 +180,7 @@ const EditorPanel: React.FC = () => {
     activeFile,
     openTabs,
     referenceEntries,
+    referenceFilePaths,
     rootPath,
     setActiveFile,
     closeTab,
@@ -222,41 +218,12 @@ const EditorPanel: React.FC = () => {
   const [exportError, setExportError] = useState("");
   const exportTemplates = getExportTemplates();
 
-  const isReferenceFile =
-    activeFile?.name === CHARACTER_FILE_NAME ||
-    activeFile?.name === PLACE_FILE_NAME ||
-    activeFile?.name === ITEM_FILE_NAME ||
-    activeFile?.name === SKILL_FILE_NAME ||
-    activeFile?.name === WORLD_FILE_NAME;
+  const isReferenceFile = activeFile?.path
+    ? referenceFilePaths.includes(activeFile.path)
+    : false;
 
-  const getCategoryLabel = (category: string) => {
-    switch (category) {
-      case "character":
-        return "\u4eba\u7269";
-      case "place":
-        return "\u5730\u540d";
-      case "item":
-        return "\u9053\u5177";
-      case "skill":
-        return "\u62db\u5f0f";
-      default:
-        return "\u540d\u79f0";
-    }
-  };
-
-  const getCompletionKind = (monaco: any, category: string) => {
-    switch (category) {
-      case "character":
-        return monaco.languages.CompletionItemKind.Variable;
-      case "place":
-        return monaco.languages.CompletionItemKind.Reference;
-      case "item":
-        return monaco.languages.CompletionItemKind.Folder;
-      case "skill":
-        return monaco.languages.CompletionItemKind.Function;
-      default:
-        return monaco.languages.CompletionItemKind.Text;
-    }
+  const getCompletionKind = (monaco: any) => {
+    return monaco.languages.CompletionItemKind.Reference;
   };
 
   const getShortDescription = (description: string) => {
@@ -331,11 +298,13 @@ const EditorPanel: React.FC = () => {
 
   const triggerReferenceSuggestions = () => {
     const editor = editorRef.current;
+    console.log("[Suggestion] triggerReferenceSuggestions called, referenceEntries.length:", referenceEntries.length, "isReferenceFile:", isReferenceFile);
     if (!editor || referenceEntries.length === 0 || isReferenceFile) return;
     const model = editor.getModel();
     const position = editor.getPosition();
     if (!model || !position) return;
     const context = getSuggestionContext(model, position);
+    console.log("[Suggestion] context:", context);
     if (!context) return;
     editor.trigger("reference-suggestions", "editor.action.triggerSuggest", {});
   };
@@ -382,11 +351,11 @@ const EditorPanel: React.FC = () => {
             })
             .map((entry) => ({
               label: entry.name,
-              kind: getCompletionKind(monaco, entry.category),
+              kind: getCompletionKind(monaco),
               insertText: context.insertMode === "brace" ? `{{${entry.name}}}` : entry.name,
               filterText: entry.name,
-              detail: `${getCategoryLabel(entry.category)} ${getShortDescription(entry.description)}`,
-              documentation: getShortDescription(entry.description),
+              detail: entry.description ? getShortDescription(entry.description) : entry.sourceFile ?? "参考",
+              documentation: entry.description ?? "",
               range,
             }));
 
@@ -716,12 +685,14 @@ const EditorPanel: React.FC = () => {
         const position = editor?.getPosition();
         if (!model || !position) return;
         const context = getSuggestionContext(model, position);
+        console.log("[Suggestion] Typing trigger, context:", context, "referenceEntries.length:", referenceEntries.length);
         if (context && context.partial) {
           const hasMatch = referenceEntries.some(
             (entry) =>
               entry.name.toLowerCase().startsWith(context.partial) &&
               entry.name.toLowerCase() !== context.partial
           );
+          console.log("[Suggestion] hasMatch:", hasMatch, "partial:", context.partial);
           if (hasMatch) {
             suggestionCooldownUntilRef.current = 0;
             triggerReferenceSuggestions();
@@ -737,12 +708,14 @@ const EditorPanel: React.FC = () => {
         const position = editor?.getPosition();
         if (!model || !position) return;
         const context = getSuggestionContext(model, position);
+        console.log("[Suggestion] Idle trigger, context:", context, "referenceEntries.length:", referenceEntries.length);
         if (context && context.partial) {
           const hasMatch = referenceEntries.some(
             (entry) =>
               entry.name.toLowerCase().startsWith(context.partial) &&
               entry.name.toLowerCase() !== context.partial
           );
+          console.log("[Suggestion] Idle hasMatch:", hasMatch);
           if (hasMatch) {
             triggerReferenceSuggestions();
           }

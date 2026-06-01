@@ -17,6 +17,12 @@ export interface WorkspaceSnapshot {
 
 interface NovelHostApi {
   isElectron: true;
+  // Window controls
+  minimize: () => Promise<void>;
+  maximize: () => Promise<void>;
+  close: () => Promise<void>;
+  isMaximized: () => Promise<boolean>;
+  // File system
   pickWorkspace: () => Promise<string | null>;
   loadWorkspace: (rootPath: string, options?: { recursive?: boolean }) => Promise<WorkspaceSnapshot>;
   readDirectory: (directoryPath: string, options?: { recursive?: boolean }) => Promise<WorkspaceNode[]>;

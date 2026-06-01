@@ -10,3 +10,7 @@ dist-ssr
 .env.local
 target
 src-tauri/target
+*.exe
+/release-dev
+/release
+/release-build

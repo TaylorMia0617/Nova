@@ -298,3 +298,9 @@
 .dialog-actions button.danger-action:hover {
   background: #a13434;
 }
+
+.config-file-error {
+  color: #f44336;
+  font-size: 12px;
+  margin-top: 8px;
+}

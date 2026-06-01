@@ -8,7 +8,7 @@ body {
   font-family: 'SimHei', '黑体', 'Microsoft YaHei', sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background: linear-gradient(180deg, #1a1f2e 0%, #141824 100%);
+  background: #1a1f2e;
   color: #ffffff;
 }
 

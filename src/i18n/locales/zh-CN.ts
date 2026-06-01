@@ -14,6 +14,8 @@ const zhCN: TranslationDict = {
     selectionModel: "选区模型",
     notConfigured: "未配置",
     language: "语言",
+    copilot: "Copilot",
+    agent: "Agent",
   },
   copilot: {
     title: "AI 助手",
@@ -94,6 +96,15 @@ const zhCN: TranslationDict = {
   assets: {
     openWorkspace: "打开工作区",
     openWorkspaceHint: "选择一个文件夹以开始写作",
+    createConfigFile: "创建设置配置文件",
+    createConfigFileHint: "输入文件名，将在settings文件夹中创建。",
+    configFilePlaceholder: "例：人物列表",
+    configFileErrorEmpty: "请输入文件名",
+    configFileErrorCreateFailed: "创建失败",
+    deleteItem: "删除项目",
+    deleteItemConfirm: "此操作将永久删除所选文件或文件夹。",
+    cancel: "取消",
+    create: "创建",
   },
 };
 
