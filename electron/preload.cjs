@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld("novelHost", {
   maximize: () => ipcRenderer.invoke("window:maximize"),
   close: () => ipcRenderer.invoke("window:close"),
   isMaximized: () => ipcRenderer.invoke("window:isMaximized"),
+  createNewWindow: () => ipcRenderer.invoke("window:createNew"),
   // File system
   pickWorkspace: () => ipcRenderer.invoke("fs:pickWorkspace"),
   loadWorkspace: (rootPath, options) => ipcRenderer.invoke("fs:loadWorkspace", rootPath, options),
@@ -31,6 +32,7 @@ contextBridge.exposeInMainWorld("novelHost", {
   deleteConversation: (conversationId) => ipcRenderer.invoke("ai:deleteConversation", conversationId),
   testMcpConnection: (profile) => ipcRenderer.invoke("ai:testMcpConnection", profile),
   pickAttachments: () => ipcRenderer.invoke("ai:pickAttachments"),
+  pickImages: () => ipcRenderer.invoke("ai:pickImages"),
   readAttachmentText: (filePath) => ipcRenderer.invoke("ai:readAttachmentText", filePath),
   watchWorkspace: (rootPath) => ipcRenderer.invoke("workspace:watch", rootPath),
   unwatchWorkspace: (rootPath) => ipcRenderer.invoke("workspace:unwatch", rootPath),

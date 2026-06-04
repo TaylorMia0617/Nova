@@ -395,13 +395,17 @@ const AssetsPanel: React.FC = () => {
               selectedNodePath === node.path ? "selected" : "",
               dropTargetPath === node.path ? "drop-target" : "",
             ].join(" ")}
-            onClick={async (e) => {
+            onClick={(e) => {
               e.stopPropagation();
               setSelectedNodePath(node.path);
               if (isFolder) {
-                await toggleFolder(node.path);
-              } else {
-                await openFile(node.path);
+                void toggleFolder(node.path);
+              }
+            }}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              if (!isFolder) {
+                void openFile(node.path);
               }
             }}
             onContextMenu={(e) => {

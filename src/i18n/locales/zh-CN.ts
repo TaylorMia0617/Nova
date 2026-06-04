@@ -1,6 +1,43 @@
 import type { TranslationDict } from "../index";
 
 const zhCN: TranslationDict = {
+  menubar: {
+    file: {
+      title: "文件",
+      newFile: "新建文件",
+      newWorkspace: "新建工作区",
+      openWorkspace: "打开工作区",
+      saveAll: "全部保存",
+      saveAs: "另存为",
+      exit: "退出",
+    },
+    edit: {
+      title: "编辑",
+      undo: "撤销",
+      redo: "重做",
+      cut: "剪切",
+      copy: "复制",
+      paste: "粘贴",
+      selectAll: "全选",
+      find: "查找",
+      replace: "替换",
+    },
+    window: {
+      title: "窗口",
+      newWindow: "新建窗口",
+      editor: "编辑器",
+      copilot: "AI 助手",
+      assets: "资源管理器",
+      terminal: "终端",
+      closePanel: "关闭面板",
+    },
+    terminal: {
+      title: "终端",
+      newTerminal: "新建终端",
+      clearTerminal: "清除终端",
+      closeTerminal: "关闭终端",
+    },
+  },
   header: {
     title: "Nova/诺瓦",
     subtitle: "Electron 写作工作区",
@@ -49,6 +86,14 @@ const zhCN: TranslationDict = {
     low: "低",
     medium: "中",
     high: "高",
+    plan: "计划",
+    build: "书写",
+    toolConfirmTitle: "AI 请求执行以下文件操作：",
+    toolConfirmAllow: "允许全部",
+    toolConfirmDeny: "跳过全部",
+    toolEdit: "编辑",
+    toolCreate: "创建",
+    toolConfirmDenied: "文件操作已被用户跳过。",
   },
   settings: {
     title: "AI 设置",

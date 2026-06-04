@@ -6,10 +6,14 @@ import {
   AlignRight,
   ChevronDown,
   Download,
+  FolderOpen,
   Heading1,
   Heading2,
   Heading3,
   Save,
+  SplitSquareHorizontal,
+  SplitSquareVertical,
+  Trash2,
   Type,
   WrapText,
   X,
@@ -26,6 +30,7 @@ import { exportDocument, getExportTemplates } from "../services/documentExportSe
 import type { ExportFormat, ExportTemplateId } from "../types/export";
 import { onWorkspaceChanged, unwatchWorkspace, watchWorkspace } from "../services/terminalService";
 import { compareNodeNames } from "../../shared/workspaceSort.js";
+import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import "./EditorPanel.css";
 
 const EDITOR_THEME = "novel-assistance-dark";
@@ -178,15 +183,24 @@ const EditorPanel: React.FC = () => {
   const {
     files,
     activeFile,
-    openTabs,
+    getOpenTabs,
+    editorGroups,
+    activeGroupId,
     referenceEntries,
     rootPath,
+    recentWorkspaces,
     setActiveFile,
     closeTab,
     updateFileContent,
     saveFile,
     saveAllFiles,
     refreshWorkspace,
+    openRecentWorkspace,
+    clearRecentWorkspaces,
+    splitEditor,
+    closeGroup,
+    setActiveGroup,
+    moveTabToGroup,
   } = useFileStore();
   const { defaultSelectionModelId, selectionPromptTemplates, getModelProfileById } = useSettingsStore();
   const editorRef = useRef<any>(null);
@@ -200,6 +214,14 @@ const EditorPanel: React.FC = () => {
   const alignmentBlocksByPathRef = useRef<Record<string, AlignmentBlock[]>>({});
   const alignmentDecorationIdsRef = useRef<string[]>([]);
   const alignmentDecorationModesRef = useRef<Record<string, AlignmentMode>>({});
+  const editorStatesRef = useRef<Map<string, {
+    scrollTop: number;
+    scrollLeft: number;
+    cursorLineNumber: number;
+    cursorColumn: number;
+  }>>(new Map());
+  const loadedFilePathRef = useRef<string | null>(null);
+  const ignoreNextChangeRef = useRef(false);
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 });
   const [selectionLength, setSelectionLength] = useState(0);
   const [wordWrap, setWordWrap] = useState<"on" | "off">("on");
@@ -216,11 +238,10 @@ const EditorPanel: React.FC = () => {
   const [exportTemplateId, setExportTemplateId] = useState<ExportTemplateId>("classic");
   const [exportError, setExportError] = useState("");
   const exportTemplates = getExportTemplates();
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tabPath: string } | null>(null);
 
   const isReferenceFile = false;
 
-  // 预处理 referenceEntries 为一个 Map，提高查找速度
-  // 存储每个前缀对应的条目列表
   const referenceEntriesMap = useMemo(() => {
     const map = new Map<string, ReferenceEntry[]>();
     for (const entry of referenceEntries) {
@@ -236,7 +257,6 @@ const EditorPanel: React.FC = () => {
     return map;
   }, [referenceEntries]);
 
-  // 检查是否有匹配的条目（O(1) 操作）
   const hasMatchingEntry = useCallback((partial: string): boolean => {
     if (!partial) return false;
     const entries = referenceEntriesMap.get(partial);
@@ -244,7 +264,6 @@ const EditorPanel: React.FC = () => {
     return entries.some(entry => entry.name.toLowerCase() !== partial);
   }, [referenceEntriesMap]);
 
-  // 获取匹配的条目（O(1) 操作）
   const getMatchingEntries = useCallback((partial: string): ReferenceEntry[] => {
     if (!partial) return [];
     const entries = referenceEntriesMap.get(partial);
@@ -290,12 +309,9 @@ const EditorPanel: React.FC = () => {
 
     if (isReferenceFile) return null;
 
-    // Include middle dot (· U+00B7, U+30FB) for names like "艾莉丝·玛丽亚·弗里尔"
     const plainMatch = beforeCursor.match(/[A-Za-z0-9_\u4e00-\u9fff\u00b7\u30fb-]+$/);
     const token = plainMatch ? plainMatch[0] : "";
 
-    // Find shortest suffix of token that matches a reference entry prefix
-    // e.g. token="他觉得艾" → try "艾"→✓ → partial="艾"
     let partial = "";
     if (token) {
       for (let i = token.length - 1; i >= 0; i--) {
@@ -357,7 +373,6 @@ const EditorPanel: React.FC = () => {
             position.column
           );
 
-          // 使用 getMatchingEntries 获取匹配的条目（O(1) 操作）
           const candidateEntries = getMatchingEntries(context.partial);
 
           if (candidateEntries.length === 0) {
@@ -701,7 +716,6 @@ const EditorPanel: React.FC = () => {
       if (suggestionTimeoutRef.current) window.clearTimeout(suggestionTimeoutRef.current);
       if (idleTimeoutRef.current) window.clearTimeout(idleTimeoutRef.current);
 
-      // Typing trigger: short delay, check if partial matches entries
       suggestionTimeoutRef.current = window.setTimeout(() => {
         const editor = editorRef.current;
         const model = editor?.getModel();
@@ -709,7 +723,6 @@ const EditorPanel: React.FC = () => {
         if (!model || !position) return;
         const context = getSuggestionContext(model, position);
         if (context && context.partial) {
-          // 使用 hasMatchingEntry 检查是否有匹配的条目（O(1) 操作）
           if (hasMatchingEntry(context.partial)) {
             suggestionCooldownUntilRef.current = 0;
             triggerReferenceSuggestions();
@@ -717,7 +730,6 @@ const EditorPanel: React.FC = () => {
         }
       }, TYPING_SUGGEST_DELAY_MS);
 
-      // Idle trigger: 5 seconds, respects cooldown
       idleTimeoutRef.current = window.setTimeout(() => {
         if (Date.now() < suggestionCooldownUntilRef.current) return;
         const editor = editorRef.current;
@@ -726,7 +738,6 @@ const EditorPanel: React.FC = () => {
         if (!model || !position) return;
         const context = getSuggestionContext(model, position);
         if (context && context.partial) {
-          // 使用 hasMatchingEntry 检查是否有匹配的条目（O(1) 操作）
           if (hasMatchingEntry(context.partial)) {
             triggerReferenceSuggestions();
           }
@@ -738,10 +749,58 @@ const EditorPanel: React.FC = () => {
   };
 
   const handleEditorChange = useCallback((value: string | undefined) => {
-    if (activeFile && value !== undefined) {
-      updateFileContent(activeFile.path, value);
+    if (ignoreNextChangeRef.current) {
+      ignoreNextChangeRef.current = false;
+      return;
     }
-  }, [activeFile?.path, updateFileContent]);
+    const path = loadedFilePathRef.current;
+    if (path && value !== undefined) {
+      updateFileContent(path, value);
+    }
+  }, [updateFileContent]);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor || !activeFile) return;
+    if (loadedFilePathRef.current === activeFile.path) return;
+
+    if (loadedFilePathRef.current) {
+      editorStatesRef.current.set(loadedFilePathRef.current, {
+        scrollTop: editor.getScrollTop(),
+        scrollLeft: editor.getScrollLeft(),
+        cursorLineNumber: editor.getPosition()?.lineNumber ?? 1,
+        cursorColumn: editor.getPosition()?.column ?? 1,
+      });
+    }
+
+    ignoreNextChangeRef.current = true;
+    editor.setValue(activeFile.content);
+    loadedFilePathRef.current = activeFile.path;
+
+    const monaco = monacoRef.current;
+    if (monaco) {
+      const model = editor.getModel();
+      if (model) {
+        monaco.editor.setModelLanguage(model, "markdown");
+      }
+    }
+
+    const saved = editorStatesRef.current.get(activeFile.path);
+    if (saved) {
+      requestAnimationFrame(() => {
+        editor.setScrollTop(saved.scrollTop);
+        editor.setScrollLeft(saved.scrollLeft);
+        editor.setPosition({ lineNumber: saved.cursorLineNumber, column: saved.cursorColumn });
+      });
+    } else {
+      requestAnimationFrame(() => {
+        editor.setScrollTop(0);
+      });
+    }
+
+    applyAlignmentDecorations(activeFile.path);
+    syncHeadingState();
+  }, [activeFile?.path]);
 
   const handleSave = async () => {
     if (!activeFile) return;
@@ -836,6 +895,29 @@ const EditorPanel: React.FC = () => {
     syncHeadingState();
   }, [activeFile?.path, isReferenceFile]);
 
+  useEffect(() => {
+    const tabsBars = document.querySelectorAll('.tabs-bar');
+    if (tabsBars.length === 0) return;
+
+    const handleWheel = (e: Event) => {
+      const we = e as WheelEvent;
+      if (Math.abs(we.deltaY) > Math.abs(we.deltaX)) {
+        we.preventDefault();
+        (we.currentTarget as HTMLElement).scrollLeft += we.deltaY;
+      }
+    };
+
+    tabsBars.forEach((bar) => {
+      bar.addEventListener('wheel', handleWheel, { passive: false });
+    });
+
+    return () => {
+      tabsBars.forEach((bar) => {
+        bar.removeEventListener('wheel', handleWheel);
+      });
+    };
+  }, []);
+
   const handleExport = async () => {
     if (!activeFile) {
       setExportError("There is no content to export.");
@@ -907,33 +989,149 @@ const EditorPanel: React.FC = () => {
     };
   }, [activeFile, isReferenceFile]);
 
+  const handleTabContextMenu = useCallback((e: React.MouseEvent, tabPath: string) => {
+    e.preventDefault();
+    setContextMenu({ x: e.clientX, y: e.clientY, tabPath });
+  }, []);
+
+  const getContextMenuItems = useCallback((tabPath: string): ContextMenuItem[] => {
+    const otherGroups = editorGroups.filter((g) => g.id !== activeGroupId);
+    return [
+      {
+        label: "向右分屏",
+        icon: <SplitSquareHorizontal size={14} />,
+        action: () => splitEditor("horizontal"),
+      },
+      {
+        label: "向下方分屏",
+        icon: <SplitSquareVertical size={14} />,
+        action: () => splitEditor("vertical"),
+      },
+      ...(otherGroups.length > 0
+        ? [
+            { label: "", separator: true, action: () => {} },
+            ...otherGroups.map((g) => ({
+              label: `移动到 ${g.id === "primary" ? "主窗口" : `分屏 ${editorGroups.indexOf(g)}`}`,
+              action: () => moveTabToGroup(tabPath, g.id),
+            })),
+          ]
+        : []),
+    ];
+  }, [editorGroups, activeGroupId, splitEditor, moveTabToGroup]);
+
   return (
     <div className="editor-panel">
-      <div className="tabs-bar">
-        {openTabs.length > 0 ? (
-          openTabs.map((tab) => (
-            <button
-              key={tab.path}
-              className={`tab-button ${activeFile?.path === tab.path ? "active" : ""}`}
-              onClick={() => setActiveFile(tab.path)}
+      {editorGroups.length > 1 ? (
+        <div className={`editor-groups-container split-${editorGroups.length > 2 ? "both" : editorGroups[1] ? "horizontal" : "vertical"}`}>
+          {editorGroups.map((group) => (
+            <div
+              key={group.id}
+              className={`editor-group ${group.id === activeGroupId ? "active" : ""}`}
+              onClick={() => setActiveGroup(group.id)}
             >
-              <span>{tab.name}</span>
-              {tab.isDirty && <span className="dirty-dot" />}
-              <span
-                className="close-tab"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  closeTab(tab.path);
-                }}
-              >
-                <X size={12} />
-              </span>
-            </button>
-          ))
-        ) : (
-          <div className="tabs-empty">No open editors</div>
-        )}
-      </div>
+              <div className="tabs-bar">
+                {group.tabs.length > 0 ? (
+                  group.tabs.map((tab) => (
+                    <button
+                      key={tab.path}
+                      className={`tab-button ${group.activeTabPath === tab.path ? "active" : ""}`}
+                      onClick={() => {
+                        setActiveGroup(group.id);
+                        setActiveFile(tab.path);
+                      }}
+                      onContextMenu={(e) => handleTabContextMenu(e, tab.path)}
+                    >
+                      <span>{tab.name}</span>
+                      {tab.isDirty && <span className="dirty-dot" />}
+                      <span
+                        className="close-tab"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          closeTab(tab.path);
+                        }}
+                      >
+                        <X size={12} />
+                      </span>
+                    </button>
+                  ))
+                ) : (
+                  <div className="tabs-empty">No open editors</div>
+                )}
+                {editorGroups.length > 1 && (
+                  <button
+                    className="close-group-btn"
+                    onClick={() => closeGroup(group.id)}
+                    title="关闭分屏"
+                  >
+                    <X size={12} />
+                  </button>
+                )}
+              </div>
+              <div className="editor-container">
+                {group.tabs.find((t) => t.path === group.activeTabPath) ? (
+                  <Editor
+                    key={group.activeTabPath}
+                    height="100%"
+                    defaultLanguage="markdown"
+                    value={group.tabs.find((t) => t.path === group.activeTabPath)?.content ?? ""}
+                    onChange={(value) => {
+                      if (group.activeTabPath && value !== undefined) {
+                        updateFileContent(group.activeTabPath, value);
+                      }
+                    }}
+                    theme={EDITOR_THEME}
+                    options={{
+                      minimap: { enabled: true },
+                      fontFamily: DEFAULT_EDITOR_FONT_FAMILY,
+                      fontSize,
+                      lineNumbers: "on",
+                      scrollBeyondLastLine: true,
+                      automaticLayout: true,
+                      wordWrap,
+                      renderWhitespace: "selection",
+                      folding: true,
+                      showFoldingControls: "mouseover",
+                      smoothScrolling: true,
+                      cursorBlinking: "smooth",
+                    }}
+                  />
+                ) : (
+                  <div className="empty-state">
+                    <p>Open a file from Explorer to start editing</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <>
+          <div className="tabs-bar">
+            {getOpenTabs().length > 0 ? (
+              getOpenTabs().map((tab) => (
+                <button
+                  key={tab.path}
+                  className={`tab-button ${activeFile?.path === tab.path ? "active" : ""}`}
+                  onClick={() => setActiveFile(tab.path)}
+                  onContextMenu={(e) => handleTabContextMenu(e, tab.path)}
+                >
+                  <span>{tab.name}</span>
+                  {tab.isDirty && <span className="dirty-dot" />}
+                  <span
+                    className="close-tab"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      closeTab(tab.path);
+                    }}
+                  >
+                    <X size={12} />
+                  </span>
+                </button>
+              ))
+            ) : (
+              <div className="tabs-empty">No open editors</div>
+            )}
+          </div>
       <div className="panel-header">
         <div className="editor-title-group">
           <h2>{activeFile ? activeFile.name : "No file selected"}</h2>
@@ -1065,7 +1263,6 @@ const EditorPanel: React.FC = () => {
       <div className="editor-container" ref={editorContainerRef}>
         {activeFile ? (
           <Editor
-            key={activeFile.path}
             height="100%"
             defaultLanguage={isReferenceFile ? "plaintext" : "markdown"}
             value={activeFile.content}
@@ -1097,12 +1294,47 @@ const EditorPanel: React.FC = () => {
               cursorBlinking: "smooth",
             }}
           />
+        ) : rootPath ? (
+          <div className="empty-state">
+            <p>Open a file from Explorer to start editing</p>
+          </div>
+        ) : recentWorkspaces.length > 0 ? (
+          <div className="empty-state">
+            <div className="recent-workspaces">
+              <h3>最近打开的工作区</h3>
+              <ul>
+                {recentWorkspaces.map((workspacePath) => {
+                  const name = workspacePath.split(/[/\\]/).filter(Boolean).pop() ?? workspacePath;
+                  return (
+                    <li
+                      key={workspacePath}
+                      onClick={() => void openRecentWorkspace(workspacePath)}
+                      title={workspacePath}
+                    >
+                      <FolderOpen size={14} />
+                      <span className="recent-workspace-name">{name}</span>
+                      <span className="recent-workspace-path">{workspacePath}</span>
+                    </li>
+                  );
+                })}
+              </ul>
+              <button
+                className="clear-recent-btn"
+                onClick={clearRecentWorkspaces}
+              >
+                <Trash2 size={12} />
+                清除最近打开
+              </button>
+            </div>
+          </div>
         ) : (
           <div className="empty-state">
             <p>Open a file from Explorer to start editing</p>
           </div>
         )}
       </div>
+      </>
+      )}
       {selectionPopup && !selectionPreview && (
         <div className="selection-popup" style={{ left: selectionPopup.left, top: selectionPopup.top }}>
           <button onClick={() => void handleSelectionAi("polish")} disabled={selectionLoading}>润色</button>
@@ -1141,7 +1373,7 @@ const EditorPanel: React.FC = () => {
                   setSelectionPreview(null);
                 }}
               >
-                插入到后方
+                插入到后面
               </button>
               <button
                 onClick={() => {
@@ -1219,6 +1451,14 @@ const EditorPanel: React.FC = () => {
         <span>{fileStats.characters} chars</span>
         <span>{wordWrap === "on" ? "Wrap On" : "Wrap Off"}</span>
       </div>
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={getContextMenuItems(contextMenu.tabPath)}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </div>
   );
 };

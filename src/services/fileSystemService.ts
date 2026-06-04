@@ -22,6 +22,7 @@ interface NovelHostApi {
   maximize: () => Promise<void>;
   close: () => Promise<void>;
   isMaximized: () => Promise<boolean>;
+  createNewWindow: () => Promise<void>;
   // File system
   pickWorkspace: () => Promise<string | null>;
   loadWorkspace: (rootPath: string, options?: { recursive?: boolean }) => Promise<WorkspaceSnapshot>;

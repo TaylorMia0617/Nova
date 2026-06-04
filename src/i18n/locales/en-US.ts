@@ -1,6 +1,43 @@
 import type { TranslationDict } from "../index";
 
 const enUS: TranslationDict = {
+  menubar: {
+    file: {
+      title: "File",
+      newFile: "New File",
+      newWorkspace: "New Workspace",
+      openWorkspace: "Open Workspace",
+      saveAll: "Save All",
+      saveAs: "Save As",
+      exit: "Exit",
+    },
+    edit: {
+      title: "Edit",
+      undo: "Undo",
+      redo: "Redo",
+      cut: "Cut",
+      copy: "Copy",
+      paste: "Paste",
+      selectAll: "Select All",
+      find: "Find",
+      replace: "Replace",
+    },
+    window: {
+      title: "Window",
+      newWindow: "New Window",
+      editor: "Editor",
+      copilot: "AI Copilot",
+      assets: "Explorer",
+      terminal: "Terminal",
+      closePanel: "Close Panel",
+    },
+    terminal: {
+      title: "Terminal",
+      newTerminal: "New Terminal",
+      clearTerminal: "Clear Terminal",
+      closeTerminal: "Close Terminal",
+    },
+  },
   header: {
     title: "Nova",
     subtitle: "Electron writing workspace",
@@ -49,6 +86,14 @@ const enUS: TranslationDict = {
     low: "Low",
     medium: "Medium",
     high: "High",
+    plan: "Plan",
+    build: "Build",
+    toolConfirmTitle: "AI requests to perform the following file operations:",
+    toolConfirmAllow: "Allow All",
+    toolConfirmDeny: "Skip All",
+    toolEdit: "Edit",
+    toolCreate: "Create",
+    toolConfirmDenied: "File operations were skipped by user.",
   },
   settings: {
     title: "AI Settings",

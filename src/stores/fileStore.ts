@@ -35,24 +35,55 @@ export interface ReferenceEntry {
   sourceList?: string;
 }
 
+export interface EditorGroup {
+  id: string;
+  tabs: OpenFileTab[];
+  activeTabPath: string | null;
+}
+
+const RECENT_WORKSPACES_KEY = "novel-assistance-recent-workspaces";
+const MAX_RECENT_WORKSPACES = 5;
+
+function loadRecentWorkspaces(): string[] {
+  try {
+    const raw = localStorage.getItem(RECENT_WORKSPACES_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.slice(0, MAX_RECENT_WORKSPACES) : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistRecentWorkspaces(paths: string[]) {
+  localStorage.setItem(RECENT_WORKSPACES_KEY, JSON.stringify(paths));
+}
+
 interface FileState {
   rootPath: string | null;
   rootName: string | null;
   files: WorkspaceNode[];
   activeFile: OpenFileTab | null;
-  openTabs: OpenFileTab[];
+  editorGroups: EditorGroup[];
+  activeGroupId: string;
   referenceEntries: ReferenceEntry[];
   referenceLists: ReferenceListData[];
   selectedListId: string | null;
   isLoadingWorkspace: boolean;
   errorMessage: string | null;
   fileChanges: Map<string, FileChange[]>;
+  recentWorkspaces: string[];
+  getOpenTabs: () => OpenFileTab[];
   setErrorMessage: (message: string | null) => void;
   openWorkspace: () => Promise<void>;
+  openRecentWorkspace: (path: string) => Promise<void>;
+  saveRecentWorkspace: (path: string) => void;
+  clearRecentWorkspaces: () => void;
+  removeRecentWorkspace: (path: string) => void;
   refreshWorkspace: () => Promise<void>;
   ensureFolderLoaded: (path: string) => Promise<void>;
   loadFullWorkspaceTree: () => Promise<void>;
-  openFile: (path: string) => Promise<void>;
+  openFile: (path: string, groupId?: string) => Promise<void>;
   setActiveFile: (path: string | null) => void;
   closeTab: (path: string) => void;
   updateFileContent: (path: string, content: string) => void;
@@ -71,6 +102,10 @@ interface FileState {
   trackFileChange: (path: string, oldContent: string, newContent: string) => void;
   getFileChanges: (path: string) => FileChange[];
   clearFileChanges: (path: string) => void;
+  splitEditor: (direction: "horizontal" | "vertical") => void;
+  closeGroup: (groupId: string) => void;
+  setActiveGroup: (groupId: string) => void;
+  moveTabToGroup: (tabPath: string, targetGroupId: string) => void;
 }
 
 function getNodeByPath(nodes: WorkspaceNode[], path: string): WorkspaceNode | null {
@@ -201,19 +236,89 @@ function buildReferenceEntriesFromLists(lists: ReferenceListData[]): ReferenceEn
   return entries;
 }
 
+const PRIMARY_GROUP_ID = "primary";
+
+function createEditorGroup(id: string): EditorGroup {
+  return { id, tabs: [], activeTabPath: null };
+}
+
 export const useFileStore = create<FileState>()((set, get) => ({
   rootPath: null,
   rootName: null,
   files: [],
   activeFile: null,
-  openTabs: [],
+  editorGroups: [createEditorGroup(PRIMARY_GROUP_ID)],
+  activeGroupId: PRIMARY_GROUP_ID,
   referenceEntries: [],
   referenceLists: [],
   selectedListId: null,
   isLoadingWorkspace: false,
   errorMessage: null,
   fileChanges: new Map(),
+  recentWorkspaces: loadRecentWorkspaces(),
+  getOpenTabs: () => {
+    const { editorGroups, activeGroupId } = get();
+    const activeGroup = editorGroups.find((g) => g.id === activeGroupId);
+    return activeGroup?.tabs ?? [];
+  },
   setErrorMessage: (message) => set({ errorMessage: message }),
+  saveRecentWorkspace: (path: string) => {
+    const current = get().recentWorkspaces.filter((p) => p !== path);
+    const next = [path, ...current].slice(0, MAX_RECENT_WORKSPACES);
+    persistRecentWorkspaces(next);
+    set({ recentWorkspaces: next });
+  },
+  clearRecentWorkspaces: () => {
+    persistRecentWorkspaces([]);
+    set({ recentWorkspaces: [] });
+  },
+  removeRecentWorkspace: (path: string) => {
+    const next = get().recentWorkspaces.filter((p) => p !== path);
+    persistRecentWorkspaces(next);
+    set({ recentWorkspaces: next });
+  },
+  openRecentWorkspace: async (path: string) => {
+    set({ isLoadingWorkspace: true, errorMessage: null });
+
+    try {
+      const workspace = await loadWorkspace(path);
+
+      let referenceLists: ReferenceListData[] = [];
+      try {
+        const listIndex = await getReferenceListsFromDisk();
+        referenceLists = await Promise.all(
+          listIndex.map(async (index) => {
+            const list = await getReferenceListFromDisk(index.id);
+            return list || { id: index.id, name: index.name, items: [] };
+          })
+        );
+      } catch (err) {
+        console.error("[OpenRecentWorkspace] Failed to load reference lists:", err);
+      }
+
+      const referenceEntries = buildReferenceEntriesFromLists(referenceLists);
+
+      get().saveRecentWorkspace(path);
+
+      set({
+        rootPath: workspace.rootPath,
+        rootName: workspace.rootName,
+        files: workspace.nodes,
+        activeFile: null,
+        referenceEntries,
+        referenceLists,
+        selectedListId: referenceLists[0]?.id ?? null,
+        errorMessage: null,
+        isLoadingWorkspace: false,
+      });
+    } catch (error) {
+      get().removeRecentWorkspace(path);
+      set({
+        isLoadingWorkspace: false,
+        errorMessage: error instanceof Error ? error.message : "Failed to open workspace.",
+      });
+    }
+  },
   trackFileChange: (path, oldContent, newContent) => {
     const oldLines = oldContent.split('\n');
     const newLines = newContent.split('\n');
@@ -286,11 +391,12 @@ export const useFileStore = create<FileState>()((set, get) => ({
 
       const referenceEntries = buildReferenceEntriesFromLists(referenceLists);
 
+      get().saveRecentWorkspace(selectedPath);
+
       set({
         rootPath: workspace.rootPath,
         rootName: workspace.rootName,
         files: workspace.nodes,
-        openTabs: [],
         activeFile: null,
         referenceEntries,
         referenceLists,
@@ -341,13 +447,16 @@ export const useFileStore = create<FileState>()((set, get) => ({
     }
   },
   refreshWorkspace: async () => {
-    const { rootPath, activeFile, openTabs } = get();
+    const { rootPath, activeFile, editorGroups, activeGroupId } = get();
     if (!rootPath) return;
+
+    const activeGroup = editorGroups.find((g) => g.id === activeGroupId);
+    const currentTabs = activeGroup?.tabs ?? [];
 
     try {
       const workspace = await loadWorkspaceTree(rootPath);
       const validTabs = await Promise.all(
-        openTabs
+        currentTabs
           .filter((tab) => getNodeByPath(workspace.nodes, tab.path))
           .map(async (tab) => {
             if (tab.isDirty) return tab;
@@ -390,7 +499,11 @@ export const useFileStore = create<FileState>()((set, get) => ({
       set({
         rootName: workspace.rootName,
         files: workspace.nodes,
-        openTabs: validTabs,
+        editorGroups: editorGroups.map((g) =>
+          g.id === activeGroupId
+            ? { ...g, tabs: validTabs, activeTabPath: nextActiveFile?.path ?? null }
+            : g
+        ),
         activeFile: nextActiveFile,
         referenceEntries,
         referenceLists,
@@ -402,10 +515,19 @@ export const useFileStore = create<FileState>()((set, get) => ({
       });
     }
   },
-  openFile: async (path) => {
-    const existingTab = get().openTabs.find((tab) => tab.path === path);
+  openFile: async (path, groupId) => {
+    const targetGroupId = groupId ?? get().activeGroupId;
+    const targetGroup = get().editorGroups.find((g) => g.id === targetGroupId);
+    if (!targetGroup) return;
+
+    const existingTab = targetGroup.tabs.find((tab) => tab.path === path);
     if (existingTab) {
-      set({ activeFile: existingTab });
+      set((state) => ({
+        activeFile: existingTab,
+        editorGroups: state.editorGroups.map((g) =>
+          g.id === targetGroupId ? { ...g, activeTabPath: path } : g
+        ),
+      }));
       return;
     }
 
@@ -422,11 +544,25 @@ export const useFileStore = create<FileState>()((set, get) => ({
         isDirty: false,
       };
 
-      set((state) => ({
-        openTabs: [...state.openTabs, newTab],
-        activeFile: newTab,
-        errorMessage: null,
-      }));
+      set((state) => {
+        const group = state.editorGroups.find((g) => g.id === targetGroupId);
+        if (!group || group.tabs.some((tab) => tab.path === path)) {
+          const existing = group?.tabs.find((tab) => tab.path === path) ?? null;
+          return { activeFile: existing };
+        }
+
+        const updatedGroups = state.editorGroups.map((g) =>
+          g.id === targetGroupId
+            ? { ...g, tabs: [...g.tabs, newTab], activeTabPath: path }
+            : g
+        );
+
+        return {
+          editorGroups: updatedGroups,
+          activeFile: targetGroupId === state.activeGroupId ? newTab : state.activeFile,
+          errorMessage: null,
+        };
+      });
     } catch (error) {
       set({
         errorMessage: error instanceof Error ? error.message : "Failed to open file.",
@@ -435,47 +571,67 @@ export const useFileStore = create<FileState>()((set, get) => ({
   },
   setActiveFile: (path) => {
     if (!path) {
-      set({ activeFile: null });
+      set((state) => ({
+        activeFile: null,
+        editorGroups: state.editorGroups.map((g) =>
+          g.id === state.activeGroupId ? { ...g, activeTabPath: null } : g
+        ),
+      }));
       return;
     }
 
-    const tab = get().openTabs.find((item) => item.path === path) ?? null;
-    set({ activeFile: tab });
+    const tab = get().getOpenTabs().find((item) => item.path === path) ?? null;
+    set((state) => ({
+      activeFile: tab,
+      editorGroups: state.editorGroups.map((g) =>
+        g.id === state.activeGroupId ? { ...g, activeTabPath: path } : g
+      ),
+    }));
   },
   closeTab: (path) => {
     set((state) => {
-      const nextTabs = state.openTabs.filter((tab) => tab.path !== path);
+      const activeGroup = state.editorGroups.find((g) => g.id === state.activeGroupId);
+      const currentTabs = activeGroup?.tabs ?? [];
+      const nextTabs = currentTabs.filter((tab) => tab.path !== path);
       const nextActive =
         state.activeFile?.path === path
           ? nextTabs[nextTabs.length - 1] ?? null
           : nextTabs.find((tab) => tab.path === state.activeFile?.path) ?? state.activeFile;
 
       return {
-        openTabs: nextTabs,
         activeFile: nextActive,
+        editorGroups: state.editorGroups.map((g) =>
+          g.id === state.activeGroupId
+            ? {
+                ...g,
+                tabs: nextTabs,
+                activeTabPath: nextActive?.path ?? null,
+              }
+            : g
+        ),
       };
     });
   },
   updateFileContent: (path, content) => {
     set((state) => {
-      const tab = state.openTabs.find((t) => t.path === path);
-      if (tab && tab.content !== content) {
-        state.trackFileChange(path, tab.content, content);
+      let tab: OpenFileTab | undefined;
+      for (const g of state.editorGroups) {
+        tab = g.tabs.find((t) => t.path === path);
+        if (tab) break;
       }
+      if (!tab || tab.content === content) return state;
 
-      const nextTabs = state.openTabs.map((tab) =>
-        tab.path === path
-          ? {
-              ...tab,
-              content,
-              isDirty: content !== tab.savedContent,
-            }
-          : tab
-      );
+      state.trackFileChange(path, tab.content, content);
+
+      const updatedTab = { ...tab, content, isDirty: content !== tab.savedContent };
+      const nextActive = state.activeFile?.path === path ? updatedTab : state.activeFile;
 
       return {
-        openTabs: nextTabs,
-        activeFile: nextTabs.find((tab) => tab.path === state.activeFile?.path) ?? null,
+        activeFile: nextActive,
+        editorGroups: state.editorGroups.map((g) => ({
+          ...g,
+          tabs: g.tabs.map((t) => (t.path === path ? updatedTab : t)),
+        })),
       };
     });
   },
@@ -483,26 +639,30 @@ export const useFileStore = create<FileState>()((set, get) => ({
     const targetPath = path ?? get().activeFile?.path;
     if (!targetPath) return;
 
-    const tab = get().openTabs.find((item) => item.path === targetPath);
+    const tab = get().getOpenTabs().find((item) => item.path === targetPath);
     if (!tab) return;
 
+    const contentToSave = tab.content;
+
     try {
-      await writeFile(targetPath, tab.content);
+      await writeFile(targetPath, contentToSave);
 
       set((state) => {
-        const nextTabs = state.openTabs.map((item) =>
+        const updateTab = (item: OpenFileTab) =>
           item.path === targetPath
-            ? {
-                ...item,
-                savedContent: item.content,
-                isDirty: false,
-              }
-            : item
-        );
+            ? { ...item, savedContent: contentToSave, isDirty: item.content !== contentToSave }
+            : item;
+
+        const updatedActive = state.activeFile?.path === targetPath
+          ? updateTab(state.activeFile)
+          : state.activeFile;
 
         return {
-          openTabs: nextTabs,
-          activeFile: nextTabs.find((item) => item.path === state.activeFile?.path) ?? null,
+          activeFile: updatedActive,
+          editorGroups: state.editorGroups.map((g) => ({
+            ...g,
+            tabs: g.tabs.map(updateTab),
+          })),
           errorMessage: null,
         };
       });
@@ -513,7 +673,7 @@ export const useFileStore = create<FileState>()((set, get) => ({
     }
   },
   saveAllFiles: async () => {
-    const dirtyTabs = get().openTabs.filter((tab) => tab.isDirty);
+    const dirtyTabs = get().getOpenTabs().filter((tab) => tab.isDirty);
     for (const tab of dirtyTabs) {
       await get().saveFile(tab.path);
     }
@@ -564,12 +724,22 @@ export const useFileStore = create<FileState>()((set, get) => ({
     try {
       const newPath = await renamePath(path, newName);
       set((state) => {
-        const nextTabs = updateTabsWithRenamedPath(state.openTabs, path, newPath, newName);
+        const renameInTabs = (tabs: OpenFileTab[]) =>
+          updateTabsWithRenamedPath(tabs, path, newPath, newName);
+
         const nextActivePath = state.activeFile?.path?.replace(path, newPath);
+        const updatedGroups = state.editorGroups.map((g) => ({
+          ...g,
+          tabs: renameInTabs(g.tabs),
+          activeTabPath: g.activeTabPath?.replace(path, newPath) ?? null,
+        }));
+
+        const activeGroup = updatedGroups.find((g) => g.id === state.activeGroupId);
+        const nextActive = activeGroup?.tabs.find((tab) => tab.path === nextActivePath || tab.path === newPath) ?? null;
 
         return {
-          openTabs: nextTabs,
-          activeFile: nextTabs.find((tab) => tab.path === nextActivePath || tab.path === newPath) ?? null,
+          editorGroups: updatedGroups,
+          activeFile: nextActive,
           errorMessage: null,
         };
       });
@@ -596,14 +766,24 @@ export const useFileStore = create<FileState>()((set, get) => ({
     try {
       await deletePath(path);
       set((state) => {
-        const nextTabs = filterTabsOutsidePath(state.openTabs, path);
-        const nextActive =
-          state.activeFile && nextTabs.some((tab) => tab.path === state.activeFile?.path)
-            ? nextTabs.find((tab) => tab.path === state.activeFile?.path) ?? null
-            : nextTabs[nextTabs.length - 1] ?? null;
+        const filterTabs = (tabs: OpenFileTab[]) => filterTabsOutsidePath(tabs, path);
+
+        const updatedGroups = state.editorGroups.map((g) => {
+          const remainingTabs = filterTabs(g.tabs);
+          return {
+            ...g,
+            tabs: remainingTabs,
+            activeTabPath: g.activeTabPath === path
+              ? (remainingTabs[remainingTabs.length - 1]?.path ?? null)
+              : g.activeTabPath,
+          };
+        });
+
+        const activeGroup = updatedGroups.find((g) => g.id === state.activeGroupId);
+        const nextActive = activeGroup?.tabs.find((t) => t.path === activeGroup.activeTabPath) ?? null;
 
         return {
-          openTabs: nextTabs,
+          editorGroups: updatedGroups,
           activeFile: nextActive,
           errorMessage: null,
         };
@@ -620,12 +800,22 @@ export const useFileStore = create<FileState>()((set, get) => ({
       const newPath = await movePath(sourcePath, destinationFolderPath);
       const movedName = newPath.split(/[/\\]/).pop() ?? newPath;
       set((state) => {
-        const nextTabs = updateTabsWithRenamedPath(state.openTabs, sourcePath, newPath, movedName);
+        const renameInTabs = (tabs: OpenFileTab[]) =>
+          updateTabsWithRenamedPath(tabs, sourcePath, newPath, movedName);
+
         const nextActivePath = state.activeFile?.path?.replace(sourcePath, newPath);
+        const updatedGroups = state.editorGroups.map((g) => ({
+          ...g,
+          tabs: renameInTabs(g.tabs),
+          activeTabPath: g.activeTabPath?.replace(sourcePath, newPath) ?? null,
+        }));
+
+        const activeGroup = updatedGroups.find((g) => g.id === state.activeGroupId);
+        const nextActive = activeGroup?.tabs.find((tab) => tab.path === nextActivePath || tab.path === newPath) ?? null;
 
         return {
-          openTabs: nextTabs,
-          activeFile: nextTabs.find((tab) => tab.path === nextActivePath || tab.path === newPath) ?? null,
+          editorGroups: updatedGroups,
+          activeFile: nextActive,
           errorMessage: null,
         };
       });
@@ -697,5 +887,82 @@ export const useFileStore = create<FileState>()((set, get) => ({
   },
   setSelectedListId: (listId) => {
     set({ selectedListId: listId });
+  },
+  splitEditor: (_direction) => {
+    const { editorGroups, activeFile } = get();
+    const newGroupId = `group-${Date.now()}`;
+    const newGroup = createEditorGroup(newGroupId);
+
+    if (activeFile) {
+      newGroup.tabs = [{ ...activeFile }];
+      newGroup.activeTabPath = activeFile.path;
+    }
+
+    set({
+      editorGroups: [...editorGroups, newGroup],
+      activeGroupId: newGroupId,
+    });
+  },
+  closeGroup: (groupId) => {
+    const { editorGroups, activeGroupId } = get();
+    if (editorGroups.length <= 1) return;
+
+    const remaining = editorGroups.filter((g) => g.id !== groupId);
+    const newActiveGroupId = activeGroupId === groupId
+      ? (remaining[remaining.length - 1]?.id ?? PRIMARY_GROUP_ID)
+      : activeGroupId;
+
+    const activeGroup = remaining.find((g) => g.id === newActiveGroupId);
+    set({
+      editorGroups: remaining,
+      activeGroupId: newActiveGroupId,
+      activeFile: activeGroup?.tabs.find((t) => t.path === activeGroup.activeTabPath) ?? null,
+    });
+  },
+  setActiveGroup: (groupId) => {
+    const { editorGroups } = get();
+    const group = editorGroups.find((g) => g.id === groupId);
+    if (!group) return;
+
+    set({
+      activeGroupId: groupId,
+      activeFile: group.tabs.find((t) => t.path === group.activeTabPath) ?? null,
+    });
+  },
+  moveTabToGroup: (tabPath, targetGroupId) => {
+    const { editorGroups, activeGroupId } = get();
+    const sourceGroup = editorGroups.find((g) => g.tabs.some((t) => t.path === tabPath));
+    const targetGroup = editorGroups.find((g) => g.id === targetGroupId);
+    if (!sourceGroup || !targetGroup || sourceGroup.id === targetGroupId) return;
+
+    const tab = sourceGroup.tabs.find((t) => t.path === tabPath);
+    if (!tab) return;
+
+    const updatedGroups = editorGroups.map((g) => {
+      if (g.id === sourceGroup.id) {
+        const remainingTabs = g.tabs.filter((t) => t.path !== tabPath);
+        return {
+          ...g,
+          tabs: remainingTabs,
+          activeTabPath: g.activeTabPath === tabPath
+            ? (remainingTabs[0]?.path ?? null)
+            : g.activeTabPath,
+        };
+      }
+      if (g.id === targetGroupId) {
+        return {
+          ...g,
+          tabs: [...g.tabs, tab],
+          activeTabPath: tab.path,
+        };
+      }
+      return g;
+    });
+
+    const activeGroup = updatedGroups.find((g) => g.id === activeGroupId);
+    set({
+      editorGroups: updatedGroups,
+      activeFile: activeGroup?.tabs.find((t) => t.path === activeGroup.activeTabPath) ?? null,
+    });
   },
 }));

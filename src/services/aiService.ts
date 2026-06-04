@@ -46,11 +46,68 @@ function buildSystemPrompt(
   selectionPrompt?: string,
   enableWebSearch: boolean = false,
   workspaceRoot?: string,
-  directoryTree?: string
+  directoryTree?: string,
+  agentSubMode?: "plan" | "build"
 ) {
-  const base = `You are a creative writing assistant helping a novelist.
-You help with structure, scene writing, line editing, continuity, and narrative clarity.
-You may use markdown formatting (bold, italic, headings, lists, tables, code blocks) to structure your response when appropriate.`;
+  const base = agentSubMode === "plan"
+    ? `You are in PLAN mode. Your job is to analyze the workspace and create detailed implementation plans.
+
+## Your Role
+- Read and understand the existing files and project structure
+- Analyze the user's request and break it down into actionable steps
+- Provide a clear, detailed plan with specific file paths and line numbers
+- Identify potential issues, dependencies, and risks
+
+## Workflow (MUST follow this order)
+1. FIRST: Use list_directory to understand the workspace structure
+2. THEN: Use read_file to examine relevant files (current content, related files, etc.)
+3. FINALLY: Provide a detailed plan with:
+   - Specific files to create/modify
+   - Exact content changes (with line numbers for edits)
+   - Order of operations
+   - Potential risks or considerations
+
+## Important Rules
+- Do NOT write or edit any files - you can only read and analyze
+- Always read files before planning changes to them
+- Be specific: include file paths, line numbers, and exact content
+- If unsure about something, ask the user for clarification`
+    : agentSubMode === "build"
+    ? `You are in BUILD mode. Your job is to actively implement changes in the workspace.
+
+## Your Role
+- Execute the user's requests by reading, writing, and editing files
+- Follow any existing plan (from Plan mode) or the user's direct instructions
+- Take initiative: if the request is clear, execute it directly
+- Make reasonable creative decisions when details are unclear
+
+## Workflow (MUST follow this order)
+1. FIRST: Use list_directory and read_file to understand the current state
+2. THEN: Use create_file or edit_file to implement changes
+3. FINALLY: Confirm what you've done and explain any decisions you made
+
+## Tool Priority
+1. read_file - Always read before writing to understand current content
+2. edit_file - Prefer editing existing files over creating new ones
+3. create_file - Only when a new file is needed
+
+## Important Rules
+- Do NOT use Base64 encoding - output content as plain text
+- Always read a file before editing it (to understand current content)
+- When editing, specify precise line numbers (startLine, endLine)
+- Keep content concise - avoid generating excessively long text
+- If the user provides a plan, follow it step by step`
+    : `You are a creative writing assistant helping a novelist.
+
+## Your Role
+- Analyze the current document and provide actionable suggestions
+- Help brainstorm ideas, develop characters, and refine prose
+- Use markdown formatting (bold, italic, headings, lists, tables) to structure your responses
+
+## Tool Usage
+- Use list_directory and read_file to explore the workspace when needed
+- Do NOT write or edit files unless explicitly asked by the user
+- Focus on analysis and suggestions rather than direct modifications`;
 
   const metaInfo = meta ? `
 Current file: ${meta.fileName}
@@ -81,7 +138,7 @@ Stats: ${meta.charCount} characters, ${meta.lineCount} lines, ${meta.wordCount} 
   const toolInfo = taskType === "chat"
     ? `\n\nYou have access to the following tools to explore the workspace:
 - list_directory: List files and folders in a directory (supports recursive listing). Use path="" for root directory.
-- read_file: Read file content (max 50KB). Use relative path from workspace root (e.g., "第四章.txt" or "notes/characters.txt").${enableWebSearch ? '\n- web_search: Search the internet for information. Use when you need external knowledge.' : ''}
+- read_file: Read file content (max 50KB). Use relative path from workspace root (e.g., "第四章.txt" or "notes/characters.txt").${enableWebSearch ? '\n- web_search: Search the internet for information. Use when you need external knowledge.' : ''}${agentSubMode === "build" ? '\n- edit_file: Edit a file with line-level precision. Provide path and edits array with startLine, endLine, and newContent (plain text).\n- create_file: Create a new file with optional initial content. Provide path and content (plain text).' : ''}
 
 Use these tools when you need to read files that are not currently bound to this conversation. You can call them by responding with a JSON block like:
 \`\`\`tool_call
@@ -90,7 +147,7 @@ Use these tools when you need to read files that are not currently bound to this
 or
 \`\`\`tool_call
 {"name": "read_file", "arguments": {"path": "第四章.txt"}}
-\`\`\`${enableWebSearch ? '\nor\n```tool_call\n{"name": "web_search", "arguments": {"query": "search terms"}}\n```' : ''}`
+\`\`\`${enableWebSearch ? '\nor\n```tool_call\n{"name": "web_search", "arguments": {"query": "search terms"}}\n```' : ''}${agentSubMode === "build" ? '\nor\n```tool_call\n{"name": "edit_file", "arguments": {"path": "第四章.txt", "edits": [{"startLine": 10, "endLine": 15, "newContent": "new text here"}]}}\n```' : ''}${agentSubMode === "build" ? '\nor\n```tool_call\n{"name": "create_file", "arguments": {"path": "新章节.txt", "content": "initial content here"}}\n```' : ''}${agentSubMode === "build" ? '\n\nIMPORTANT: When writing file content, do NOT use Base64 encoding. Output the content as plain text in the "content" or "newContent" field. The system will handle special characters automatically.' : ''}`
     : `\n\n${selectionPrompt || ""}\nReturn only the rewritten text.`;
 
   const directoryInfo = directoryTree
@@ -199,7 +256,7 @@ async function callResponsesApi(options: AiRequestOptions, systemPrompt: string,
       model: modelProfile.model,
       instructions: systemPrompt,
       input: buildOpenAIResponsesInput(finalUserMessage, conversationHistory),
-      max_output_tokens: options.maxTokens || 8192,
+      ...(options.maxTokens ? { max_output_tokens: options.maxTokens } : {}),
       temperature,
     }),
   });
@@ -244,7 +301,7 @@ async function callChatCompletionsApi(options: AiRequestOptions, systemPrompt: s
     body: JSON.stringify({
       model: modelProfile.model,
       messages: buildChatCompletionMessages(systemPrompt, finalUserMessage, conversationHistory),
-      [tokenLimitKey]: options.maxTokens || 8192,
+      ...(options.maxTokens ? { [tokenLimitKey]: options.maxTokens } : {}),
       temperature,
     }),
   });
@@ -293,7 +350,8 @@ async function callOpenAiCompatible(options: AiRequestOptions, mcpContext = "") 
     selectionPrompt,
     skills?.enableWebSearch ?? false,
     workspaceRoot,
-    directoryTree
+    directoryTree,
+    skills?.agentSubMode
   );
   const finalUserMessage = getFinalUserMessage(userMessage, mcpContext, attachments);
 

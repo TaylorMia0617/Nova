@@ -1,11 +1,10 @@
 import React, { useMemo, useState } from "react";
-import { FolderOpen, SaveAll, Settings, Globe, Minus, Square, X } from "lucide-react";
+import { FolderOpen, SaveAll, Settings, Globe } from "lucide-react";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useFileStore } from "../stores/fileStore";
 import { useTranslation } from "../hooks/useTranslation";
 import type { Locale } from "../i18n";
 import SettingsModal from "./SettingsModal";
-import icon from "../assets/icon.png";
 import "./Header.css";
 
 const LOCALE_OPTIONS: { value: Locale; label: string }[] = [
@@ -17,18 +16,18 @@ const Header: React.FC = () => {
   const { modelProfiles, defaultChatModelId, defaultSelectionModelId, language, setLanguage } = useSettingsStore();
   const { t } = useTranslation();
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [isAgentMode, setIsAgentMode] = useState(false);
+
   const {
     rootName,
     openWorkspace,
     saveAllFiles,
-    openTabs,
+    getOpenTabs,
     isLoadingWorkspace,
     errorMessage,
     setErrorMessage,
   } = useFileStore();
 
-  const dirtyCount = openTabs.filter((tab) => tab.isDirty).length;
+  const dirtyCount = getOpenTabs().filter((tab) => tab.isDirty).length;
   const chatModel = useMemo(
     () => modelProfiles.find((profile) => profile.id === defaultChatModelId) ?? null,
     [defaultChatModelId, modelProfiles]
@@ -38,40 +37,24 @@ const Header: React.FC = () => {
     [defaultSelectionModelId, modelProfiles]
   );
 
-  const handleMinimize = () => window.novelHost?.minimize();
-  const handleMaximize = () => window.novelHost?.maximize();
-  const handleClose = () => window.novelHost?.close();
-
   return (
     <>
       <header className="header">
         <div className="header-left">
-          <div className="header-logo">
-            <img src={icon} alt="Logo" className="header-icon" />
-          </div>
-          <div className="mode-toggle">
-            <button
-              className={`toggle-switch ${isAgentMode ? "active" : ""}`}
-              onClick={() => {
-                setIsAgentMode(!isAgentMode);
-              }}
-            >
-              <span className="toggle-text">
-                {isAgentMode ? t("header.agent") : t("header.copilot")}
-              </span>
-              <span className="toggle-knob" />
-            </button>
-          </div>
+          <span className="header-title">Nova</span>
+          {rootName && (
+            <>
+              <span className="header-separator">·</span>
+              <span className="workspace-name">{rootName}</span>
+            </>
+          )}
         </div>
         <div className="header-center">
-          {rootName && (
-            <span className="workspace-name">
-              {rootName}
-            </span>
-          )}
           {rootName && !errorMessage && (
             <span className="workspace-hint">
-              {t("header.chatModel")}: {chatModel?.label || t("header.notConfigured")} · {t("header.selectionModel")}: {selectionModel?.label || t("header.notConfigured")}
+              {t("header.chatModel")}: {chatModel?.label || t("header.notConfigured")}
+              <span className="header-separator">·</span>
+              {t("header.selectionModel")}: {selectionModel?.label || t("header.notConfigured")}
             </span>
           )}
           {errorMessage && (
@@ -107,17 +90,6 @@ const Header: React.FC = () => {
             <Settings size={16} />
             <span>{t("header.settings")}</span>
           </button>
-          <div className="window-controls">
-            <button className="window-control-btn" onClick={handleMinimize}>
-              <Minus size={14} />
-            </button>
-            <button className="window-control-btn" onClick={handleMaximize}>
-              <Square size={14} />
-            </button>
-            <button className="window-control-btn close" onClick={handleClose}>
-              <X size={14} />
-            </button>
-          </div>
         </div>
       </header>
       <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />

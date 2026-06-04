@@ -79,7 +79,7 @@ function buildTitleFromMessage(content: string) {
 }
 
 const CopilotPanel: React.FC = () => {
-  const { activeFile, rootPath, openTabs, files } = useFileStore();
+  const { activeFile, rootPath, getOpenTabs, files, refreshWorkspace } = useFileStore();
   const { modelProfiles, defaultChatModelId, getModelProfileById, chatMaxTokens, setChatMaxTokens, contextMaxLength, webSearchLimit } = useSettingsStore();
   const { t } = useTranslation();
   const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
@@ -97,8 +97,17 @@ const CopilotPanel: React.FC = () => {
   const [chatSkills, setChatSkills] = useState<ChatSkills>({
     enableWebSearch: false,
     thinkingDepth: "off",
+    agentSubMode: "plan",
   });
+  const [isAgentMode, setIsAgentMode] = useState(false);
   const [webSearchCount, setWebSearchCount] = useState(0);
+  const [agentTodo, setAgentTodo] = useState<{
+    tool: string;
+    path: string;
+    completedEdits: number;
+    totalEdits: number;
+    status: "running" | "truncated" | "continuing";
+  } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const lastDefaultChatModelIdRef = useRef(defaultChatModelId);
 
@@ -211,7 +220,7 @@ const CopilotPanel: React.FC = () => {
       .filter(([path]) => path !== activeFile.path)
       .slice(0, 5)
       .map(([path, cache]) => {
-        const tab = openTabs.find(t => t.path === path);
+        const tab = getOpenTabs().find(t => t.path === path);
         const tabContent = tab?.content ?? cache.content;
 
         return {
@@ -341,6 +350,7 @@ const CopilotPanel: React.FC = () => {
       setChatSkills({
         enableWebSearch: false,
         thinkingDepth: "off",
+        agentSubMode: "plan",
       });
     }
   }, [activeConversation?.id]);
@@ -472,7 +482,7 @@ const CopilotPanel: React.FC = () => {
         userMessage: userMessage.content,
         documentContext: multiFileContext?.activeFile.content || activeFile?.content || getEditorContent() || "",
         documentFileName: activeFile?.name,
-        maxTokens: chatMaxTokens,
+        maxTokens: isAgentMode ? undefined : chatMaxTokens,
         conversationHistory: nextMessages.slice(-6, -1),
         attachments: draftAttachments,
         multiFileContext,
@@ -484,61 +494,282 @@ const CopilotPanel: React.FC = () => {
 
       // 实现多轮工具调用循环
       let currentResponse = response;
-      const maxIterations = 100; // 最多100轮工具调用
+      const maxIterations = 100;
+      const WRITE_TOOLS = new Set(["edit_file", "create_file"]);
 
-      for (let iteration = 0; iteration < maxIterations; iteration++) {
-        let toolCallMatch = currentResponse.match(/```tool_call\s*\n([\s\S]*?)\n```/);
-        if (!toolCallMatch || !rootPath) break;
-        
-        const toolResults: Array<{ name: string; result: string }> = [];
-        
-        // 执行当前轮次的所有工具调用
-        while (toolCallMatch) {
-          try {
-            const toolCall = JSON.parse(toolCallMatch[1]);
-            const toolResult = await runLocalTool(
-              toolCall.name,
-              toolCall.arguments,
-              rootPath,
-              files,
-              {
-                enableWebSearch: chatSkills.enableWebSearch,
-                searchCount: webSearchCount,
-                searchLimit: webSearchLimit
-              }
-            );
-            
-            // 更新搜索计数
-            if (toolCall.name === "web_search" && !toolResult.result.startsWith("Error")) {
-              setWebSearchCount(prev => prev + 1);
-            }
-            
-            // 记录工具调用结果
-            toolResults.push({ name: toolCall.name, result: toolResult.result });
-            
-            // 移除已处理的工具调用
-            currentResponse = currentResponse.replace(toolCallMatch[0], '');
-            toolCallMatch = currentResponse.match(/```tool_call\s*\n([\s\S]*?)\n```/);
-          } catch (error) {
-            console.error("Tool call error:", error);
-            break;
+      const extractToolCalls = (text: string): Array<{ fullMatch: string; json: string }> => {
+        const results: Array<{ fullMatch: string; json: string }> = [];
+        const startPattern = /```tool_?call\s*\n/g;
+        let startMatch: RegExpExecArray | null;
+        while ((startMatch = startPattern.exec(text)) !== null) {
+          const startIndex = startMatch.index + startMatch[0].length;
+          const endMarker = text.indexOf('\n```', startIndex);
+          if (endMarker === -1) break;
+          const json = text.substring(startIndex, endMarker);
+          const fullMatch = text.substring(startMatch.index, endMarker + 4);
+          results.push({ fullMatch, json });
+        }
+        return results;
+      };
+
+      const isLikelyCompleteJson = (s: string): boolean => {
+        let depth = 0;
+        let inString = false;
+        let escape = false;
+        for (const ch of s) {
+          if (escape) { escape = false; continue; }
+          if (ch === '\\') { escape = true; continue; }
+          if (ch === '"') inString = !inString;
+          if (!inString) {
+            if (ch === '{') depth++;
+            if (ch === '}') depth--;
           }
         }
-        
-        // 如果有工具调用结果，将结果反馈给 AI 让它继续处理
+        return depth === 0 && !inString;
+      };
+
+      const extractField = (json: string, fieldName: string): string => {
+        const marker = `"${fieldName}": "`;
+        const startIdx = json.indexOf(marker);
+        if (startIdx === -1) return '';
+        const valueStart = startIdx + marker.length;
+        let endIdx = valueStart;
+        while (endIdx < json.length) {
+          if (json[endIdx] === '\\') {
+            endIdx += 2;
+            continue;
+          }
+          if (json[endIdx] === '"') break;
+          endIdx++;
+        }
+        return json.substring(valueStart, endIdx)
+          .replace(/\\n/g, '\n')
+          .replace(/\\r/g, '\r')
+          .replace(/\\t/g, '\t')
+          .replace(/\\"/g, '"')
+          .replace(/\\\\/g, '\\');
+      };
+
+      const parseToolCall = (json: string): { name: string; args: Record<string, unknown> } | null => {
+        const name = extractField(json, 'name');
+        if (!name) return null;
+
+        const path = extractField(json, 'path');
+
+        if (name === 'create_file') {
+          const content = extractField(json, 'content');
+          return { name, args: { path, content } };
+        }
+
+        if (name === 'edit_file') {
+          const editsMatch = json.match(/"edits"\s*:\s*\[/);
+          if (!editsMatch) return { name, args: { path, edits: [] } };
+
+          const editsStart = editsMatch.index! + editsMatch[0].length;
+          const editsJson = json.substring(editsStart);
+          const edits: Array<{ startLine: number; endLine: number; newContent: string }> = [];
+
+          const editRegex = /\{\s*"startLine"\s*:\s*(\d+)\s*,\s*"endLine"\s*:\s*(\d+)\s*,\s*"newContent"\s*:\s*"/g;
+          let editMatch;
+          while ((editMatch = editRegex.exec(editsJson)) !== null) {
+            const startLine = parseInt(editMatch[1], 10);
+            const endLine = parseInt(editMatch[2], 10);
+            const contentStart = editMatch.index + editMatch[0].length;
+            let contentEnd = contentStart;
+            while (contentEnd < editsJson.length) {
+              if (editsJson[contentEnd] === '\\') {
+                contentEnd += 2;
+                continue;
+              }
+              if (editsJson[contentEnd] === '"') break;
+              contentEnd++;
+            }
+            const newContent = editsJson.substring(contentStart, contentEnd)
+              .replace(/\\n/g, '\n')
+              .replace(/\\r/g, '\r')
+              .replace(/\\t/g, '\t')
+              .replace(/\\"/g, '"')
+              .replace(/\\\\/g, '\\');
+            edits.push({ startLine, endLine, newContent });
+          }
+          return { name, args: { path, edits } };
+        }
+
+        try {
+          const parsed = JSON.parse(json);
+          return { name: parsed.name, args: parsed.arguments ?? {} };
+        } catch {
+          return { name, args: { path } };
+        }
+      };
+
+      const extractPartialEditFile = (json: string): {
+        path: string;
+        completedEdits: Array<{ startLine: number; endLine: number; newContent: string }>;
+        lastPartialEdit: { startLine: number; endLine: number; partialContent: string } | null;
+        estimatedTotalEdits: number;
+      } | null => {
+        const path = extractField(json, 'path');
+        if (!path) return null;
+
+        const editsMatch = json.match(/"edits"\s*:\s*\[/);
+        if (!editsMatch) return { path, completedEdits: [], lastPartialEdit: null, estimatedTotalEdits: 0 };
+
+        const editsStart = editsMatch.index! + editsMatch[0].length;
+        const editsJson = json.substring(editsStart);
+        const completedEdits: Array<{ startLine: number; endLine: number; newContent: string }> = [];
+
+        const editRegex = /\{\s*"startLine"\s*:\s*(\d+)\s*,\s*"endLine"\s*:\s*(\d+)\s*,\s*"newContent"\s*:\s*"/g;
+        let editMatch;
+        while ((editMatch = editRegex.exec(editsJson)) !== null) {
+          const startLine = parseInt(editMatch[1], 10);
+          const endLine = parseInt(editMatch[2], 10);
+          const contentStart = editMatch.index + editMatch[0].length;
+          let contentEnd = contentStart;
+          while (contentEnd < editsJson.length) {
+            if (editsJson[contentEnd] === '\\') { contentEnd += 2; continue; }
+            if (editsJson[contentEnd] === '"') break;
+            contentEnd++;
+          }
+
+          if (contentEnd < editsJson.length) {
+            const newContent = editsJson.substring(contentStart, contentEnd)
+              .replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t')
+              .replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+            completedEdits.push({ startLine, endLine, newContent });
+          } else {
+            return {
+              path,
+              completedEdits,
+              lastPartialEdit: { startLine, endLine, partialContent: editsJson.substring(contentStart) },
+              estimatedTotalEdits: completedEdits.length + 1
+            };
+          }
+        }
+
+        return { path, completedEdits, lastPartialEdit: null, estimatedTotalEdits: completedEdits.length };
+      };
+
+      const MAX_CONTINUATION_RETRIES = 3;
+      let continuationCount = 0;
+
+      for (let iteration = 0; iteration < maxIterations; iteration++) {
+        const extractedCalls = extractToolCalls(currentResponse);
+        if (extractedCalls.length === 0 || !rootPath) break;
+
+        const toolResults: Array<{ name: string; result: string }> = [];
+        const writeOps: Array<{ name: string; path: string }> = [];
+
+        for (const call of extractedCalls) {
+          if (!isLikelyCompleteJson(call.json)) {
+            console.warn("tool_call incomplete, attempting continuation:", call.json.substring(0, 100));
+
+            if (continuationCount >= MAX_CONTINUATION_RETRIES) {
+              console.warn("Max continuation retries reached, skipping");
+              setAgentTodo(null);
+              currentResponse = currentResponse.replace(call.fullMatch, "");
+              continue;
+            }
+
+            const partial = extractPartialEditFile(call.json);
+            if (partial && partial.completedEdits.length > 0) {
+              setAgentTodo({
+                tool: "edit_file",
+                path: partial.path,
+                completedEdits: partial.completedEdits.length,
+                totalEdits: partial.estimatedTotalEdits,
+                status: "truncated"
+              });
+
+              const partialArgs = { path: partial.path, edits: partial.completedEdits };
+              const toolResult = await runLocalTool("edit_file", partialArgs, rootPath, files, {
+                enableWebSearch: chatSkills.enableWebSearch,
+                searchCount: webSearchCount,
+                searchLimit: webSearchLimit,
+                agentSubMode: isAgentMode ? chatSkills.agentSubMode : undefined,
+              });
+              toolResults.push({ name: "edit_file", result: toolResult.result });
+              await refreshWorkspace();
+
+              const todoInfo = {
+                tool: "edit_file",
+                path: partial.path,
+                completedEditLines: partial.completedEdits.map(e => `${e.startLine}-${e.endLine}`).join(", "),
+                lastPartialEdit: partial.lastPartialEdit
+              };
+
+              setStatusText(`Continuing edit on ${partial.path} (attempt ${continuationCount + 1})...`);
+              setAgentTodo(prev => prev ? { ...prev, status: "continuing" } : null);
+
+              currentResponse = await callAI({
+                modelProfile: currentModel,
+                taskType: "chat",
+                userMessage: `Your previous edit_file response was truncated. Here's your progress:\n\n${JSON.stringify(todoInfo, null, 2)}\n\nPlease continue the edit_file operation for "${partial.path}". Apply only the remaining edits that were not completed.`,
+                documentContext: multiFileContext?.activeFile.content || activeFile?.content || getEditorContent() || "",
+                documentFileName: activeFile?.name,
+                maxTokens: isAgentMode ? undefined : chatMaxTokens,
+                conversationHistory: nextMessages.slice(-6, -1),
+                attachments: draftAttachments,
+                multiFileContext,
+                contextMaxLength,
+                skills: chatSkills,
+                workspaceRoot: rootPath ?? undefined,
+                directoryTree: directoryTree,
+              });
+
+              continuationCount++;
+              currentResponse = currentResponse.replace(call.fullMatch, "");
+            } else {
+              setAgentTodo(null);
+              currentResponse = currentResponse.replace(call.fullMatch, "");
+            }
+            continue;
+          }
+
+          try {
+            const parsed = parseToolCall(call.json);
+            if (!parsed) {
+              console.error("Failed to extract tool_call fields:", call.json.substring(0, 100));
+              currentResponse = currentResponse.replace(call.fullMatch, "");
+              continue;
+            }
+
+            const toolResult = await runLocalTool(parsed.name, parsed.args, rootPath, files, {
+              enableWebSearch: chatSkills.enableWebSearch,
+              searchCount: webSearchCount,
+              searchLimit: webSearchLimit,
+              agentSubMode: isAgentMode ? chatSkills.agentSubMode : undefined,
+            });
+
+            if (parsed.name === "web_search" && !toolResult.result.startsWith("Error")) {
+              setWebSearchCount(prev => prev + 1);
+            }
+
+            if (WRITE_TOOLS.has(parsed.name) && !toolResult.result.startsWith("Error")) {
+              writeOps.push({ name: parsed.name, path: parsed.args?.path as string ?? "" });
+              await refreshWorkspace();
+            }
+
+            toolResults.push({ name: parsed.name, result: toolResult.result });
+            currentResponse = currentResponse.replace(call.fullMatch, "");
+          } catch (parseError) {
+            console.error("Failed to parse tool_call:", call.json.substring(0, 100), parseError);
+            currentResponse = currentResponse.replace(call.fullMatch, "");
+          }
+        }
+
         if (toolResults.length > 0) {
           const toolContext = toolResults.map(r => `Tool: ${r.name}\nResult: ${r.result}`).join("\n\n");
-          
-          // 更新中间结果显示
+
           setStatusText(`Processing tool results (iteration ${iteration + 1})...`);
-          
+
           currentResponse = await callAI({
             modelProfile: currentModel,
             taskType: "chat",
             userMessage: `Based on the tool results below, please continue with your task:\n\n${toolContext}`,
             documentContext: multiFileContext?.activeFile.content || activeFile?.content || getEditorContent() || "",
             documentFileName: activeFile?.name,
-            maxTokens: chatMaxTokens,
+        maxTokens: isAgentMode ? undefined : chatMaxTokens,
             conversationHistory: nextMessages.slice(-6, -1),
             attachments: draftAttachments,
             multiFileContext,
@@ -547,14 +778,14 @@ const CopilotPanel: React.FC = () => {
             workspaceRoot: rootPath ?? undefined,
             directoryTree: directoryTree,
           });
-          
-          // 检查 AI 的回复是否包含更多工具调用
-          if (!currentResponse.match(/```tool_call\s*\n([\s\S]*?)\n```/)) {
-            // AI 不再调用工具，显示最终回复
+
+          if (extractToolCalls(currentResponse).length === 0) {
             break;
           }
         }
       }
+
+      setAgentTodo(null);
       
       // 组合最终响应（只显示 AI 的最终回复）
       response = currentResponse;
@@ -622,6 +853,14 @@ const CopilotPanel: React.FC = () => {
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === "Tab" && isAgentMode) {
+      e.preventDefault();
+      setChatSkills(prev => ({
+        ...prev,
+        agentSubMode: prev.agentSubMode === "plan" ? "build" : "plan",
+      }));
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       void handleSendMessage();
@@ -750,6 +989,34 @@ const CopilotPanel: React.FC = () => {
             <span>{t("copilot.insertSelection")}</span>
           </button>
         )}
+        {agentTodo && (
+          <div className="agent-todo">
+            <div className="agent-todo-header">
+              <span className="agent-todo-icon">📝</span>
+              <span className="agent-todo-title">Agent 进度</span>
+            </div>
+            <div className="agent-todo-content">
+              <span className="agent-todo-tool">{agentTodo.tool}</span>
+              <span className="agent-todo-path">{agentTodo.path}</span>
+            </div>
+            <div className="agent-todo-progress">
+              <div className="agent-todo-bar">
+                <div
+                  className="agent-todo-bar-fill"
+                  style={{ width: `${(agentTodo.completedEdits / agentTodo.totalEdits) * 100}%` }}
+                />
+              </div>
+              <span className="agent-todo-count">
+                {agentTodo.completedEdits}/{agentTodo.totalEdits} edits
+              </span>
+            </div>
+            <div className={`agent-todo-status agent-todo-status-${agentTodo.status}`}>
+              {agentTodo.status === "running" && "执行中..."}
+              {agentTodo.status === "truncated" && "响应截断，正在续写..."}
+              {agentTodo.status === "continuing" && "续写中..."}
+            </div>
+          </div>
+        )}
         <div className="input-area">
           <div className="input-toolbar">
             <button
@@ -780,39 +1047,64 @@ const CopilotPanel: React.FC = () => {
               </button>
             )}
           </div>
-          {draftAttachments.length > 0 && (
-            <div className="draft-attachments">
-              {draftAttachments.map((attachment) => (
-                <div key={attachment.id} className="draft-attachment-chip">
-                  <div>
-                    <strong>{attachment.name}</strong>
-                    <span>{Math.max(1, Math.round(attachment.size / 1024))} KB</span>
-                  </div>
-                  <button type="button" onClick={() => setDraftAttachments((current) => current.filter((item) => item.id !== attachment.id))} disabled={isLoading}>
-                    <X size={12} />
+          <div className="input-textbox-wrapper">
+            {isAgentMode && (
+              <button
+                type="button"
+                className="agent-mode-toggle"
+                onClick={() => setChatSkills(prev => ({
+                  ...prev,
+                  agentSubMode: prev.agentSubMode === "plan" ? "build" : "plan",
+                }))}
+              >
+                {chatSkills.agentSubMode === "plan" ? t("copilot.plan") : t("copilot.build")}
+              </button>
+            )}
+            <textarea
+              value={input}
+              onChange={(e) => {
+                setInput(e.target.value);
+                if (activeConversation) {
+                  setActiveConversation({
+                    ...activeConversation,
+                    draftInput: e.target.value,
+                  });
+                }
+              }}
+              onKeyDown={handleKeyPress}
+              placeholder={currentModel ? t("copilot.askAI") : t("copilot.configureModel")}
+              disabled={!currentModel || isLoading}
+              rows={4}
+            />
+            {draftAttachments.length > 0 && (
+              <div className="draft-attachments-inline">
+                {draftAttachments.map((attachment) => (
+                  <button
+                    key={attachment.id}
+                    type="button"
+                    className="draft-attachment-icon"
+                    onClick={() => setDraftAttachments((current) => current.filter((item) => item.id !== attachment.id))}
+                    disabled={isLoading}
+                    title={attachment.name}
+                  >
+                    <Paperclip size={12} />
+                    <span className="draft-attachment-name">{attachment.name}</span>
+                    <X size={10} />
                   </button>
-                </div>
-              ))}
-            </div>
-          )}
-           <textarea
-            value={input}
-            onChange={(e) => {
-              setInput(e.target.value);
-              if (activeConversation) {
-                setActiveConversation({
-                  ...activeConversation,
-                  draftInput: e.target.value,
-                });
-              }
-            }}
-            onKeyDown={handleKeyPress}
-            placeholder={currentModel ? t("copilot.askAI") : t("copilot.configureModel")}
-            disabled={!currentModel || isLoading}
-            rows={4}
-          />
+                ))}
+              </div>
+            )}
+          </div>
           <div className="input-footer">
             <div className="skills-toolbar">
+              <button
+                type="button"
+                className={`skill-pill ${isAgentMode ? "active" : ""}`}
+                onClick={() => setIsAgentMode(prev => !prev)}
+              >
+                {isAgentMode ? t("header.agent") : t("header.copilot")}
+              </button>
+
               <button
                 type="button"
                 className={`skill-pill ${chatSkills.enableWebSearch ? "active" : ""}`}

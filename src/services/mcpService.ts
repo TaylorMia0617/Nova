@@ -1,6 +1,6 @@
 import type { ModelProfile } from "../types/ai";
 import type { McpTool, McpToolResult } from "../types/ai";
-import { readFile, readDirectory } from "./fileSystemService";
+import { readFile, readDirectory, writeFile, createFile } from "./fileSystemService";
 import type { WorkspaceNode } from "./fileSystemService";
 import { searchWithTavily } from "./searchService";
 
@@ -64,10 +64,67 @@ const LOCAL_FILESYSTEM_TOOLS: McpTool[] = [
       },
       required: ["query"]
     }
+  },
+  {
+    name: "edit_file",
+    description: "对指定文件进行行级编辑（支持替换、插入、删除操作）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "文件路径（相对于工作区根目录）"
+        },
+        edits: {
+          type: "array",
+          description: "编辑操作列表，按顺序执行",
+          items: {
+            type: "object",
+            properties: {
+              startLine: {
+                type: "number",
+                description: "起始行号（1-based）"
+              },
+              endLine: {
+                type: "number",
+                description: "结束行号（含，1-based）"
+              },
+              newContent: {
+                type: "string",
+                description: "新内容（删除时留空或省略）"
+              }
+            },
+            required: ["startLine", "endLine"]
+          }
+        }
+      },
+      required: ["path", "edits"]
+    }
+  },
+  {
+    name: "create_file",
+    description: "创建新文件并写入内容",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "文件路径（相对于工作区根目录）"
+        },
+        content: {
+          type: "string",
+          description: "文件初始内容（可选，默认为空）"
+        }
+      },
+      required: ["path"]
+    }
   }
 ];
 
-export function getLocalTools(): McpTool[] {
+export function getLocalTools(agentSubMode?: "plan" | "build"): McpTool[] {
+  if (agentSubMode === "plan") {
+    return LOCAL_FILESYSTEM_TOOLS.filter(t => t.name !== "edit_file" && t.name !== "create_file");
+  }
   return LOCAL_FILESYSTEM_TOOLS;
 }
 
@@ -108,9 +165,13 @@ export async function runLocalTool(
   args: Record<string, unknown>,
   workspaceRoot: string,
   workspaceNodes: WorkspaceNode[],
-  options?: { enableWebSearch?: boolean; searchCount?: number; searchLimit?: number }
+  options?: { enableWebSearch?: boolean; searchCount?: number; searchLimit?: number; agentSubMode?: "plan" | "build" }
 ): Promise<McpToolResult> {
   try {
+    if ((toolName === "edit_file" || toolName === "create_file") && options?.agentSubMode === "plan") {
+      return { toolName, result: `Error: ${toolName} is not available in Plan mode. Switch to Build mode to make edits.` };
+    }
+
     switch (toolName) {
       case "list_directory": {
         const relativePath = (args.path as string) || "";
@@ -213,6 +274,175 @@ export async function runLocalTool(
           return { toolName, result };
         } catch (error) {
           return { toolName, result: `Error: ${error instanceof Error ? error.message : String(error)}` };
+        }
+      }
+      case "edit_file": {
+        const relativePath = args.path as string;
+        const edits = args.edits as Array<{ startLine: number; endLine: number; newContent?: string }>;
+        if (!relativePath) {
+          return { toolName, result: "Error: path is required" };
+        }
+        if (!Array.isArray(edits) || edits.length === 0) {
+          return { toolName, result: "Error: edits array is required and must not be empty" };
+        }
+
+        const MAX_CONTENT_SIZE = 100 * 1024;
+        for (const edit of edits) {
+          if (edit.newContent && edit.newContent.length > MAX_CONTENT_SIZE) {
+            return { toolName, result: `Error: Edit content too large (${edit.newContent.length} bytes). Maximum is ${MAX_CONTENT_SIZE} bytes.` };
+          }
+        }
+
+        const separator = workspaceRoot.includes("\\") ? "\\" : "/";
+        const normalizedRoot = workspaceRoot.replace(/[/\\]+$/, "");
+        const targetPath = `${normalizedRoot}${separator}${relativePath.replace(/[/\\]/g, separator)}`;
+
+        console.log("[edit_file] workspaceRoot:", workspaceRoot);
+        console.log("[edit_file] relativePath:", relativePath);
+        console.log("[edit_file] targetPath:", targetPath);
+        console.log("[edit_file] edits count:", edits.length);
+
+        const tryReadFile = async (path: string): Promise<string> => {
+          try {
+            return await readFile(path);
+          } catch {
+            const parentPath = path.substring(0, path.lastIndexOf(separator));
+            if (parentPath) {
+              await readDirectory(parentPath);
+              return await readFile(path);
+            }
+            throw new Error(`Could not find file: ${relativePath}`);
+          }
+        };
+
+        const tryWriteFile = async (path: string, content: string): Promise<void> => {
+          try {
+            await writeFile(path, content);
+          } catch (writeError) {
+            console.error("[edit_file] writeFile failed:", writeError);
+            const parentPath = path.substring(0, path.lastIndexOf(separator));
+            if (parentPath) {
+              await readDirectory(parentPath);
+              await writeFile(path, content);
+              return;
+            }
+            throw new Error(`Could not write file: ${relativePath}`);
+          }
+        };
+
+        try {
+          const content = await tryReadFile(targetPath);
+          const lines = content.split("\n");
+
+          const sortedEdits = [...edits].sort((a, b) => b.startLine - a.startLine);
+
+          for (const edit of sortedEdits) {
+            const { startLine, endLine, newContent } = edit;
+            if (startLine < 1 || endLine < startLine || endLine > lines.length) {
+              return { toolName, result: `Error: Invalid line range ${startLine}-${endLine} for file with ${lines.length} lines` };
+            }
+            const newLines = newContent ? newContent.split("\n") : [];
+            lines.splice(startLine - 1, endLine - startLine + 1, ...newLines);
+          }
+
+          await tryWriteFile(targetPath, lines.join("\n"));
+          console.log("[edit_file] writeFile succeeded");
+
+          const verifyContent = await tryReadFile(targetPath);
+          const expectedContent = lines.join("\n");
+          console.log("[edit_file] verifyContent length:", verifyContent.length);
+          if (verifyContent !== expectedContent) {
+            console.error("[edit_file] Verification failed! Expected", expectedContent.length, "bytes but got", verifyContent.length, "bytes");
+            return { toolName, result: `Error: File content verification failed for ${relativePath}. Expected ${expectedContent.length} bytes but got ${verifyContent.length} bytes.` };
+          }
+
+          return { toolName, result: `Successfully edited ${relativePath}: ${edits.length} edit(s) applied.` };
+        } catch (error) {
+          console.error("[edit_file] Error:", error);
+          return { toolName, result: `Error editing file: ${error instanceof Error ? error.message : String(error)}` };
+        }
+      }
+      case "create_file": {
+        const relativePath = args.path as string;
+        const content = (args.content as string) || "";
+        if (!relativePath) {
+          return { toolName, result: "Error: path is required" };
+        }
+
+        const MAX_CREATE_CONTENT_SIZE = 100 * 1024;
+        if (content.length > MAX_CREATE_CONTENT_SIZE) {
+          return { toolName, result: `Error: Content too large (${content.length} bytes). Maximum is ${MAX_CREATE_CONTENT_SIZE} bytes.` };
+        }
+
+        const separator = workspaceRoot.includes("\\") ? "\\" : "/";
+        const normalizedRoot = workspaceRoot.replace(/[/\\]+$/, "");
+        const targetPath = `${normalizedRoot}${separator}${relativePath.replace(/[/\\]/g, separator)}`;
+
+        console.log("[create_file] workspaceRoot:", workspaceRoot);
+        console.log("[create_file] relativePath:", relativePath);
+        console.log("[create_file] targetPath:", targetPath);
+        console.log("[create_file] content length:", content.length);
+        console.log("[create_file] content preview:", content.substring(0, 100));
+
+        const tryReadFile = async (path: string): Promise<string> => {
+          try {
+            return await readFile(path);
+          } catch {
+            const parentPath = path.substring(0, path.lastIndexOf(separator));
+            if (parentPath) {
+              await readDirectory(parentPath);
+              return await readFile(path);
+            }
+            throw new Error(`Could not read file: ${relativePath}`);
+          }
+        };
+
+        const tryWriteFile = async (path: string, data: string): Promise<void> => {
+          try {
+            await writeFile(path, data);
+          } catch (writeError) {
+            console.error("[create_file] writeFile failed:", writeError);
+            const parentPath = path.substring(0, path.lastIndexOf(separator));
+            if (parentPath) {
+              await readDirectory(parentPath);
+              await writeFile(path, data);
+              return;
+            }
+            throw new Error(`Could not write file: ${relativePath}`);
+          }
+        };
+
+        try {
+          try {
+            await createFile(targetPath);
+            console.log("[create_file] createFile succeeded");
+          } catch (createError) {
+            const errorMsg = createError instanceof Error ? createError.message : String(createError);
+            if (errorMsg.includes("already exists")) {
+              console.log("[create_file] File already exists, skipping creation");
+            } else {
+              throw createError;
+            }
+          }
+
+          if (content) {
+            await tryWriteFile(targetPath, content);
+            console.log("[create_file] writeFile succeeded");
+          }
+
+          const verifyContent = await tryReadFile(targetPath);
+          console.log("[create_file] verifyContent length:", verifyContent.length);
+          console.log("[create_file] verifyContent preview:", verifyContent.substring(0, 100));
+
+          if (content && verifyContent !== content) {
+            console.error("[create_file] Verification failed! Expected", content.length, "bytes but got", verifyContent.length, "bytes");
+            return { toolName, result: `Error: File content verification failed for ${relativePath}. Expected ${content.length} bytes but got ${verifyContent.length} bytes.` };
+          }
+
+          return { toolName, result: `Successfully created file: ${relativePath} (${verifyContent.length} bytes)` };
+        } catch (error) {
+          console.error("[create_file] Error:", error);
+          return { toolName, result: `Error creating file: ${error instanceof Error ? error.message : String(error)}` };
         }
       }
       default:

@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import AssetsPanel from "./components/AssetsPanel";
 import Header from "./components/Header";
+import MenuBar from "./components/MenuBar";
 import { useTranslation } from "./hooks/useTranslation";
 
 const EditorPanel = lazy(() => import("./components/EditorPanel"));
@@ -57,6 +58,7 @@ function App() {
 
   return (
     <div className={`app-container ${dragTarget ? "is-resizing" : ""}`}>
+      <MenuBar />
       <Header />
       <div className="main-content">
         <div className="resizable-pane left-pane" style={{ width: leftWidth }}>

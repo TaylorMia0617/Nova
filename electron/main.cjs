@@ -473,6 +473,27 @@ async function pickAttachments() {
   return files;
 }
 
+async function pickImages() {
+  const result = await dialog.showOpenDialog({
+    properties: ["openFile", "multiSelections"],
+    filters: [
+      {
+        name: "Image Files",
+        extensions: ["jpg", "jpeg", "png", "gif", "bmp", "webp", "svg"],
+      },
+    ],
+  });
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return [];
+  }
+
+  return result.filePaths.map((filePath) => ({
+    path: filePath,
+    name: path.basename(filePath),
+  }));
+}
+
 async function readAttachmentText(filePath) {
   const extension = path.extname(filePath).toLowerCase();
   if (!TEXT_ATTACHMENT_EXTENSIONS.has(extension)) {
@@ -756,7 +777,11 @@ async function createWindow() {
     },
   });
 
-  mainWindow = win;
+  windows.add(win);
+
+  win.on("closed", () => {
+    windows.delete(win);
+  });
 
   if (isDev) {
     await win.loadURL("http://127.0.0.1:1420");
@@ -815,26 +840,34 @@ app.on("will-quit", () => {
 // ─── IPC Handlers ─────────────────────────────────────────────────────────────
 
 // Window controls
-let mainWindow = null;
+const windows = new Set();
 
-ipcMain.handle("window:minimize", () => {
-  mainWindow?.minimize();
+ipcMain.handle("window:minimize", (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  win?.minimize();
 });
 
-ipcMain.handle("window:maximize", () => {
-  if (mainWindow?.isMaximized()) {
-    mainWindow.unmaximize();
+ipcMain.handle("window:maximize", (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win?.isMaximized()) {
+    win.unmaximize();
   } else {
-    mainWindow?.maximize();
+    win?.maximize();
   }
 });
 
-ipcMain.handle("window:close", () => {
-  mainWindow?.close();
+ipcMain.handle("window:close", (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  win?.close();
 });
 
-ipcMain.handle("window:isMaximized", () => {
-  return mainWindow?.isMaximized() ?? false;
+ipcMain.handle("window:isMaximized", (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  return win?.isMaximized() ?? false;
+});
+
+ipcMain.handle("window:createNew", () => {
+  createWindow();
 });
 
 ipcMain.handle("fs:pickWorkspace", async () => {
@@ -944,10 +977,7 @@ ipcMain.handle("reference:deleteList", async (_event, listId) => {
 
 ipcMain.handle("fs:createFile", async (_event, filePath) => {
   const { normalizedPath } = getValidatedEntryName(filePath);
-  if (await pathExists(normalizedPath)) {
-    throw new Error("A file or folder with that name already exists.");
-  }
-  const handle = await fs.open(normalizedPath, "wx");
+  const handle = await fs.open(normalizedPath, "w");
   await handle.close();
 });
 
@@ -1061,6 +1091,10 @@ ipcMain.handle("ai:testMcpConnection", async (_event, profile) => {
 
 ipcMain.handle("ai:pickAttachments", async () => {
   return pickAttachments();
+});
+
+ipcMain.handle("ai:pickImages", async () => {
+  return pickImages();
 });
 
 ipcMain.handle("ai:readAttachmentText", async (_event, filePath) => {

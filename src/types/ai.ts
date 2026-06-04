@@ -59,6 +59,7 @@ export interface ConversationRecord extends ConversationSummary {
 export interface ChatSkills {
   enableWebSearch: boolean;
   thinkingDepth: "off" | "low" | "medium" | "high";
+  agentSubMode: "plan" | "build";
 }
 
 export type AiTaskType = "chat" | "polish" | "correct" | "stylize";
@@ -108,12 +109,20 @@ export interface MultiFileContext {
   }>;
 }
 
+export interface McpToolProperty {
+  type: string;
+  description?: string;
+  items?: McpToolProperty;
+  properties?: Record<string, McpToolProperty>;
+  required?: string[];
+}
+
 export interface McpTool {
   name: string;
   description: string;
   inputSchema: {
     type: string;
-    properties: Record<string, { type: string; description: string }>;
+    properties: Record<string, McpToolProperty>;
     required: string[];
   };
 }
