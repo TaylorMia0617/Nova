@@ -29,6 +29,8 @@ interface NovelHostApi {
   readDirectory: (directoryPath: string, options?: { recursive?: boolean }) => Promise<WorkspaceNode[]>;
   readFile: (path: string) => Promise<string>;
   writeFile: (path: string, content: string) => Promise<void>;
+  readFileBinary: (path: string) => Promise<string>;
+  writeFileBinary: (path: string, base64Content: string) => Promise<void>;
   createFile: (path: string) => Promise<void>;
   createFolder: (path: string) => Promise<void>;
   renamePath: (path: string, newName: string) => Promise<string>;
@@ -42,6 +44,29 @@ interface NovelHostApi {
     record: import("../types/ai").ConversationRecord
   ) => Promise<import("../types/ai").ConversationSummary[]>;
   deleteConversation?: (conversationId: string) => Promise<import("../types/ai").ConversationSummary[]>;
+  listVersionSnapshots?: () => Promise<import("../types/versionHistory").VersionSnapshot[]>;
+  appendVersionSnapshot?: (
+    snapshot: import("../types/versionHistory").VersionSnapshot
+  ) => Promise<import("../types/versionHistory").VersionSnapshot[]>;
+  updateVersionSnapshotPaths?: (
+    oldPath: string,
+    newPath: string
+  ) => Promise<import("../types/versionHistory").VersionSnapshot[]>;
+  pruneVersionSnapshots?: () => Promise<import("../types/versionHistory").VersionSnapshot[]>;
+  listBlueprints?: () => Promise<import("../types/blueprint").BlueprintDocument[]>;
+  saveBlueprint?: (
+    blueprint: import("../types/blueprint").BlueprintDocument
+  ) => Promise<import("../types/blueprint").BlueprintDocument>;
+  deleteBlueprint?: (blueprintId: string) => Promise<import("../types/blueprint").BlueprintDocument[]>;
+  renameBlueprint?: (
+    blueprintId: string,
+    name: string
+  ) => Promise<import("../types/blueprint").BlueprintDocument | null>;
+  listBlueprintTemplates?: () => Promise<import("../types/blueprint").BlueprintNodeTemplate[]>;
+  saveBlueprintTemplate?: (
+    template: import("../types/blueprint").BlueprintNodeTemplate
+  ) => Promise<import("../types/blueprint").BlueprintNodeTemplate>;
+  deleteBlueprintTemplate?: (templateId: string) => Promise<import("../types/blueprint").BlueprintNodeTemplate[]>;
   testMcpConnection?: (profile: import("../types/ai").ModelProfile) => Promise<unknown>;
   pickAttachments?: () => Promise<Array<{ path: string; name: string; size: number; mimeType: string }>>;
   readAttachmentText?: (filePath: string) => Promise<{ textContent: string; truncated: boolean }>;
@@ -94,6 +119,15 @@ type PermissionCapableHandle = FileSystemHandle & {
 
 const directoryHandleRegistry = new Map<string, AnyDirectoryHandle>();
 const fileHandleRegistry = new Map<string, AnyFileHandle>();
+const SKIPPED_WORKSPACE_DIRECTORIES = new Set([
+  ".git",
+  ".novel-assistance",
+  "node_modules",
+  "dist",
+  "release-dev",
+  "build",
+  ".cache",
+]);
 
 declare global {
   interface Window {
@@ -156,6 +190,7 @@ async function buildTree(
     const entryPath = joinPath(parentPath, entry.name);
 
     if (entry.kind === "directory") {
+      if (SKIPPED_WORKSPACE_DIRECTORIES.has(entry.name)) continue;
       const childDirectory = asDirectoryHandle(entry);
       registerDirectoryHandle(entryPath, childDirectory);
       entries.push({
@@ -330,6 +365,27 @@ export async function readFile(path: string): Promise<string> {
   return file.text();
 }
 
+export async function readFileBinary(path: string): Promise<string> {
+  const host = getHostApi();
+  if (host) {
+    return host.readFileBinary(path);
+  }
+
+  const handle = fileHandleRegistry.get(path);
+  if (!handle) {
+    throw new Error("Could not find that file in the current workspace.");
+  }
+
+  const file = await handle.getFile();
+  const buffer = await file.arrayBuffer();
+  let binary = "";
+  const bytes = new Uint8Array(buffer);
+  for (let index = 0; index < bytes.length; index += 1) {
+    binary += String.fromCharCode(bytes[index]);
+  }
+  return btoa(binary);
+}
+
 export async function writeFile(path: string, content: string): Promise<void> {
   const host = getHostApi();
   if (host) {
@@ -345,6 +401,29 @@ export async function writeFile(path: string, content: string): Promise<void> {
   await ensurePermission(handle);
   const writable = await handle.createWritable();
   await writable.write(content);
+  await writable.close();
+}
+
+export async function writeFileBinary(path: string, base64Content: string): Promise<void> {
+  const host = getHostApi();
+  if (host) {
+    await host.writeFileBinary(path, base64Content);
+    return;
+  }
+
+  const handle = fileHandleRegistry.get(path);
+  if (!handle) {
+    throw new Error("Could not find that file in the current workspace.");
+  }
+
+  await ensurePermission(handle);
+  const binary = atob(base64Content);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  const writable = await handle.createWritable();
+  await writable.write(bytes);
   await writable.close();
 }
 
@@ -416,10 +495,10 @@ export async function renamePath(path: string, newName: string): Promise<string>
   }
 
   if (fileHandleRegistry.has(path)) {
-    const content = await readFile(path);
+    const sourceFile = await fileHandleRegistry.get(path)!.getFile();
     const nextHandle = await parentHandle.getFileHandle(newName, { create: true });
     const writable = await nextHandle.createWritable();
-    await writable.write(content);
+    await writable.write(await sourceFile.arrayBuffer());
     await writable.close();
     const parts = pathParts(path);
     await parentHandle.removeEntry(parts[parts.length - 1] as string);
@@ -500,7 +579,7 @@ export async function duplicateFile(path: string): Promise<string> {
     if (!fileHandleRegistry.has(candidatePath)) {
       const nextHandle = await parentHandle.getFileHandle(candidateName, { create: true });
       const writable = await nextHandle.createWritable();
-      await writable.write(await sourceFile.text());
+      await writable.write(await sourceFile.arrayBuffer());
       await writable.close();
       registerFileHandle(candidatePath, nextHandle);
       return candidatePath;
@@ -525,7 +604,7 @@ async function copyDirectoryContents(
       const file = await asFileHandle(entry).getFile();
       const nextHandle = await targetHandle.getFileHandle(entry.name, { create: true });
       const writable = await nextHandle.createWritable();
-      await writable.write(await file.text());
+      await writable.write(await file.arrayBuffer());
       await writable.close();
       registerFileHandle(targetEntryPath, nextHandle);
     } else {
@@ -558,10 +637,10 @@ export async function movePath(sourcePath: string, destinationFolderPath: string
 
   const nextPath = joinPath(destinationFolderPath, name);
   if (fileHandleRegistry.has(sourcePath)) {
-    const content = await readFile(sourcePath);
+    const sourceFile = await fileHandleRegistry.get(sourcePath)!.getFile();
     const nextHandle = await destinationHandle.getFileHandle(name, { create: true });
     const writable = await nextHandle.createWritable();
-    await writable.write(content);
+    await writable.write(await sourceFile.arrayBuffer());
     await writable.close();
     registerFileHandle(nextPath, nextHandle);
     await deletePath(sourcePath);
@@ -629,4 +708,108 @@ export async function deleteReferenceList(listId: string): Promise<void> {
     return host.deleteReferenceList(listId);
   }
   throw new Error("Reference list management is not available.");
+}
+
+export async function listBlueprints(): Promise<import("../types/blueprint").BlueprintDocument[]> {
+  const host = getHostApi();
+  if (host?.listBlueprints) {
+    return host.listBlueprints();
+  }
+  return [];
+}
+
+export async function saveBlueprint(
+  blueprint: import("../types/blueprint").BlueprintDocument
+): Promise<import("../types/blueprint").BlueprintDocument> {
+  const host = getHostApi();
+  if (host?.saveBlueprint) {
+    return host.saveBlueprint(blueprint);
+  }
+  throw new Error("Blueprint management is not available.");
+}
+
+export async function deleteBlueprint(
+  blueprintId: string
+): Promise<import("../types/blueprint").BlueprintDocument[]> {
+  const host = getHostApi();
+  if (host?.deleteBlueprint) {
+    return host.deleteBlueprint(blueprintId);
+  }
+  throw new Error("Blueprint management is not available.");
+}
+
+export async function renameBlueprint(
+  blueprintId: string,
+  name: string
+): Promise<import("../types/blueprint").BlueprintDocument | null> {
+  const host = getHostApi();
+  if (host?.renameBlueprint) {
+    return host.renameBlueprint(blueprintId, name);
+  }
+  throw new Error("Blueprint management is not available.");
+}
+
+export async function listBlueprintTemplates(): Promise<import("../types/blueprint").BlueprintNodeTemplate[]> {
+  const host = getHostApi();
+  if (host?.listBlueprintTemplates) {
+    return host.listBlueprintTemplates();
+  }
+  return [];
+}
+
+export async function saveBlueprintTemplate(
+  template: import("../types/blueprint").BlueprintNodeTemplate
+): Promise<import("../types/blueprint").BlueprintNodeTemplate> {
+  const host = getHostApi();
+  if (host?.saveBlueprintTemplate) {
+    return host.saveBlueprintTemplate(template);
+  }
+  throw new Error("Blueprint template management is not available.");
+}
+
+export async function deleteBlueprintTemplate(
+  templateId: string
+): Promise<import("../types/blueprint").BlueprintNodeTemplate[]> {
+  const host = getHostApi();
+  if (host?.deleteBlueprintTemplate) {
+    return host.deleteBlueprintTemplate(templateId);
+  }
+  throw new Error("Blueprint template management is not available.");
+}
+
+export async function listVersionSnapshots(): Promise<import("../types/versionHistory").VersionSnapshot[]> {
+  const host = getHostApi();
+  if (host?.listVersionSnapshots) {
+    return host.listVersionSnapshots();
+  }
+  return [];
+}
+
+export async function appendVersionSnapshot(
+  snapshot: import("../types/versionHistory").VersionSnapshot
+): Promise<import("../types/versionHistory").VersionSnapshot[]> {
+  const host = getHostApi();
+  if (host?.appendVersionSnapshot) {
+    return host.appendVersionSnapshot(snapshot);
+  }
+  return [snapshot];
+}
+
+export async function updateVersionSnapshotPaths(
+  oldPath: string,
+  newPath: string
+): Promise<import("../types/versionHistory").VersionSnapshot[]> {
+  const host = getHostApi();
+  if (host?.updateVersionSnapshotPaths) {
+    return host.updateVersionSnapshotPaths(oldPath, newPath);
+  }
+  return [];
+}
+
+export async function pruneVersionSnapshots(): Promise<import("../types/versionHistory").VersionSnapshot[]> {
+  const host = getHostApi();
+  if (host?.pruneVersionSnapshots) {
+    return host.pruneVersionSnapshots();
+  }
+  return [];
 }

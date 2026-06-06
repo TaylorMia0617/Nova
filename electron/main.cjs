@@ -36,6 +36,15 @@ const TEXT_ATTACHMENT_EXTENSIONS = new Set([
 ]);
 const MAX_ATTACHMENT_TEXT_LENGTH = 120000;
 const GLOBAL_SETTINGS_DIR_NAME = "global-settings";
+const SKIPPED_WORKSPACE_DIRECTORIES = new Set([
+  ".git",
+  ".novel-assistance",
+  "node_modules",
+  "dist",
+  "release-dev",
+  "build",
+  ".cache",
+]);
 
 function getGlobalSettingsPath(name = "novel-assistance-settings") {
   const safeName = String(name).replace(/[^a-zA-Z0-9._-]/g, "-") || "settings";
@@ -246,6 +255,9 @@ function getWorkspaceAppDataPaths() {
   const indexPath = path.join(conversationsPath, "index.json");
   const referenceDataPath = path.join(dataPath, "data");
   const referenceListsPath = path.join(referenceDataPath, "lists.json");
+  const versionHistoryPath = path.join(referenceDataPath, "version-history.json");
+  const blueprintsPath = path.join(referenceDataPath, "blueprints.json");
+  const blueprintTemplatesPath = path.join(referenceDataPath, "blueprint-templates.json");
 
   return {
     rootPath: currentWorkspaceRoot,
@@ -254,6 +266,9 @@ function getWorkspaceAppDataPaths() {
     indexPath,
     referenceDataPath,
     referenceListsPath,
+    versionHistoryPath,
+    blueprintsPath,
+    blueprintTemplatesPath,
   };
 }
 
@@ -268,6 +283,18 @@ async function ensureWorkspaceAppData() {
 
   if (!(await pathExists(paths.referenceListsPath))) {
     await fs.writeFile(paths.referenceListsPath, "[]", "utf8");
+  }
+
+  if (!(await pathExists(paths.versionHistoryPath))) {
+    await fs.writeFile(paths.versionHistoryPath, "[]", "utf8");
+  }
+
+  if (!(await pathExists(paths.blueprintsPath))) {
+    await fs.writeFile(paths.blueprintsPath, "[]", "utf8");
+  }
+
+  if (!(await pathExists(paths.blueprintTemplatesPath))) {
+    await fs.writeFile(paths.blueprintTemplatesPath, "[]", "utf8");
   }
 
   return paths;
@@ -318,6 +345,90 @@ async function writeReferenceListsIndex(index) {
   return index;
 }
 
+async function readBlueprints() {
+  const { blueprintsPath } = await ensureWorkspaceAppData();
+  try {
+    const content = await fs.readFile(blueprintsPath, "utf8");
+    const parsed = JSON.parse(content);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function writeBlueprints(blueprints) {
+  const { blueprintsPath } = await ensureWorkspaceAppData();
+  await fs.writeFile(blueprintsPath, JSON.stringify(blueprints, null, 2), "utf8");
+  return blueprints;
+}
+
+async function readBlueprintTemplates() {
+  const { blueprintTemplatesPath } = await ensureWorkspaceAppData();
+  try {
+    const content = await fs.readFile(blueprintTemplatesPath, "utf8");
+    const parsed = JSON.parse(content);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function writeBlueprintTemplates(templates) {
+  const { blueprintTemplatesPath } = await ensureWorkspaceAppData();
+  await fs.writeFile(blueprintTemplatesPath, JSON.stringify(templates, null, 2), "utf8");
+  return templates;
+}
+
+async function saveBlueprintTemplate(template) {
+  const templates = await readBlueprintTemplates();
+  const now = new Date().toISOString();
+  const nextTemplate = {
+    ...template,
+    createdAt: template.createdAt || now,
+    updatedAt: now,
+  };
+  const existingIndex = templates.findIndex((item) => item.id === nextTemplate.id);
+  const next = existingIndex >= 0
+    ? templates.map((item) => (item.id === nextTemplate.id ? nextTemplate : item))
+    : [...templates, nextTemplate];
+  await writeBlueprintTemplates(next);
+  return nextTemplate;
+}
+
+async function deleteBlueprintTemplate(templateId) {
+  const templates = await readBlueprintTemplates();
+  return writeBlueprintTemplates(templates.filter((item) => item.id !== templateId));
+}
+
+async function saveBlueprint(blueprint) {
+  const blueprints = await readBlueprints();
+  const nextBlueprint = {
+    ...blueprint,
+    updatedAt: blueprint.updatedAt || new Date().toISOString(),
+  };
+  const existingIndex = blueprints.findIndex((item) => item.id === nextBlueprint.id);
+  const next = existingIndex >= 0
+    ? blueprints.map((item) => (item.id === nextBlueprint.id ? nextBlueprint : item))
+    : [...blueprints, nextBlueprint];
+  await writeBlueprints(next);
+  return nextBlueprint;
+}
+
+async function deleteBlueprint(blueprintId) {
+  const blueprints = await readBlueprints();
+  return writeBlueprints(blueprints.filter((item) => item.id !== blueprintId));
+}
+
+async function renameBlueprint(blueprintId, name) {
+  const blueprints = await readBlueprints();
+  const now = new Date().toISOString();
+  const next = blueprints.map((item) =>
+    item.id === blueprintId ? { ...item, name, updatedAt: now } : item
+  );
+  await writeBlueprints(next);
+  return next.find((item) => item.id === blueprintId) ?? null;
+}
+
 async function readReferenceList(listId) {
   const filePath = getReferenceListFilePath(listId);
   try {
@@ -362,6 +473,34 @@ async function deleteReferenceList(listId) {
   const index = await readReferenceListsIndex();
   const newIndex = index.filter(item => item.id !== listId);
   await writeReferenceListsIndex(newIndex);
+}
+
+const VERSION_HISTORY_RETENTION_MS = 48 * 60 * 60 * 1000;
+
+function pruneVersionSnapshots(snapshots) {
+  const cutoff = Date.now() - VERSION_HISTORY_RETENTION_MS;
+  return snapshots.filter((snapshot) => {
+    const timestamp = Date.parse(snapshot?.timestamp ?? "");
+    return Number.isFinite(timestamp) && timestamp >= cutoff;
+  });
+}
+
+async function readVersionSnapshots() {
+  const { versionHistoryPath } = await ensureWorkspaceAppData();
+  try {
+    const content = await fs.readFile(versionHistoryPath, "utf8");
+    const parsed = JSON.parse(content);
+    return pruneVersionSnapshots(Array.isArray(parsed) ? parsed : []);
+  } catch {
+    return [];
+  }
+}
+
+async function writeVersionSnapshots(snapshots) {
+  const { versionHistoryPath } = await ensureWorkspaceAppData();
+  const pruned = pruneVersionSnapshots(snapshots);
+  await fs.writeFile(versionHistoryPath, JSON.stringify(pruned, null, 2), "utf8");
+  return pruned;
 }
 
 async function testMcpConnection(profile) {
@@ -574,6 +713,7 @@ async function buildTree(directoryPath, recursive = false) {
 
   for (const entry of entries) {
     if (entry.name.startsWith(".")) continue;
+    if (entry.isDirectory() && SKIPPED_WORKSPACE_DIRECTORIES.has(entry.name)) continue;
 
     const entryPath = path.join(directoryPath, entry.name);
     if (entry.isDirectory()) {
@@ -909,6 +1049,15 @@ ipcMain.handle("fs:writeFile", async (_event, filePath, content) => {
   await fs.writeFile(assertWorkspacePath(filePath), content, "utf8");
 });
 
+ipcMain.handle("fs:readFileBinary", async (_event, filePath) => {
+  const buffer = await fs.readFile(assertWorkspacePath(filePath));
+  return buffer.toString("base64");
+});
+
+ipcMain.handle("fs:writeFileBinary", async (_event, filePath, base64Content) => {
+  await fs.writeFile(assertWorkspacePath(filePath), Buffer.from(base64Content, "base64"));
+});
+
 async function writeWithRetry(filePath, content, maxRetries = 3, delay = 200) {
   let lastError = null;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -973,6 +1122,66 @@ ipcMain.handle("reference:saveList", async (_event, list) => {
 
 ipcMain.handle("reference:deleteList", async (_event, listId) => {
   return deleteReferenceList(listId);
+});
+
+ipcMain.handle("history:listSnapshots", async () => {
+  const snapshots = await readVersionSnapshots();
+  await writeVersionSnapshots(snapshots);
+  return snapshots;
+});
+
+ipcMain.handle("history:appendSnapshot", async (_event, snapshot) => {
+  const snapshots = await readVersionSnapshots();
+  snapshots.push(snapshot);
+  return writeVersionSnapshots(snapshots);
+});
+
+ipcMain.handle("history:updateSnapshotPaths", async (_event, oldPath, newPath) => {
+  const snapshots = await readVersionSnapshots();
+  const updated = snapshots.map((snapshot) => {
+    if (snapshot.path !== oldPath && !snapshot.path.startsWith(`${oldPath}${path.sep}`)) {
+      return snapshot;
+    }
+    const nextPath = snapshot.path.replace(oldPath, newPath);
+    return {
+      ...snapshot,
+      path: nextPath,
+      relativePath: currentWorkspaceRoot ? path.relative(currentWorkspaceRoot, nextPath) : snapshot.relativePath,
+    };
+  });
+  return writeVersionSnapshots(updated);
+});
+
+ipcMain.handle("history:pruneSnapshots", async () => {
+  return writeVersionSnapshots(await readVersionSnapshots());
+});
+
+ipcMain.handle("blueprint:list", async () => {
+  return readBlueprints();
+});
+
+ipcMain.handle("blueprint:save", async (_event, blueprint) => {
+  return saveBlueprint(blueprint);
+});
+
+ipcMain.handle("blueprint:delete", async (_event, blueprintId) => {
+  return deleteBlueprint(blueprintId);
+});
+
+ipcMain.handle("blueprint:rename", async (_event, blueprintId, name) => {
+  return renameBlueprint(blueprintId, name);
+});
+
+ipcMain.handle("blueprintTemplate:list", async () => {
+  return readBlueprintTemplates();
+});
+
+ipcMain.handle("blueprintTemplate:save", async (_event, template) => {
+  return saveBlueprintTemplate(template);
+});
+
+ipcMain.handle("blueprintTemplate:delete", async (_event, templateId) => {
+  return deleteBlueprintTemplate(templateId);
 });
 
 ipcMain.handle("fs:createFile", async (_event, filePath) => {

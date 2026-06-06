@@ -1,0 +1,332 @@
+.editor-panel .panel-actions {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+
+.panel-actions .toolbar-header {
+  display: flex;
+  flex-shrink: 0;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.panel-actions .toolbar-tabs {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  border-bottom: 1px solid #2d3748;
+  background: #0a0a0a;
+}
+
+.panel-actions .toolbar-tab {
+  flex-shrink: 0;
+  padding: 6px 16px;
+  background: transparent;
+  color: #718096;
+  border-right: 1px solid #2d3748;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.panel-actions .toolbar-tab:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: #a0aec0;
+}
+
+.panel-actions .toolbar-tab.active {
+  background: #000000;
+  color: #e2e8f0;
+}
+
+.panel-actions .format-toolbar {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: visible;
+  white-space: nowrap;
+  scrollbar-width: none;
+  scrollbar-color: #4a5568 transparent;
+  padding: 4px 4px;
+  background: #000000;
+  border-bottom: 1px solid #2d3748;
+  -ms-overflow-style: none;
+  box-sizing: border-box;
+}
+
+.panel-actions .format-toolbar::-webkit-scrollbar {
+  display: none;
+}
+
+.panel-actions .format-toolbar-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  width: max-content;
+  min-width: max-content;
+  white-space: nowrap;
+}
+
+.panel-actions .toolbar-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
+  background: transparent;
+  color: #a0aec0;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+
+.panel-actions .toolbar-button:hover:not(:disabled) {
+  background: #2d3748;
+  color: #e2e8f0;
+}
+
+.panel-actions .toolbar-button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.panel-actions .toolbar-button.active {
+  background: #5a9e8f;
+  color: #ffffff;
+}
+
+.panel-actions .toolbar-divider {
+  display: inline-block;
+  width: 1px;
+  height: 18px;
+  background: #2d3748;
+  margin: 0 4px;
+  flex-shrink: 0;
+}
+
+.panel-actions .toolbar-dropdown-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.panel-actions .toolbar-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 1000;
+  min-width: 140px;
+  background: #1a1f2e;
+  border: 1px solid #4a5568;
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  margin-top: 4px;
+}
+
+.panel-actions .toolbar-dropdown button {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  color: #a0aec0;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s, color 0.15s;
+}
+
+.panel-actions .toolbar-dropdown button:hover {
+  background: #2d3748;
+  color: #e2e8f0;
+}
+
+.panel-actions .color-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  width: 136px;
+  min-width: auto;
+}
+
+.panel-actions .color-swatch {
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  border: 1px solid #4a5568;
+  cursor: pointer;
+  padding: 0;
+}
+
+.panel-actions .color-swatch:hover {
+  border-color: #e2e8f0;
+}
+
+.panel-actions .font-picker {
+  min-width: 120px;
+}
+
+.panel-actions .font-option {
+  font-size: 13px;
+}
+
+.panel-actions .line-height-picker {
+  min-width: 80px;
+}
+
+.panel-actions .line-height-option {
+  text-align: center;
+}
+
+.panel-actions .table-menu {
+  min-width: 140px;
+}
+
+.panel-actions .dropdown-divider {
+  display: block;
+  height: 1px;
+  background: #2d3748;
+  margin: 4px 8px;
+}
+
+.panel-actions .export-menu-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.panel-actions .export-menu {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  z-index: 1000;
+  min-width: 140px;
+  background: #1a1f2e;
+  border: 1px solid #4a5568;
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.4);
+  margin-bottom: 4px;
+}
+
+.panel-actions .export-menu button {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  color: #a0aec0;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.panel-actions .export-menu button:hover {
+  background: #2d3748;
+  color: #e2e8f0;
+}
+
+.panel-actions .toolbar-text-btn {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.panel-actions .toolbar-tabs {
+  border-bottom-color: var(--color-border);
+  background: var(--app-header-surface);
+}
+
+.panel-actions .toolbar-tab {
+  color: var(--color-text-subtle);
+  border-right-color: var(--color-border);
+}
+
+.panel-actions .toolbar-tab:hover {
+  background: color-mix(in srgb, var(--color-surface-raised) 72%, transparent);
+  color: var(--color-text-muted);
+}
+
+.panel-actions .toolbar-tab.active {
+  background: var(--editor-page-bg);
+  color: var(--color-text);
+}
+
+.panel-actions .format-toolbar {
+  background: var(--app-header-surface);
+  border-bottom-color: var(--color-border);
+  scrollbar-color: var(--color-border-strong) transparent;
+}
+
+.panel-actions .toolbar-button {
+  color: var(--color-text-muted);
+}
+
+.panel-actions .toolbar-button:hover:not(:disabled) {
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+}
+
+.panel-actions .toolbar-button.active {
+  background: var(--color-accent);
+  color: #ffffff;
+}
+
+.panel-actions .toolbar-divider,
+.panel-actions .dropdown-divider {
+  background: var(--color-border);
+}
+
+.panel-actions .toolbar-dropdown,
+.panel-actions .export-menu {
+  background: var(--app-menu-surface);
+  border-color: var(--color-border-strong);
+}
+
+.panel-actions .toolbar-dropdown button,
+.panel-actions .export-menu button {
+  color: var(--color-text-muted);
+}
+
+.panel-actions .toolbar-dropdown button:hover,
+.panel-actions .export-menu button:hover {
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+}
+
+.panel-actions .color-swatch {
+  border-color: var(--color-border-strong);
+}
+
+.panel-actions .color-swatch:hover {
+  border-color: var(--color-text);
+}
+
+.app-container[data-theme="light"] .panel-actions .toolbar-tab.active,
+.app-container[data-theme="light"] .panel-actions .format-toolbar {
+  background: var(--app-header-surface);
+}
+
+.panel-actions .toolbar-header,
+.panel-actions .toolbar-tabs,
+.panel-actions .format-toolbar {
+  background: var(--app-header-surface);
+}
+
+.panel-actions .toolbar-tab.active {
+  background: var(--editor-page-bg);
+}

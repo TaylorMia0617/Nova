@@ -1,24 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Editor from "@monaco-editor/react";
+import type { Editor } from "@tiptap/react";
 import {
-  AlignCenter,
-  AlignLeft,
-  AlignRight,
-  ChevronDown,
-  Download,
   FolderOpen,
-  Heading1,
-  Heading2,
-  Heading3,
-  Save,
   SplitSquareHorizontal,
   SplitSquareVertical,
   Trash2,
-  Type,
-  WrapText,
   X,
 } from "lucide-react";
-import { useFileStore, type ReferenceEntry } from "../stores/fileStore";
+import { MAX_EDITOR_GROUPS, useFileStore, type HistoryDiffPart } from "../stores/fileStore";
+import { useBlueprintStore } from "../stores/blueprintStore";
 import { useSettingsStore } from "../stores/settingsStore";
 import { callAI } from "../services/aiService";
 import { readFile, type WorkspaceNode } from "../services/fileSystemService";
@@ -28,30 +18,71 @@ import {
 } from "../services/editorInsertionService";
 import { exportDocument, getExportTemplates } from "../services/documentExportService";
 import type { ExportFormat, ExportTemplateId } from "../types/export";
+import { useEditorUIStore } from "../stores/editorUIStore";
+import { DEFAULT_ACTIVE_FORMATS, useEditorStatusStore } from "../stores/editorStatusStore";
 import { onWorkspaceChanged, unwatchWorkspace, watchWorkspace } from "../services/terminalService";
 import { compareNodeNames } from "../../shared/workspaceSort.js";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
+import { TipTapEditor } from "./TipTapEditor";
+import type { TipTapContentFormat, TipTapEditorHandle } from "./TipTapEditor";
+import { FindReplacePanel } from "./TipTapEditor/FindReplacePanel";
+import { OutlinePanel } from "./TipTapEditor/OutlinePanel";
+import type { OutlineBlueprintMatch } from "./TipTapEditor/OutlinePanel";
+import { EditorToolbar } from "./EditorToolbar";
+import BlueprintEditor from "./BlueprintEditor";
+import { useTranslation } from "../hooks/useTranslation";
 import "./EditorPanel.css";
 
-const EDITOR_THEME = "novel-assistance-dark";
-const DESCRIPTION_LIMIT = 20;
-const TYPING_SUGGEST_DELAY_MS = 300;
-const IDLE_SUGGEST_DELAY_MS = 5000;
-const SUGGEST_COOLDOWN_MS = 300000;
-const AUTO_SAVE_DELAY_MS = 3000;
-const DEFAULT_EDITOR_FONT_FAMILY = "'SimHei', '黑体', 'Microsoft YaHei', sans-serif";
-const DEFAULT_EDITOR_FONT_SIZE = 14;
 const TXT_MERGE_EXTENSIONS = new Set([".txt", ".md", ".markdown"]);
 
-type HeadingState = "body" | "h1" | "h2" | "h3";
-type AlignmentMode = "center" | "right";
-type SelectionAction = "polish" | "correct" | "stylize";
-
-type AlignmentBlock = {
-  startLine: number;
-  endLine: number;
-  alignment: AlignmentMode;
+const getEditorContentFormat = (fileMode?: string): TipTapContentFormat => {
+  if (fileMode === "markdown") return "markdown";
+  if (fileMode === "docx") return "docx";
+  return "plainText";
 };
+
+const isBlueprintTab = (tab: { fileMode?: string; blueprintId?: string } | null | undefined) =>
+  tab?.fileMode === "blueprint" && Boolean(tab.blueprintId);
+
+const isNonTextPreviewTab = (tab: { fileMode?: string } | null | undefined) =>
+  tab?.fileMode === "blueprint" || tab?.fileMode === "image" || tab?.fileMode === "unsupported";
+
+const parseHistoryDiffParts = (content: string): HistoryDiffPart[] => {
+  try {
+    const parsed = JSON.parse(content);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((part): part is HistoryDiffPart =>
+      part &&
+      (part.type === "same" || part.type === "added" || part.type === "removed") &&
+      typeof part.text === "string"
+    );
+  } catch {
+    return [];
+  }
+};
+
+function HistoryDiffView({ content }: { content: string }) {
+  const { t } = useTranslation();
+  const parts = parseHistoryDiffParts(content);
+  return (
+    <div className="history-diff-view">
+      {parts.length === 0 ? (
+        <div className="history-diff-empty">{t("history.compareEmpty")}</div>
+      ) : (
+        parts.map((part, index) => (
+          <div key={`${part.type}-${index}`} className={`history-diff-line ${part.type}`}>
+            <span className="history-diff-marker">
+              {part.type === "added" ? "+" : part.type === "removed" ? "-" : " "}
+            </span>
+            <span>{part.text || " "}</span>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+type SelectionAction = "polish" | "correct" | "stylize";
 
 type SelectionPopupState = {
   text: string;
@@ -63,53 +94,6 @@ type SelectionPreviewState = {
   mode: SelectionAction;
   original: string;
   result: string;
-};
-
-let markdownFoldingProviderRegistered = false;
-
-const getHeadingLevel = (lineContent: string): 1 | 2 | 3 | null => {
-  const match = lineContent.match(/^(#{1,3})\s+\S/);
-  if (!match) return null;
-  return match[1].length as 1 | 2 | 3;
-};
-
-const normalizeHeadingState = (lineContent: string): HeadingState => {
-  const level = getHeadingLevel(lineContent);
-  if (level === 1) return "h1";
-  if (level === 2) return "h2";
-  if (level === 3) return "h3";
-  return "body";
-};
-
-const clampAlignmentBlocks = (blocks: AlignmentBlock[], lineCount: number) =>
-  blocks
-    .map((block) => ({
-      ...block,
-      startLine: Math.max(1, Math.min(block.startLine, lineCount)),
-      endLine: Math.max(1, Math.min(block.endLine, lineCount)),
-    }))
-    .filter((block) => block.startLine <= block.endLine);
-
-const mergeAlignmentBlocks = (blocks: AlignmentBlock[]) => {
-  const sorted = blocks
-    .slice()
-    .sort((left, right) => left.startLine - right.startLine || left.endLine - right.endLine);
-  const merged: AlignmentBlock[] = [];
-
-  sorted.forEach((block) => {
-    const previous = merged[merged.length - 1];
-    if (
-      previous &&
-      previous.alignment === block.alignment &&
-      previous.endLine + 1 >= block.startLine
-    ) {
-      previous.endLine = Math.max(previous.endLine, block.endLine);
-      return;
-    }
-    merged.push({ ...block });
-  });
-
-  return merged;
 };
 
 const getPathSeparator = (path: string) => (path.includes("\\") ? "\\" : "/");
@@ -137,63 +121,28 @@ const findFolderNodeByPath = (nodes: WorkspaceNode[], path: string): WorkspaceNo
   return null;
 };
 
-const registerMarkdownHeadingFolding = (monaco: any) => {
-  if (markdownFoldingProviderRegistered) return;
-
-  monaco.languages.registerFoldingRangeProvider("markdown", {
-    provideFoldingRanges(model: any) {
-      const headings: Array<{ lineNumber: number; level: 1 | 2 | 3 }> = [];
-
-      for (let lineNumber = 1; lineNumber <= model.getLineCount(); lineNumber += 1) {
-        const level = getHeadingLevel(model.getLineContent(lineNumber));
-        if (level) headings.push({ lineNumber, level });
-      }
-
-      return headings
-        .map((heading, index) => {
-          let end = model.getLineCount();
-          for (let nextIndex = index + 1; nextIndex < headings.length; nextIndex += 1) {
-            const nextHeading = headings[nextIndex];
-            if (nextHeading.level <= heading.level) {
-              end = nextHeading.lineNumber - 1;
-              break;
-            }
-          }
-
-          while (end > heading.lineNumber && !model.getLineContent(end).trim()) {
-            end -= 1;
-          }
-
-          if (end <= heading.lineNumber) return null;
-
-          return {
-            start: heading.lineNumber,
-            end,
-            kind: monaco.languages.FoldingRangeKind.Region,
-          };
-        })
-        .filter(Boolean);
-    },
-  });
-
-  markdownFoldingProviderRegistered = true;
-};
+const clamp = (value: number, min: number, max: number) =>
+  Math.min(Math.max(value, min), max);
 
 const EditorPanel: React.FC = () => {
+  const { t } = useTranslation();
   const {
     files,
     activeFile,
     getOpenTabs,
     editorGroups,
     activeGroupId,
-    referenceEntries,
     rootPath,
     recentWorkspaces,
+    referenceEntries,
+    setErrorMessage,
+    openFile,
+    openFileInNewGroup,
+    openBlueprintTab,
     setActiveFile,
     closeTab,
     updateFileContent,
     saveFile,
-    saveAllFiles,
     refreshWorkspace,
     openRecentWorkspace,
     clearRecentWorkspaces,
@@ -202,383 +151,97 @@ const EditorPanel: React.FC = () => {
     setActiveGroup,
     moveTabToGroup,
   } = useFileStore();
+  const { blueprints, loadBlueprints, focusNode: focusBlueprintNode } = useBlueprintStore();
   const { defaultSelectionModelId, selectionPromptTemplates, getModelProfileById } = useSettingsStore();
-  const editorRef = useRef<any>(null);
-  const monacoRef = useRef<any>(null);
-  const editorContainerRef = useRef<HTMLDivElement | null>(null);
-  const completionDisposableRef = useRef<Array<{ dispose: () => void }>>([]);
-  const suggestionTimeoutRef = useRef<number | null>(null);
-  const suggestionCooldownUntilRef = useRef<number>(0);
-  const idleTimeoutRef = useRef<number | null>(null);
-  const autoSaveTimeoutRef = useRef<number | null>(null);
-  const alignmentBlocksByPathRef = useRef<Record<string, AlignmentBlock[]>>({});
-  const alignmentDecorationIdsRef = useRef<string[]>([]);
-  const alignmentDecorationModesRef = useRef<Record<string, AlignmentMode>>({});
-  const editorStatesRef = useRef<Map<string, {
-    scrollTop: number;
-    scrollLeft: number;
-    cursorLineNumber: number;
-    cursorColumn: number;
-  }>>(new Map());
+  const tiptapRef = useRef<TipTapEditorHandle>(null);
+  const workspaceRefreshTimeoutRef = useRef<number | null>(null);
+  const editorStatesRef = useRef<Map<string, { scrollTop: number }>>(new Map());
   const loadedFilePathRef = useRef<string | null>(null);
-  const ignoreNextChangeRef = useRef(false);
-  const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 });
-  const [selectionLength, setSelectionLength] = useState(0);
-  const [wordWrap, setWordWrap] = useState<"on" | "off">("on");
-  const [fontSize, setFontSize] = useState(DEFAULT_EDITOR_FONT_SIZE);
-  const [lastSavedAt, setLastSavedAt] = useState<string>("Not saved yet");
-  const [activeHeadingState, setActiveHeadingState] = useState<HeadingState>("body");
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const [lastSavedAt, setLastSavedAt] = useState<string>("");
   const [selectionPopup, setSelectionPopup] = useState<SelectionPopupState | null>(null);
   const [selectionPreview, setSelectionPreview] = useState<SelectionPreviewState | null>(null);
   const [selectionLoading, setSelectionLoading] = useState(false);
   const [selectionError, setSelectionError] = useState("");
-  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
-  const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
-  const [exportFormat, setExportFormat] = useState<ExportFormat>("pdf");
-  const [exportTemplateId, setExportTemplateId] = useState<ExportTemplateId>("classic");
-  const [exportError, setExportError] = useState("");
-  const exportTemplates = getExportTemplates();
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tabPath: string } | null>(null);
+  const [isEditorDragActive, setIsEditorDragActive] = useState(false);
+  const [editorDropTarget, setEditorDropTarget] = useState<{ type: "group"; groupId: string } | { type: "new" } | null>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (rootPath) void loadBlueprints();
+  }, [rootPath, loadBlueprints]);
+
+  const {
+    isFindReplaceOpen, isOutlineOpen, isPageViewMode, isFocusMode,
+    isExportDialogOpen, exportFormat, exportTemplateId, exportError,
+    isLinkDialogOpen, linkUrl, linkText,
+    setFindReplaceOpen, toggleOutline, togglePageViewMode, toggleFocusMode,
+    openLinkDialog, closeLinkDialog,
+    setLinkUrl, setLinkText,
+    openExportDialog, closeExportDialog,
+    setExportFormat, setExportTemplateId,
+  } = useEditorUIStore();
+
+  const {
+    cursorPosition, selectionLength, wordWrap,
+    toggleWordWrap,
+  } = useEditorStatusStore();
 
   const isReferenceFile = false;
 
-  const referenceEntriesMap = useMemo(() => {
-    const map = new Map<string, ReferenceEntry[]>();
-    for (const entry of referenceEntries) {
-      const lowerName = entry.name.toLowerCase();
-      for (let i = 1; i <= lowerName.length; i++) {
-        const prefix = lowerName.slice(0, i);
-        if (!map.has(prefix)) {
-          map.set(prefix, []);
-        }
-        map.get(prefix)!.push(entry);
-      }
-    }
-    return map;
-  }, [referenceEntries]);
-
-  const hasMatchingEntry = useCallback((partial: string): boolean => {
-    if (!partial) return false;
-    const entries = referenceEntriesMap.get(partial);
-    if (!entries) return false;
-    return entries.some(entry => entry.name.toLowerCase() !== partial);
-  }, [referenceEntriesMap]);
-
-  const getMatchingEntries = useCallback((partial: string): ReferenceEntry[] => {
-    if (!partial) return [];
-    const entries = referenceEntriesMap.get(partial);
-    if (!entries) return [];
-    return entries.filter(entry => entry.name.toLowerCase() !== partial);
-  }, [referenceEntriesMap]);
-
-  const getCompletionKind = (monaco: any) => {
-    return monaco.languages.CompletionItemKind.Reference;
-  };
-
-  const getShortDescription = (description: string) => {
-    const trimmed = description.trim();
-    if (trimmed.length <= DESCRIPTION_LIMIT) return trimmed;
-    return `${trimmed.slice(0, DESCRIPTION_LIMIT)}...`;
-  };
-
-  const ensureMonacoTheme = (monaco: any) => {
-    monaco.editor.defineTheme(EDITOR_THEME, {
-      base: "vs-dark",
-      inherit: true,
-      rules: [],
-      colors: {
-        "symbolIcon.variableForeground": "#ffb86c",
-        "symbolIcon.referenceForeground": "#6ad7ff",
-        "symbolIcon.folderForeground": "#9effa1",
-      },
-    });
-  };
-
-  const getSuggestionContext = (model: any, position: any) => {
-    const lineContent = model.getLineContent(position.lineNumber);
-    const beforeCursor = lineContent.slice(0, Math.max(position.column - 1, 0));
-    const braceMatch = beforeCursor.match(/\{\{([^}\n]*)$/);
-
-    if (braceMatch) {
-      return {
-        partial: braceMatch[1].trim().toLowerCase(),
-        insertMode: "brace" as const,
-        startColumn: beforeCursor.lastIndexOf("{{") + 1,
-      };
-    }
-
-    if (isReferenceFile) return null;
-
-    const plainMatch = beforeCursor.match(/[A-Za-z0-9_\u4e00-\u9fff\u00b7\u30fb-]+$/);
-    const token = plainMatch ? plainMatch[0] : "";
-
-    let partial = "";
-    if (token) {
-      for (let i = token.length - 1; i >= 0; i--) {
-        const suffix = token.slice(i).toLowerCase();
-        if (referenceEntriesMap.has(suffix)) {
-          partial = token.slice(i);
-          break;
-        }
-      }
-    }
-
-    if (!partial) return null;
-
-    return {
-      partial: partial.toLowerCase(),
-      insertMode: "plain" as const,
-      startColumn: position.column - partial.length,
-    };
-  };
-
-  const getSuggestionScore = (entryName: string, partial: string) => {
-    if (!partial) return 1000;
-    const normalizedName = entryName.toLowerCase();
-    if (normalizedName === partial) return 4000;
-    if (normalizedName.startsWith(partial)) return 3000 - normalizedName.length;
-    const index = normalizedName.indexOf(partial);
-    if (index >= 0) return 2000 - index;
-    return 100;
-  };
-
-  const triggerReferenceSuggestions = () => {
-    const editor = editorRef.current;
-    if (!editor || referenceEntries.length === 0 || isReferenceFile) return;
-    const model = editor.getModel();
-    const position = editor.getPosition();
-    if (!model || !position) return;
-    const context = getSuggestionContext(model, position);
-    if (!context) return;
-    editor.trigger("reference-suggestions", "editor.action.triggerSuggest", {});
-  };
-
-  const registerReferenceCompletionProvider = (monaco: any) => {
-    completionDisposableRef.current.forEach((disposable) => disposable.dispose());
-    completionDisposableRef.current = [];
-
-    const register = (language: string) =>
-      monaco.languages.registerCompletionItemProvider(language, {
-        triggerCharacters: ["{"],
-        provideCompletionItems: (model: any, position: any) => {
-          const context = getSuggestionContext(model, position);
-          if (!context || !context.partial) {
-            return { suggestions: [] };
-          }
-
-          const range = new monaco.Range(
-            position.lineNumber,
-            context.startColumn,
-            position.lineNumber,
-            position.column
-          );
-
-          const candidateEntries = getMatchingEntries(context.partial);
-
-          if (candidateEntries.length === 0) {
-            return { suggestions: [] };
-          }
-
-          const suggestions = candidateEntries
-            .slice()
-            .sort((left, right) => {
-              const scoreDifference =
-                getSuggestionScore(right.name, context.partial) - getSuggestionScore(left.name, context.partial);
-              if (scoreDifference !== 0) return scoreDifference;
-              return left.name.localeCompare(right.name, "zh-Hans-CN", { sensitivity: "base" });
-            })
-            .map((entry) => ({
-              label: entry.name,
-              kind: getCompletionKind(monaco),
-              insertText: context.insertMode === "brace" ? `{{${entry.name}}}` : entry.name,
-              filterText: entry.name,
-              detail: entry.description ? getShortDescription(entry.description) : entry.sourceList ?? "参考",
-              documentation: entry.description ?? "",
-              range,
-            }));
-
-          return { suggestions };
-        },
-      });
-
-    completionDisposableRef.current = [register("markdown"), register("plaintext")];
-  };
-
-  const relayoutEditor = () => {
-    const editor = editorRef.current;
-    if (!editor) return;
-    requestAnimationFrame(() => {
-      editor.layout();
-      editor.render(true);
-    });
-  };
-
-  const syncHeadingState = () => {
-    const editor = editorRef.current;
-    const model = editor?.getModel();
-    if (!editor || !model || isReferenceFile) {
-      setActiveHeadingState("body");
+  const syncEditorStatus = useCallback((editor: Editor | null | undefined) => {
+    const statusStore = useEditorStatusStore.getState();
+    if (!editor || isReferenceFile) {
+      statusStore.setCursorPosition({ line: 1, column: 1 });
+      statusStore.setSelectionLength(0);
+      statusStore.setActiveHeadingState("body");
+      statusStore.setActiveFormats(DEFAULT_ACTIVE_FORMATS);
       return;
     }
-    const selection = editor.getSelection();
-    const lineNumber = selection?.startLineNumber ?? editor.getPosition()?.lineNumber ?? 1;
-    setActiveHeadingState(normalizeHeadingState(model.getLineContent(lineNumber)));
-  };
 
-  const snapshotAlignmentBlocks = (path = activeFile?.path) => {
-    const editor = editorRef.current;
-    const model = editor?.getModel();
-    if (!path || !model) return;
-    const lineCount = model.getLineCount();
-    const blocks = alignmentDecorationIdsRef.current
-      .map((decorationId) => {
-        const range = model.getDecorationRange(decorationId);
-        const alignment = alignmentDecorationModesRef.current[decorationId];
-        if (!range || !alignment) return null;
-        return {
-          startLine: range.startLineNumber,
-          endLine: range.endLineNumber,
-          alignment,
-        };
-      })
-      .filter(Boolean) as AlignmentBlock[];
-    alignmentBlocksByPathRef.current[path] = mergeAlignmentBlocks(clampAlignmentBlocks(blocks, lineCount));
-  };
+    const { $from, from, to } = editor.state.selection;
+    const textBefore = editor.state.doc.textBetween(0, $from.pos, "\n");
+    const lines = textBefore.split("\n");
+    const selectionLength = from === to ? 0 : editor.state.doc.textBetween(from, to).length;
+    const alignCenter = editor.isActive({ textAlign: "center" });
+    const alignRight = editor.isActive({ textAlign: "right" });
 
-  const applyAlignmentDecorations = (path = activeFile?.path) => {
-    const editor = editorRef.current;
-    const model = editor?.getModel();
-    const monaco = monacoRef.current;
-    if (!editor || !model || !monaco || !path) return;
-    const lineCount = model.getLineCount();
-    const blocks = mergeAlignmentBlocks(
-      clampAlignmentBlocks(alignmentBlocksByPathRef.current[path] ?? [], lineCount)
-    );
-
-    const nextModes: Record<string, AlignmentMode> = {};
-    const nextDecorationIds = editor.deltaDecorations(
-      alignmentDecorationIdsRef.current,
-      blocks.map((block) => ({
-        range: new monaco.Range(block.startLine, 1, block.endLine, 1),
-        options: {
-          isWholeLine: true,
-          wholeLineClassName:
-            block.alignment === "center" ? "editor-align-center" : "editor-align-right",
-        },
-      }))
-    );
-
-    nextDecorationIds.forEach((decorationId: string, index: number) => {
-      nextModes[decorationId] = blocks[index].alignment;
+    statusStore.setCursorPosition({
+      line: lines.length,
+      column: lines[lines.length - 1].length + 1,
     });
-
-    alignmentDecorationIdsRef.current = nextDecorationIds;
-    alignmentDecorationModesRef.current = nextModes;
-    alignmentBlocksByPathRef.current[path] = blocks;
-  };
-
-  const updateAlignmentBlocks = (alignment: "left" | AlignmentMode) => {
-    const editor = editorRef.current;
-    const model = editor?.getModel();
-    if (!editor || !model || !activeFile?.path) return;
-
-    snapshotAlignmentBlocks(activeFile.path);
-    const lineCount = model.getLineCount();
-    const selections = editor.getSelections() ?? [];
-    let nextBlocks = alignmentBlocksByPathRef.current[activeFile.path] ?? [];
-
-    selections.forEach((selection: any) => {
-      const startLine = Math.max(1, Math.min(selection.startLineNumber, lineCount));
-      const endLine = Math.max(1, Math.min(selection.endLineNumber, lineCount));
-      const preservedBlocks = nextBlocks.flatMap((block) => {
-        if (block.endLine < startLine || block.startLine > endLine) return [block];
-        const updated: AlignmentBlock[] = [];
-        if (block.startLine < startLine) updated.push({ ...block, endLine: startLine - 1 });
-        if (block.endLine > endLine) updated.push({ ...block, startLine: endLine + 1 });
-        return updated;
-      });
-
-      nextBlocks = preservedBlocks;
-      if (alignment !== "left") {
-        nextBlocks.push({ startLine, endLine, alignment });
-      }
-    });
-
-    alignmentBlocksByPathRef.current[activeFile.path] = mergeAlignmentBlocks(
-      clampAlignmentBlocks(nextBlocks, lineCount)
+    statusStore.setSelectionLength(selectionLength);
+    statusStore.setActiveHeadingState(
+      editor.isActive("heading", { level: 1 })
+        ? "h1"
+        : editor.isActive("heading", { level: 2 })
+          ? "h2"
+          : editor.isActive("heading", { level: 3 })
+            ? "h3"
+            : "body"
     );
-    applyAlignmentDecorations(activeFile.path);
-    editor.focus();
-  };
-
-  const applyEdits = (edits: Array<{ range: any; text: string }>, source = "format-toolbar") => {
-    const editor = editorRef.current;
-    if (!editor || edits.length === 0) return;
-    editor.executeEdits(source, edits);
-    requestAnimationFrame(() => {
-      syncHeadingState();
-      relayoutEditor();
+    statusStore.setActiveFormats({
+      bold: editor.isActive("bold"),
+      italic: editor.isActive("italic"),
+      underline: editor.isActive("underline"),
+      strike: editor.isActive("strike"),
+      blockquote: editor.isActive("blockquote"),
+      codeBlock: editor.isActive("codeBlock"),
+      taskList: editor.isActive("taskList"),
+      alignLeft: editor.isActive({ textAlign: "left" }) || (!alignCenter && !alignRight),
+      alignCenter,
+      alignRight,
     });
-    editor.focus();
-  };
-
-  const transformSelectedBlocks = (transform: (text: string) => string) => {
-    const editor = editorRef.current;
-    const model = editor?.getModel();
-    const monaco = monacoRef.current;
-    if (!editor || !model || !monaco) return;
-
-    const edits = (editor.getSelections() ?? []).map((selection: any) => {
-      const startLine = selection.startLineNumber;
-      const endLine = selection.endLineNumber;
-      const range = new monaco.Range(startLine, 1, endLine, model.getLineMaxColumn(endLine));
-      return {
-        range,
-        text: transform(model.getValueInRange(range)),
-      };
-    });
-
-    applyEdits(edits);
-  };
-
-  const applyHeading = (level: 1 | 2 | 3) => {
-    const marker = `${"#".repeat(level)} `;
-    transformSelectedBlocks((text) =>
-      text
-        .split("\n")
-        .map((line) => {
-          const trimmed = line.trim();
-          if (!trimmed) return line;
-          return marker + trimmed.replace(/^#{1,6}\s+/, "");
-        })
-        .join("\n")
-    );
-  };
-
-  const applyBodyText = () => {
-    const editor = editorRef.current;
-    editor?.trigger("format-toolbar", "editor.unfold", null);
-    transformSelectedBlocks((text) =>
-      text
-        .split("\n")
-        .map((line) => line.replace(/^#{1,6}\s+/, ""))
-        .join("\n")
-    );
-    requestAnimationFrame(() => {
-      editor?.trigger("format-toolbar", "editor.unfold", null);
-    });
-  };
-
-  const applyAlignment = (alignment: "left" | AlignmentMode) => {
-    updateAlignmentBlocks(alignment);
-  };
+  }, [isReferenceFile]);
 
   const handleSelectionAi = async (mode: SelectionAction) => {
     const modelProfile = getModelProfileById(defaultSelectionModelId);
-    const editor = editorRef.current;
-    const model = editor?.getModel();
-    const selectedText = editor?.getModel()?.getValueInRange(editor.getSelection())?.trim() ?? "";
-    if (!modelProfile || !editor || !model || !selectedText) return;
+    const handle = tiptapRef.current;
+    if (!modelProfile || !handle) return;
+
+    const selectedText = handle.getSelectionText().trim();
+    if (!selectedText) return;
 
     setSelectionLoading(true);
     setSelectionError("");
@@ -588,17 +251,13 @@ const EditorPanel: React.FC = () => {
         modelProfile,
         taskType: mode,
         userMessage: selectedText,
-        documentContext: model.getValue(),
+        documentContext: handle.getMarkdown(),
         documentFileName: activeFile?.name,
         conversationHistory: [],
         selectionPrompt: prompt,
       });
 
-      setSelectionPreview({
-        mode,
-        original: selectedText,
-        result,
-      });
+      setSelectionPreview({ mode, original: selectedText, result });
       setSelectionPopup(null);
     } catch (error) {
       setSelectionError(error instanceof Error ? error.message : "AI request failed.");
@@ -607,250 +266,139 @@ const EditorPanel: React.FC = () => {
     }
   };
 
-  const handleEditorDidMount = (editor: any, monaco: any) => {
-    editorRef.current = editor;
-    monacoRef.current = monaco;
-    ensureMonacoTheme(monaco);
-    registerMarkdownHeadingFolding(monaco);
-    monaco.editor.setTheme(EDITOR_THEME);
-    registerReferenceCompletionProvider(monaco);
-    applyAlignmentDecorations(activeFile?.path);
-    syncHeadingState();
-
-    registerEditorBridge({
-      getSelectionText: () => editor.getModel()?.getValueInRange(editor.getSelection()) ?? "",
-      getSelectionRange: () => editor.getSelection() ?? null,
-      getContent: () => editor.getModel()?.getValue() ?? "",
-      applyText: ({ mode, text }) => {
-        const selection = editor.getSelection();
-        const model = editor.getModel();
-        if (!selection || !model) return;
-        const monacoRange = new monaco.Range(
-          selection.startLineNumber,
-          selection.startColumn,
-          selection.endLineNumber,
-          selection.endColumn
-        );
-
-        if (mode === "replaceSelection") {
-          applyEdits([{ range: monacoRange, text }], "selection-preview");
-          return;
-        }
-
-        if (mode === "insertAfterSelection") {
-          const range = new monaco.Range(
-            selection.endLineNumber,
-            selection.endColumn,
-            selection.endLineNumber,
-            selection.endColumn
-          );
-          applyEdits([{ range, text: `\n${text}` }], "selection-preview");
-          return;
-        }
-
-        if (selection.isEmpty()) {
-          applyEdits([{ range: monacoRange, text }], "editor-insert");
-        } else {
-          applyEdits([{ range: monacoRange, text }], "editor-insert");
-        }
-      },
-      focus: () => editor.focus(),
-    });
-
-    editor.onDidChangeCursorPosition((event: any) => {
-      setCursorPosition({
-        line: event.position.lineNumber,
-        column: event.position.column,
-      });
-      syncHeadingState();
-    });
-
-    editor.onDidChangeCursorSelection((event: any) => {
-      const selectedText = editor.getModel()?.getValueInRange(event.selection) ?? "";
-      setSelectionLength(editor.getModel()?.getValueLengthInRange(event.selection) ?? 0);
-      syncHeadingState();
-
-      if (isReferenceFile || !selectedText.trim()) {
-        setSelectionPopup(null);
-        return;
-      }
-
-      const selections = editor.getSelections() ?? [];
-      if (selections.length !== 1) {
-        setSelectionPopup(null);
-        return;
-      }
-
-      const visibleRanges = editor.getScrolledVisiblePosition({
-        lineNumber: event.selection.endLineNumber,
-        column: event.selection.endColumn,
-      });
-
-      const editorRect = editor.getDomNode()?.getBoundingClientRect();
-      if (!visibleRanges || !editorRect) return;
-
-      setSelectionPopup({
-        text: selectedText,
-        left: editorRect.left + visibleRanges.left,
-        top: editorRect.top + visibleRanges.top - 10,
-      });
-    });
-
-    editor.onDidBlurEditorText(() => {
-      window.setTimeout(() => {
-        setSelectionPopup((current) => current);
-      }, 0);
-    });
-
-    editor.onKeyDown((e: any) => {
-      if (e.keyCode === monaco.KeyCode.Escape) {
-        const editorDom = editor.getDomNode();
-        const suggestWidget = editorDom?.querySelector(".suggest-widget");
-        if (suggestWidget && suggestWidget.classList.contains("visible")) {
-          suggestionCooldownUntilRef.current = Date.now() + SUGGEST_COOLDOWN_MS;
-        }
-      }
-    });
-
-    editor.onDidChangeModelContent(() => {
-      if (suggestionTimeoutRef.current) window.clearTimeout(suggestionTimeoutRef.current);
-      if (idleTimeoutRef.current) window.clearTimeout(idleTimeoutRef.current);
-
-      suggestionTimeoutRef.current = window.setTimeout(() => {
-        const editor = editorRef.current;
-        const model = editor?.getModel();
-        const position = editor?.getPosition();
-        if (!model || !position) return;
-        const context = getSuggestionContext(model, position);
-        if (context && context.partial) {
-          if (hasMatchingEntry(context.partial)) {
-            suggestionCooldownUntilRef.current = 0;
-            triggerReferenceSuggestions();
-          }
-        }
-      }, TYPING_SUGGEST_DELAY_MS);
-
-      idleTimeoutRef.current = window.setTimeout(() => {
-        if (Date.now() < suggestionCooldownUntilRef.current) return;
-        const editor = editorRef.current;
-        const model = editor?.getModel();
-        const position = editor?.getPosition();
-        if (!model || !position) return;
-        const context = getSuggestionContext(model, position);
-        if (context && context.partial) {
-          if (hasMatchingEntry(context.partial)) {
-            triggerReferenceSuggestions();
-          }
-        }
-      }, IDLE_SUGGEST_DELAY_MS);
-
-      syncHeadingState();
-    });
+  const insertImageFromFile = (file: File) => {
+    const editor = tiptapRef.current?.getEditor();
+    if (!editor) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      editor.chain().focus().setImage({ src: dataUrl }).run();
+    };
+    reader.readAsDataURL(file);
   };
 
-  const handleEditorChange = useCallback((value: string | undefined) => {
-    if (ignoreNextChangeRef.current) {
-      ignoreNextChangeRef.current = false;
-      return;
+  const handleImageInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      insertImageFromFile(file);
+      e.target.value = "";
     }
+  };
+
+  const insertLink = () => {
+    const editor = tiptapRef.current?.getEditor();
+    if (!editor || !linkUrl.trim()) return;
+    if (linkText.trim()) {
+      editor.chain().focus().insertContent(`<a href="${linkUrl.trim()}">${linkText.trim()}</a>`).run();
+    } else {
+      editor.chain().focus().setLink({ href: linkUrl.trim() }).run();
+    }
+    closeLinkDialog();
+  };
+
+  const handleContentChange = useCallback((content: string) => {
+    if (activeFile?.isReadOnly) return;
     const path = loadedFilePathRef.current;
-    if (path && value !== undefined) {
-      updateFileContent(path, value);
+    if (path) {
+      updateFileContent(path, content);
     }
-  }, [updateFileContent]);
+  }, [activeFile?.isReadOnly, updateFileContent]);
+
+  const handleSelectionChange = useCallback((text: string) => {
+    if (text.trim()) {
+      useEditorStatusStore.getState().setSelectionLength(text.length);
+      const handle = tiptapRef.current;
+      const editor = handle?.getEditor();
+      if (editor) {
+        const { to } = editor.state.selection;
+        const selection = window.getSelection();
+        const rangeRect =
+          selection && selection.rangeCount > 0
+            ? selection.getRangeAt(0).getBoundingClientRect()
+            : null;
+        const coords = editor.view.coordsAtPos(to);
+        const hasRangeRect =
+          rangeRect &&
+          Number.isFinite(rangeRect.left) &&
+          Number.isFinite(rangeRect.bottom) &&
+          (rangeRect.width > 0 || rangeRect.height > 0);
+        const anchorLeft = hasRangeRect ? rangeRect.left + rangeRect.width / 2 : coords.left;
+        const anchorTop = hasRangeRect ? rangeRect.bottom + 8 : coords.bottom + 8;
+
+        setSelectionPopup({
+          text,
+          left: clamp(anchorLeft, 120, Math.max(120, window.innerWidth - 120)),
+          top: clamp(anchorTop, 8, Math.max(8, window.innerHeight - 56)),
+        });
+      }
+    } else {
+      useEditorStatusStore.getState().setSelectionLength(0);
+      setSelectionPopup(null);
+    }
+  }, []);
+
+  const handleUpdateCursor = useCallback(() => {
+    const handle = tiptapRef.current;
+    const editor = handle?.getEditor();
+    syncEditorStatus(editor);
+  }, [syncEditorStatus]);
+
+  const handleEditorStateChange = useCallback((editor: Editor) => {
+    syncEditorStatus(editor);
+  }, [syncEditorStatus]);
 
   useEffect(() => {
-    const editor = editorRef.current;
+    const editor = tiptapRef.current?.getEditor();
     if (!editor || !activeFile) return;
     if (loadedFilePathRef.current === activeFile.path) return;
+    if (activeFile.historyViewMode === "compare") {
+      loadedFilePathRef.current = activeFile.path;
+      return;
+    }
 
-    if (loadedFilePathRef.current) {
+    if (loadedFilePathRef.current && wrapperRef.current) {
       editorStatesRef.current.set(loadedFilePathRef.current, {
-        scrollTop: editor.getScrollTop(),
-        scrollLeft: editor.getScrollLeft(),
-        cursorLineNumber: editor.getPosition()?.lineNumber ?? 1,
-        cursorColumn: editor.getPosition()?.column ?? 1,
+        scrollTop: wrapperRef.current.scrollTop,
       });
     }
 
-    ignoreNextChangeRef.current = true;
-    editor.setValue(activeFile.content);
+    const contentFormat = getEditorContentFormat(activeFile.fileMode);
+    const nextContent = contentFormat === "docx" ? JSON.parse(activeFile.content) : activeFile.content;
+    editor.commands.setContent(nextContent, { emitUpdate: false });
     loadedFilePathRef.current = activeFile.path;
 
-    const monaco = monacoRef.current;
-    if (monaco) {
-      const model = editor.getModel();
-      if (model) {
-        monaco.editor.setModelLanguage(model, "markdown");
-      }
-    }
-
     const saved = editorStatesRef.current.get(activeFile.path);
-    if (saved) {
+    if (saved && wrapperRef.current) {
       requestAnimationFrame(() => {
-        editor.setScrollTop(saved.scrollTop);
-        editor.setScrollLeft(saved.scrollLeft);
-        editor.setPosition({ lineNumber: saved.cursorLineNumber, column: saved.cursorColumn });
+        wrapperRef.current!.scrollTop = saved.scrollTop;
       });
-    } else {
+    } else if (wrapperRef.current) {
       requestAnimationFrame(() => {
-        editor.setScrollTop(0);
+        wrapperRef.current!.scrollTop = 0;
       });
     }
 
-    applyAlignmentDecorations(activeFile.path);
-    syncHeadingState();
-  }, [activeFile?.path]);
+    syncEditorStatus(editor);
+  }, [activeFile?.path, syncEditorStatus]);
 
   const handleSave = async () => {
-    if (!activeFile) return;
+    if (!activeFile || activeFile.isReadOnly) return;
     await saveFile(activeFile.path);
     setLastSavedAt(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
   };
 
   useEffect(() => {
-    if (monacoRef.current) registerReferenceCompletionProvider(monacoRef.current);
-  }, [referenceEntries, isReferenceFile, activeFile?.path]);
-
-  useEffect(() => {
-    if (!editorContainerRef.current) return;
-    const resizeObserver = new ResizeObserver(() => {
-      relayoutEditor();
-    });
-    resizeObserver.observe(editorContainerRef.current);
-    return () => resizeObserver.disconnect();
-  }, [activeFile?.path]);
-
-  useEffect(() => {
-    if (autoSaveTimeoutRef.current) window.clearTimeout(autoSaveTimeoutRef.current);
-    if (!activeFile?.isDirty) return;
-
-    autoSaveTimeoutRef.current = window.setTimeout(() => {
-      void saveAllFiles().then(() => {
-        setLastSavedAt(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
-      });
-    }, AUTO_SAVE_DELAY_MS);
-
-    return () => {
-      if (autoSaveTimeoutRef.current) window.clearTimeout(autoSaveTimeoutRef.current);
-    };
-  }, [activeFile?.content, activeFile?.isDirty, activeFile?.path, saveAllFiles]);
-
-  useEffect(() => {
     if (!rootPath) return;
-
     void watchWorkspace(rootPath);
     const disposeWorkspaceChanged = onWorkspaceChanged(({ rootPath: changedRootPath }) => {
-      if (changedRootPath === rootPath) void refreshWorkspace();
+      if (changedRootPath !== rootPath) return;
+      if (workspaceRefreshTimeoutRef.current) window.clearTimeout(workspaceRefreshTimeoutRef.current);
+      workspaceRefreshTimeoutRef.current = window.setTimeout(() => {
+        void refreshWorkspace();
+      }, 500);
     });
-
-    const handleFocus = () => {
-      void refreshWorkspace();
-    };
-
-    window.addEventListener("focus", handleFocus);
     return () => {
-      window.removeEventListener("focus", handleFocus);
+      if (workspaceRefreshTimeoutRef.current) window.clearTimeout(workspaceRefreshTimeoutRef.current);
       disposeWorkspaceChanged();
       void unwatchWorkspace(rootPath);
     };
@@ -862,43 +410,54 @@ const EditorPanel: React.FC = () => {
         e.preventDefault();
         void handleSave();
       }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        setFindReplaceOpen(true);
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "h") {
+        e.preventDefault();
+        setFindReplaceOpen(true);
+      }
     };
-
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [activeFile]);
 
   useEffect(() => {
     return () => {
-      completionDisposableRef.current.forEach((disposable) => disposable.dispose());
-      if (suggestionTimeoutRef.current) window.clearTimeout(suggestionTimeoutRef.current);
-      if (idleTimeoutRef.current) window.clearTimeout(idleTimeoutRef.current);
-      if (autoSaveTimeoutRef.current) window.clearTimeout(autoSaveTimeoutRef.current);
       registerEditorBridge(null);
     };
   }, []);
 
   useEffect(() => {
-    return () => {
-      snapshotAlignmentBlocks(activeFile?.path);
-    };
-  }, [activeFile?.path]);
+    const handle = tiptapRef.current;
+    if (!handle || !activeFile?.path) return;
+    const editor = handle.getEditor();
+    if (!editor) return;
 
-  useEffect(() => {
-    if (!activeFile?.path || !editorRef.current) {
-      alignmentDecorationIdsRef.current = [];
-      alignmentDecorationModesRef.current = {};
-      setActiveHeadingState("body");
-      return;
-    }
-    applyAlignmentDecorations(activeFile.path);
-    syncHeadingState();
-  }, [activeFile?.path, isReferenceFile]);
+    registerEditorBridge({
+      getSelectionText: () => handle.getSelectionText(),
+      getSelectionRange: () => {
+        const { from, to } = editor.state.selection;
+        return { startLineNumber: 0, startColumn: 0, endLineNumber: 0, endColumn: 0, from, to } as any;
+      },
+      getContent: () => handle.getMarkdown(),
+      applyText: ({ mode, text }) => {
+        if (mode === "replaceSelection") {
+          handle.replaceSelection(text);
+        } else if (mode === "insertAfterSelection") {
+          handle.insertText(`\n${text}`);
+        } else {
+          handle.insertText(text);
+        }
+      },
+      focus: () => handle.focus(),
+    });
+  }, [activeFile?.path]);
 
   useEffect(() => {
     const tabsBars = document.querySelectorAll('.tabs-bar');
     if (tabsBars.length === 0) return;
-
     const handleWheel = (e: Event) => {
       const we = e as WheelEvent;
       if (Math.abs(we.deltaY) > Math.abs(we.deltaX)) {
@@ -906,24 +465,16 @@ const EditorPanel: React.FC = () => {
         (we.currentTarget as HTMLElement).scrollLeft += we.deltaY;
       }
     };
-
-    tabsBars.forEach((bar) => {
-      bar.addEventListener('wheel', handleWheel, { passive: false });
-    });
-
-    return () => {
-      tabsBars.forEach((bar) => {
-        bar.removeEventListener('wheel', handleWheel);
-      });
-    };
+    tabsBars.forEach((bar) => bar.addEventListener('wheel', handleWheel, { passive: false }));
+    return () => tabsBars.forEach((bar) => bar.removeEventListener('wheel', handleWheel));
   }, []);
 
   const handleExport = async () => {
+    const { exportFormat, exportTemplateId, setExportError, closeExportDialog } = useEditorUIStore.getState();
     if (!activeFile) {
-      setExportError("There is no content to export.");
+      setExportError(t("editor.errors.noContentToExport"));
       return;
     }
-
     try {
       if (exportFormat === "txt") {
         const parentPath = getParentPath(activeFile.path);
@@ -934,7 +485,7 @@ const EditorPanel: React.FC = () => {
           .sort((left, right) => compareNodeNames(left.name, right.name));
 
         if (siblingFiles.length === 0) {
-          throw new Error("No text files were found in this folder to merge and export.");
+          throw new Error(t("editor.errors.noTextFilesToExport"));
         }
 
         const mergedContents = await Promise.all(
@@ -956,10 +507,9 @@ const EditorPanel: React.FC = () => {
         });
       } else {
         if (!activeFile.content.trim()) {
-          setExportError("There is no content to export.");
+          setExportError(t("editor.errors.noContentToExport"));
           return;
         }
-
         const filenameBase = activeFile.name.replace(/\.[^/.]+$/, "");
         await exportDocument({
           format: exportFormat,
@@ -967,67 +517,313 @@ const EditorPanel: React.FC = () => {
           title: filenameBase || activeFile.name,
           content: activeFile.content,
           filenameBase: filenameBase || "document",
+          docJson: tiptapRef.current?.getJSON(),
+          docxPackageState: activeFile.docxPackageState,
         });
       }
       setExportError("");
-      setIsExportDialogOpen(false);
-      setIsExportMenuOpen(false);
+      closeExportDialog();
     } catch (error) {
-      setExportError(error instanceof Error ? error.message : "Failed to export document.");
+      setExportError(error instanceof Error ? error.message : t("editor.errors.exportFailed"));
     }
   };
-
-  const toolbarButtonClass = (isActive = false) => `toolbar-button${isActive ? " active" : ""}`;
 
   const fileStats = useMemo(() => {
     const content = activeFile?.content || "";
     const words = content.trim() ? content.trim().split(/\s+/).length : 0;
+    const charsNoSpace = content.replace(/\s/g, "").length;
+    const paragraphs = content.trim() ? content.trim().split(/\n\s*\n/).length : 0;
+    const lines = content.trim() ? content.trim().split(/\n/).length : 0;
+    const readingTimeMin = Math.max(1, Math.ceil(words / 200));
     return {
       characters: content.length,
+      charsNoSpace,
       words,
-      language: isReferenceFile ? "Plain Text" : "Markdown",
+      paragraphs,
+      lines,
+      readingTime: readingTimeMin,
+      language: isReferenceFile
+        ? t("editor.status.plainText")
+        : activeFile?.fileMode === "docx"
+          ? "DOCX"
+          : activeFile?.fileMode === "markdown"
+            ? "Markdown"
+            : t("editor.status.plainText"),
     };
-  }, [activeFile, isReferenceFile]);
+  }, [activeFile, isReferenceFile, t]);
+
+  const getBlueprintMatchesForHeading = useCallback((headingText: string): OutlineBlueprintMatch[] => {
+    if (!activeFile || isBlueprintTab(activeFile)) return [];
+    const fileName = activeFile.name.toLowerCase();
+    const heading = headingText.trim().toLowerCase();
+    if (!heading) return [];
+
+    const matches: OutlineBlueprintMatch[] = [];
+    for (const blueprint of blueprints) {
+      for (const node of blueprint.nodes) {
+        const terms = [
+          node.title,
+          ...(node.linkedChapters ?? []),
+          ...(node.storyEvents ?? []).flatMap((event) => [event.content, event.foreshadowing]),
+          node.characterName,
+          node.identity,
+          ...(node.relationships ?? []).flatMap((relationship) => [relationship.relation, relationship.name, relationship.identity]),
+          ...(node.keywords ?? []),
+        ]
+          .map((term) => term?.trim().toLowerCase())
+          .filter((term): term is string => Boolean(term));
+        const hitsHeading = terms.some((term) => heading.includes(term) || term.includes(heading));
+        const hitsFile = terms.some((term) => fileName.includes(term) || term.includes(fileName.replace(/\.[^.]+$/, "")));
+        if (hitsHeading || hitsFile) {
+          matches.push({
+            blueprintId: blueprint.id,
+            nodeId: node.id,
+            blueprintName: blueprint.name,
+            nodeTitle: node.title || node.characterName || t("blueprint.untitledNode"),
+          });
+        }
+      }
+    }
+    return matches;
+  }, [activeFile, blueprints, t]);
+
+  const handleOutlineBlueprintClick = useCallback((match: OutlineBlueprintMatch) => {
+    focusBlueprintNode(match.blueprintId, match.nodeId);
+    openBlueprintTab(match.blueprintId, match.blueprintName, match.nodeId);
+  }, [focusBlueprintNode, openBlueprintTab]);
 
   const handleTabContextMenu = useCallback((e: React.MouseEvent, tabPath: string) => {
     e.preventDefault();
     setContextMenu({ x: e.clientX, y: e.clientY, tabPath });
   }, []);
 
+  const hasEditorFileDrag = (event: React.DragEvent) =>
+    Array.from(event.dataTransfer.types).includes("application/x-novel-file-path");
+
+  const getEditorDraggedFilePath = (event: React.DragEvent) =>
+    event.dataTransfer.getData("application/x-novel-file-path");
+
+  const handleEditorDragOver = useCallback((event: React.DragEvent, target: { type: "group"; groupId: string } | { type: "new" }) => {
+    if (!hasEditorFileDrag(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = target.type === "new" && editorGroups.length >= MAX_EDITOR_GROUPS ? "none" : "copy";
+    setIsEditorDragActive(true);
+    setEditorDropTarget(target);
+  }, [editorGroups.length]);
+
+  const handleEditorDragLeave = useCallback((event: React.DragEvent) => {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setIsEditorDragActive(false);
+    setEditorDropTarget(null);
+  }, []);
+
+  const handleDropOnEditorGroup = useCallback(async (event: React.DragEvent, groupId: string) => {
+    if (!hasEditorFileDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const filePath = getEditorDraggedFilePath(event);
+    setIsEditorDragActive(false);
+    setEditorDropTarget(null);
+    if (!filePath) return;
+    setActiveGroup(groupId);
+    await openFile(filePath, groupId);
+  }, [openFile, setActiveGroup]);
+
+  const handleDropOnNewEditorGroup = useCallback(async (event: React.DragEvent) => {
+    if (!hasEditorFileDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const filePath = getEditorDraggedFilePath(event);
+    setIsEditorDragActive(false);
+    setEditorDropTarget(null);
+    if (!filePath) return;
+    if (editorGroups.length >= MAX_EDITOR_GROUPS) {
+      setErrorMessage(t("editor.dragDrop.maxWindows"));
+      await openFile(filePath, activeGroupId);
+      return;
+    }
+    await openFileInNewGroup(filePath);
+  }, [activeGroupId, editorGroups.length, openFile, openFileInNewGroup, setErrorMessage, t]);
+
   const getContextMenuItems = useCallback((tabPath: string): ContextMenuItem[] => {
     const otherGroups = editorGroups.filter((g) => g.id !== activeGroupId);
     return [
-      {
-        label: "向右分屏",
-        icon: <SplitSquareHorizontal size={14} />,
-        action: () => splitEditor("horizontal"),
-      },
-      {
-        label: "向下方分屏",
-        icon: <SplitSquareVertical size={14} />,
-        action: () => splitEditor("vertical"),
-      },
+      ...(editorGroups.length < MAX_EDITOR_GROUPS
+        ? [
+            { label: t("editor.context.splitRight"), icon: <SplitSquareHorizontal size={14} />, action: () => splitEditor("horizontal") },
+            { label: t("editor.context.splitDown"), icon: <SplitSquareVertical size={14} />, action: () => splitEditor("vertical") },
+          ]
+        : []),
       ...(otherGroups.length > 0
         ? [
             { label: "", separator: true, action: () => {} },
             ...otherGroups.map((g) => ({
-              label: `移动到 ${g.id === "primary" ? "主窗口" : `分屏 ${editorGroups.indexOf(g)}`}`,
+              label: t("editor.context.moveTo", {
+                target: g.id === "primary" ? t("editor.context.primaryGroup") : t("editor.context.splitGroup", { index: editorGroups.indexOf(g) }),
+              }),
               action: () => moveTabToGroup(tabPath, g.id),
             })),
           ]
         : []),
     ];
-  }, [editorGroups, activeGroupId, splitEditor, moveTabToGroup]);
+  }, [editorGroups, activeGroupId, splitEditor, moveTabToGroup, t]);
+
+  const exportTemplates = useMemo(() => getExportTemplates(), []);
+
+  const handleToolbarToggleHeading = useCallback((level: 1 | 2 | 3) => {
+    tiptapRef.current?.getEditor()?.chain().focus().toggleHeading({ level }).run();
+  }, []);
+
+  const handleToolbarToggleBodyText = useCallback(() => {
+    tiptapRef.current?.getEditor()?.chain().focus().setParagraph().run();
+  }, []);
+
+  const handleToolbarToggleFormat = useCallback((format: "bold" | "italic" | "underline" | "strike") => {
+    const editor = tiptapRef.current?.getEditor();
+    if (!editor) return;
+    const cmd = format === "bold" ? "toggleBold" : format === "italic" ? "toggleItalic" : format === "underline" ? "toggleUnderline" : "toggleStrike";
+    editor.chain().focus()[cmd]().run();
+  }, []);
+
+  const handleToolbarSetAlignment = useCallback((alignment: "left" | "center" | "right") => {
+    tiptapRef.current?.getEditor()?.chain().focus().setTextAlign(alignment).run();
+  }, []);
+
+  const handleToolbarApplyColor = useCallback((color: string) => {
+    tiptapRef.current?.getEditor()?.chain().focus().setColor(color).run();
+  }, []);
+
+  const handleToolbarApplyHighlight = useCallback((color: string) => {
+    const editor = tiptapRef.current?.getEditor();
+    if (!editor) return;
+    if (color) {
+      editor.chain().focus().toggleHighlight({ color }).run();
+    } else {
+      editor.chain().focus().unsetHighlight().run();
+    }
+  }, []);
+
+  const handleToolbarApplyFontFamily = useCallback((font: string) => {
+    const editor = tiptapRef.current?.getEditor();
+    if (!editor) return;
+    if (font) {
+      editor.chain().focus().setFontFamily(font).run();
+    } else {
+      editor.chain().focus().unsetFontFamily().run();
+    }
+  }, []);
+
+  const handleToolbarApplyLineHeight = useCallback((height: string) => {
+    tiptapRef.current?.getEditor()?.chain().focus().setLineHeight(height).run();
+  }, []);
+
+  const handleToolbarToggleBlockquote = useCallback(() => {
+    tiptapRef.current?.getEditor()?.chain().focus().toggleBlockquote().run();
+  }, []);
+
+  const handleToolbarToggleCodeBlock = useCallback(() => {
+    tiptapRef.current?.getEditor()?.chain().focus().toggleCodeBlock().run();
+  }, []);
+
+  const handleToolbarToggleTaskList = useCallback(() => {
+    tiptapRef.current?.getEditor()?.chain().focus().toggleTaskList().run();
+  }, []);
+
+  const handleToolbarInsertHorizontalRule = useCallback(() => {
+    tiptapRef.current?.getEditor()?.chain().focus().setHorizontalRule().run();
+  }, []);
+
+  const handleToolbarInsertTable = useCallback((rows: number, cols: number) => {
+    tiptapRef.current?.getEditor()?.chain().focus().insertTable({ rows, cols, withHeaderRow: true }).run();
+  }, []);
+
+  const handleToolbarTableAction = useCallback((action: string) => {
+    const editor = tiptapRef.current?.getEditor();
+    if (!editor) return;
+    switch (action) {
+      case "addColumnBefore": editor.chain().focus().addColumnBefore().run(); break;
+      case "addColumnAfter": editor.chain().focus().addColumnAfter().run(); break;
+      case "addRowBefore": editor.chain().focus().addRowBefore().run(); break;
+      case "addRowAfter": editor.chain().focus().addRowAfter().run(); break;
+      case "deleteColumn": editor.chain().focus().deleteColumn().run(); break;
+      case "deleteRow": editor.chain().focus().deleteRow().run(); break;
+      case "deleteTable": editor.chain().focus().deleteTable().run(); break;
+      case "mergeCells": editor.chain().focus().mergeCells().run(); break;
+      case "splitCell": editor.chain().focus().splitCell().run(); break;
+      case "toggleHeaderRow": editor.chain().focus().toggleHeaderRow().run(); break;
+    }
+  }, []);
+
+  const handleToolbarIndent = useCallback(() => {
+    tiptapRef.current?.getEditor()?.chain().focus().indent().run();
+  }, []);
+
+  const handleToolbarOutdent = useCallback(() => {
+    tiptapRef.current?.getEditor()?.chain().focus().outdent().run();
+  }, []);
+
+  const handleToolbarUndo = useCallback(() => {
+    tiptapRef.current?.getEditor()?.chain().focus().undo().run();
+  }, []);
+
+  const handleToolbarRedo = useCallback(() => {
+    tiptapRef.current?.getEditor()?.chain().focus().redo().run();
+  }, []);
+
+  const handleToolbarToggleWordWrap = useCallback(() => {
+    toggleWordWrap();
+  }, []);
+
+  const handleToolbarToggleOutline = useCallback(() => {
+    toggleOutline();
+  }, []);
+
+  const handleToolbarTogglePageView = useCallback(() => {
+    togglePageViewMode();
+  }, []);
+
+  const handleToolbarToggleFocusMode = useCallback(() => {
+    toggleFocusMode();
+  }, []);
+
+  const handleToolbarSave = useCallback(() => {
+    void handleSave();
+  }, [handleSave]);
+
+  const handleToolbarExport = useCallback((format: ExportFormat) => {
+    openExportDialog(format);
+  }, []);
+
+  const handleToolbarInsertImage = useCallback(() => {
+    imageInputRef.current?.click();
+  }, []);
+
+  const handleToolbarInsertLink = useCallback(() => {
+    const editor = tiptapRef.current?.getEditor();
+    let text = "";
+    if (editor) {
+      const { from, to } = editor.state.selection;
+      if (from !== to) {
+        text = editor.state.doc.textBetween(from, to);
+      }
+    }
+    openLinkDialog(text);
+  }, []);
 
   return (
     <div className="editor-panel">
       {editorGroups.length > 1 ? (
-        <div className={`editor-groups-container split-${editorGroups.length > 2 ? "both" : editorGroups[1] ? "horizontal" : "vertical"}`}>
+        <div
+          className={`editor-groups-container split-${editorGroups.length > 2 ? "both" : editorGroups[1] ? "horizontal" : "vertical"}`}
+          onDragLeave={handleEditorDragLeave}
+        >
           {editorGroups.map((group) => (
             <div
               key={group.id}
-              className={`editor-group ${group.id === activeGroupId ? "active" : ""}`}
+              className={`editor-group ${group.id === activeGroupId ? "active" : ""}${editorDropTarget?.type === "group" && editorDropTarget.groupId === group.id ? " drop-active" : ""}`}
               onClick={() => setActiveGroup(group.id)}
+              onDragOver={(event) => handleEditorDragOver(event, { type: "group", groupId: group.id })}
+              onDrop={(event) => void handleDropOnEditorGroup(event, group.id)}
             >
               <div className="tabs-bar">
                 {group.tabs.length > 0 ? (
@@ -1035,74 +831,90 @@ const EditorPanel: React.FC = () => {
                     <button
                       key={tab.path}
                       className={`tab-button ${group.activeTabPath === tab.path ? "active" : ""}`}
-                      onClick={() => {
-                        setActiveGroup(group.id);
-                        setActiveFile(tab.path);
-                      }}
+                      onClick={() => { setActiveGroup(group.id); setActiveFile(tab.path); }}
                       onContextMenu={(e) => handleTabContextMenu(e, tab.path)}
                     >
                       <span>{tab.name}</span>
                       {tab.isDirty && <span className="dirty-dot" />}
-                      <span
-                        className="close-tab"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          closeTab(tab.path);
-                        }}
-                      >
+                      <span className="close-tab" onClick={(e) => { e.stopPropagation(); closeTab(tab.path); }}>
                         <X size={12} />
                       </span>
                     </button>
                   ))
                 ) : (
-                  <div className="tabs-empty">No open editors</div>
+                  <div className="tabs-empty">{t("editor.tabs.noOpenEditors")}</div>
                 )}
                 {editorGroups.length > 1 && (
-                  <button
-                    className="close-group-btn"
-                    onClick={() => closeGroup(group.id)}
-                    title="关闭分屏"
-                  >
+                  <button className="close-group-btn" onClick={() => closeGroup(group.id)} title={t("editor.context.closeSplit")}>
                     <X size={12} />
                   </button>
                 )}
               </div>
               <div className="editor-container">
-                {group.tabs.find((t) => t.path === group.activeTabPath) ? (
-                  <Editor
-                    key={group.activeTabPath}
-                    height="100%"
-                    defaultLanguage="markdown"
-                    value={group.tabs.find((t) => t.path === group.activeTabPath)?.content ?? ""}
-                    onChange={(value) => {
-                      if (group.activeTabPath && value !== undefined) {
-                        updateFileContent(group.activeTabPath, value);
-                      }
-                    }}
-                    theme={EDITOR_THEME}
-                    options={{
-                      minimap: { enabled: true },
-                      fontFamily: DEFAULT_EDITOR_FONT_FAMILY,
-                      fontSize,
-                      lineNumbers: "on",
-                      scrollBeyondLastLine: true,
-                      automaticLayout: true,
-                      wordWrap,
-                      renderWhitespace: "selection",
-                      folding: true,
-                      showFoldingControls: "mouseover",
-                      smoothScrolling: true,
-                      cursorBlinking: "smooth",
-                    }}
-                  />
-                ) : (
-                  <div className="empty-state">
-                    <p>Open a file from Explorer to start editing</p>
-                  </div>
+                {editorDropTarget?.type === "group" && editorDropTarget.groupId === group.id && (
+                  <div className="editor-drop-overlay">{t("editor.dragDrop.openHere")}</div>
                 )}
+                {(() => {
+                  const groupActiveTab = group.tabs.find((t) => t.path === group.activeTabPath);
+                  if (!groupActiveTab) {
+                    return (
+                      <div className="empty-state">
+                        <p>{t("editor.empty.openFile")}</p>
+                      </div>
+                    );
+                  }
+                  if (isBlueprintTab(groupActiveTab)) {
+                    return <BlueprintEditor blueprintId={groupActiveTab.blueprintId!} />;
+                  }
+                  if (groupActiveTab.fileMode === "image") {
+                    return (
+                      <div className="image-preview">
+                        <img src={groupActiveTab.content} alt={groupActiveTab.name} />
+                        <span>{groupActiveTab.name}</span>
+                      </div>
+                    );
+                  }
+                  if (groupActiveTab.fileMode === "unsupported") {
+                    return (
+                      <div className="empty-state">
+                        <p>{t("editor.unsupportedPreview")}</p>
+                      </div>
+                    );
+                  }
+                  if (groupActiveTab.historyViewMode === "compare") {
+                    return <HistoryDiffView content={groupActiveTab.content} />;
+                  }
+                  return (
+                    <TipTapEditor
+                      key={group.activeTabPath}
+                      ref={tiptapRef}
+                      content={groupActiveTab.content}
+                      onChange={groupActiveTab.isReadOnly ? undefined : handleContentChange}
+                      onSelectionChange={handleSelectionChange}
+                      onEditorStateChange={handleEditorStateChange}
+                      onFocus={handleUpdateCursor}
+                      onBlur={() => setSelectionPopup((c) => c)}
+                      contentFormat={getEditorContentFormat(groupActiveTab.fileMode)}
+                      pageViewMode={isPageViewMode}
+                      referenceEntries={referenceEntries}
+                      editable={!groupActiveTab.isReadOnly}
+                    />
+                  );
+                })()}
               </div>
             </div>
           ))}
+          {isEditorDragActive && (
+            <div
+              className={`editor-new-group-drop-zone ${editorGroups.length >= MAX_EDITOR_GROUPS ? "disabled" : ""}${editorDropTarget?.type === "new" ? " drop-active" : ""}`}
+              onDragOver={(event) => handleEditorDragOver(event, { type: "new" })}
+              onDrop={(event) => void handleDropOnNewEditorGroup(event)}
+            >
+              {editorGroups.length >= MAX_EDITOR_GROUPS
+                ? t("editor.dragDrop.maxWindows")
+                : t("editor.dragDrop.openNewWindow")}
+            </div>
+          )}
         </div>
       ) : (
         <>
@@ -1117,284 +929,192 @@ const EditorPanel: React.FC = () => {
                 >
                   <span>{tab.name}</span>
                   {tab.isDirty && <span className="dirty-dot" />}
-                  <span
-                    className="close-tab"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      closeTab(tab.path);
-                    }}
-                  >
+                  <span className="close-tab" onClick={(e) => { e.stopPropagation(); closeTab(tab.path); }}>
                     <X size={12} />
                   </span>
                 </button>
               ))
             ) : (
-              <div className="tabs-empty">No open editors</div>
+              <div className="tabs-empty">{t("editor.tabs.noOpenEditors")}</div>
             )}
           </div>
-      <div className="panel-header">
-        <div className="editor-title-group">
-          <h2>{activeFile ? activeFile.name : "No file selected"}</h2>
-          {activeFile && (
-            <span className="save-indicator">
-              {activeFile.isDirty ? "Unsaved changes" : `Last saved ${lastSavedAt}`}
-            </span>
-          )}
-        </div>
-        <div className="panel-actions">
-          <div className="format-toolbar">
-            <button
-              className={toolbarButtonClass(activeHeadingState === "h1")}
-              onClick={() => applyHeading(1)}
-              title="Heading 1"
-              disabled={!activeFile || isReferenceFile}
-            >
-              <Heading1 size={16} />
-            </button>
-            <button
-              className={toolbarButtonClass(activeHeadingState === "h2")}
-              onClick={() => applyHeading(2)}
-              title="Heading 2"
-              disabled={!activeFile || isReferenceFile}
-            >
-              <Heading2 size={16} />
-            </button>
-            <button
-              className={toolbarButtonClass(activeHeadingState === "h3")}
-              onClick={() => applyHeading(3)}
-              title="Heading 3"
-              disabled={!activeFile || isReferenceFile}
-            >
-              <Heading3 size={16} />
-            </button>
-            <button
-              className={toolbarButtonClass(activeHeadingState === "body")}
-              onClick={applyBodyText}
-              title="Body Text"
-              disabled={!activeFile || isReferenceFile}
-            >
-              <Type size={16} />
-            </button>
-            <button className={toolbarButtonClass()} onClick={() => applyAlignment("left")} title="Align Left" disabled={!activeFile}>
-              <AlignLeft size={16} />
-            </button>
-            <button className={toolbarButtonClass()} onClick={() => applyAlignment("center")} title="Align Center" disabled={!activeFile}>
-              <AlignCenter size={16} />
-            </button>
-            <button className={toolbarButtonClass()} onClick={() => applyAlignment("right")} title="Align Right" disabled={!activeFile}>
-              <AlignRight size={16} />
-            </button>
-            <div className="font-size-control">
-              <button
-                className={toolbarButtonClass()}
-                onClick={() => setFontSize(prev => Math.max(12, prev - 2))}
-                title="Decrease Font Size"
-                disabled={!activeFile}
-              >
-                -
-              </button>
-              <span className="font-size-display">{fontSize}px</span>
-              <button
-                className={toolbarButtonClass()}
-                onClick={() => setFontSize(prev => Math.min(24, prev + 2))}
-                title="Increase Font Size"
-                disabled={!activeFile}
-              >
-                +
-              </button>
+          {!isNonTextPreviewTab(activeFile) && (
+            <div className="panel-header">
+              <div className="file-info-row">
+                <h2>{activeFile ? activeFile.name : t("editor.header.noFileSelected")}</h2>
+                {activeFile && (
+                  <span className="save-indicator">
+                    {activeFile.isReadOnly
+                      ? t("history.readOnly")
+                      : activeFile.isDirty
+                      ? t("editor.header.unsavedChanges")
+                      : lastSavedAt
+                        ? t("editor.header.lastSaved", { time: lastSavedAt })
+                        : t("editor.header.notSavedYet")}
+                  </span>
+                )}
+              </div>
+              <EditorToolbar
+                editor={tiptapRef.current?.getEditor() ?? null}
+                activeFile={activeFile ? { name: activeFile.name, isDirty: activeFile.isDirty, fileMode: activeFile.fileMode, isReadOnly: activeFile.isReadOnly } : null}
+                onToggleFormat={handleToolbarToggleFormat}
+                onToggleHeading={handleToolbarToggleHeading}
+                onToggleBodyText={handleToolbarToggleBodyText}
+                onSetAlignment={handleToolbarSetAlignment}
+                onApplyColor={handleToolbarApplyColor}
+                onApplyHighlight={handleToolbarApplyHighlight}
+                onApplyFontFamily={handleToolbarApplyFontFamily}
+                onApplyLineHeight={handleToolbarApplyLineHeight}
+                onToggleBlockquote={handleToolbarToggleBlockquote}
+                onToggleCodeBlock={handleToolbarToggleCodeBlock}
+                onToggleTaskList={handleToolbarToggleTaskList}
+                onInsertHorizontalRule={handleToolbarInsertHorizontalRule}
+                onInsertTable={handleToolbarInsertTable}
+                onTableAction={handleToolbarTableAction}
+                onIndent={handleToolbarIndent}
+                onOutdent={handleToolbarOutdent}
+                onUndo={handleToolbarUndo}
+                onRedo={handleToolbarRedo}
+                onToggleWordWrap={handleToolbarToggleWordWrap}
+                onToggleOutline={handleToolbarToggleOutline}
+                onTogglePageView={handleToolbarTogglePageView}
+                onToggleFocusMode={handleToolbarToggleFocusMode}
+                onSave={handleToolbarSave}
+                onExport={handleToolbarExport}
+                onInsertImage={handleToolbarInsertImage}
+                onInsertLink={handleToolbarInsertLink}
+              />
             </div>
-          </div>
-          <button onClick={() => void handleSave()} title="Save" disabled={!activeFile}>
-            <Save size={16} />
-          </button>
-          <button
-            onClick={() => setWordWrap((current) => (current === "on" ? "off" : "on"))}
-            title="Toggle Word Wrap"
-            disabled={!activeFile}
-          >
-            <WrapText size={16} />
-          </button>
-          <div className="export-menu-wrap">
-            <button
-              onClick={() => setIsExportMenuOpen((current) => !current)}
-              title="Export"
-              disabled={!activeFile}
+          )}
+          <div className="editor-main-layout" onDragLeave={handleEditorDragLeave}>
+            {isOutlineOpen && activeFile && !isNonTextPreviewTab(activeFile) && (
+              <OutlinePanel
+                editor={tiptapRef.current?.getEditor() ?? null}
+                visible={isOutlineOpen}
+                getBlueprintMatches={getBlueprintMatchesForHeading}
+                onBlueprintMatchClick={handleOutlineBlueprintClick}
+              />
+            )}
+            <div
+              className={`editor-container${isFocusMode ? " focus-mode" : ""}${isPageViewMode ? " page-view-mode" : ""}${editorDropTarget?.type === "group" && editorDropTarget.groupId === activeGroupId ? " drop-active" : ""}`}
+              ref={wrapperRef}
+              style={{ position: "relative" }}
+              onDragOver={(event) => handleEditorDragOver(event, { type: "group", groupId: activeGroupId })}
+              onDrop={(event) => void handleDropOnEditorGroup(event, activeGroupId)}
             >
-              <Download size={16} />
-              <ChevronDown size={14} />
-            </button>
-            {isExportMenuOpen && activeFile && (
-              <div className="export-menu">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setExportFormat("txt");
-                    setIsExportDialogOpen(true);
-                    setIsExportMenuOpen(false);
-                  }}
-                >
-                  Export as TXT
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setExportFormat("pdf");
-                    setIsExportDialogOpen(true);
-                    setIsExportMenuOpen(false);
-                  }}
-                >
-                  Export as PDF
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setExportFormat("docx");
-                    setIsExportDialogOpen(true);
-                    setIsExportMenuOpen(false);
-                  }}
-                >
-                  Export as DOCX
-                </button>
+              {editorDropTarget?.type === "group" && editorDropTarget.groupId === activeGroupId && (
+                <div className="editor-drop-overlay">{t("editor.dragDrop.openHere")}</div>
+              )}
+              {isFindReplaceOpen && activeFile && !isNonTextPreviewTab(activeFile) && (
+                <FindReplacePanel
+                  editor={tiptapRef.current?.getEditor() ?? null}
+                  onClose={() => setFindReplaceOpen(false)}
+                />
+              )}
+              {isBlueprintTab(activeFile) ? (
+                <BlueprintEditor blueprintId={activeFile!.blueprintId!} />
+              ) : activeFile?.fileMode === "image" ? (
+                <div className="image-preview">
+                  <img src={activeFile.content} alt={activeFile.name} />
+                  <span>{activeFile.name}</span>
+                </div>
+              ) : activeFile?.fileMode === "unsupported" ? (
+                <div className="empty-state">
+                  <p>{t("editor.unsupportedPreview")}</p>
+                </div>
+              ) : activeFile?.historyViewMode === "compare" ? (
+                <HistoryDiffView content={activeFile.content} />
+              ) : activeFile ? (
+                <TipTapEditor
+                  ref={tiptapRef}
+                  content={activeFile.content}
+                  onChange={activeFile.isReadOnly ? undefined : handleContentChange}
+                  onSelectionChange={handleSelectionChange}
+                  onEditorStateChange={handleEditorStateChange}
+                  onFocus={handleUpdateCursor}
+                  onBlur={() => setSelectionPopup((c) => c)}
+                  contentFormat={getEditorContentFormat(activeFile.fileMode)}
+                  pageViewMode={isPageViewMode}
+                  referenceEntries={referenceEntries}
+                  editable={!activeFile.isReadOnly}
+                />
+              ) : rootPath ? (
+                <div className="empty-state">
+                  <p>{t("editor.empty.openFile")}</p>
+                </div>
+              ) : recentWorkspaces.length > 0 ? (
+                <div className="empty-state">
+                  <div className="recent-workspaces">
+                  <h3>{t("editor.empty.recentWorkspaces")}</h3>
+                  <ul>
+                    {recentWorkspaces.map((workspacePath) => {
+                      const name = workspacePath.split(/[/\\]/).filter(Boolean).pop() ?? workspacePath;
+                      return (
+                        <li key={workspacePath} onClick={() => void openRecentWorkspace(workspacePath)} title={workspacePath}>
+                          <FolderOpen size={14} />
+                          <span className="recent-workspace-name">{name}</span>
+                          <span className="recent-workspace-path">{workspacePath}</span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  <button className="clear-recent-btn" onClick={clearRecentWorkspaces}>
+                    <Trash2 size={12} />
+                    {t("editor.empty.clearRecent")}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="empty-state">
+                <p>{t("editor.empty.openFile")}</p>
               </div>
             )}
           </div>
-        </div>
-      </div>
-      <div className="editor-container" ref={editorContainerRef}>
-        {activeFile ? (
-          <Editor
-            height="100%"
-            defaultLanguage={isReferenceFile ? "plaintext" : "markdown"}
-            value={activeFile.content}
-            onChange={handleEditorChange}
-            onMount={(editor: any, monaco: any) => handleEditorDidMount(editor, monaco)}
-            theme={EDITOR_THEME}
-            options={{
-              minimap: { enabled: true },
-              fontFamily: DEFAULT_EDITOR_FONT_FAMILY,
-              fontSize,
-              lineNumbers: "on",
-              scrollBeyondLastLine: true,
-              automaticLayout: true,
-              wordWrap,
-              renderWhitespace: "selection",
-              bracketPairColorization: { enabled: true },
-              guides: {
-                bracketPairs: true,
-                indentation: true,
-              },
-              folding: !isReferenceFile,
-              showFoldingControls: "mouseover",
-              quickSuggestions: false,
-              suggestOnTriggerCharacters: false,
-              acceptSuggestionOnEnter: "off",
-              formatOnPaste: true,
-              formatOnType: true,
-              smoothScrolling: true,
-              cursorBlinking: "smooth",
-            }}
-          />
-        ) : rootPath ? (
-          <div className="empty-state">
-            <p>Open a file from Explorer to start editing</p>
-          </div>
-        ) : recentWorkspaces.length > 0 ? (
-          <div className="empty-state">
-            <div className="recent-workspaces">
-              <h3>最近打开的工作区</h3>
-              <ul>
-                {recentWorkspaces.map((workspacePath) => {
-                  const name = workspacePath.split(/[/\\]/).filter(Boolean).pop() ?? workspacePath;
-                  return (
-                    <li
-                      key={workspacePath}
-                      onClick={() => void openRecentWorkspace(workspacePath)}
-                      title={workspacePath}
-                    >
-                      <FolderOpen size={14} />
-                      <span className="recent-workspace-name">{name}</span>
-                      <span className="recent-workspace-path">{workspacePath}</span>
-                    </li>
-                  );
-                })}
-              </ul>
-              <button
-                className="clear-recent-btn"
-                onClick={clearRecentWorkspaces}
+            {isEditorDragActive && (
+              <div
+                className={`editor-new-group-drop-zone ${editorGroups.length >= MAX_EDITOR_GROUPS ? "disabled" : ""}${editorDropTarget?.type === "new" ? " drop-active" : ""}`}
+                onDragOver={(event) => handleEditorDragOver(event, { type: "new" })}
+                onDrop={(event) => void handleDropOnNewEditorGroup(event)}
               >
-                <Trash2 size={12} />
-                清除最近打开
-              </button>
-            </div>
+                {editorGroups.length >= MAX_EDITOR_GROUPS
+                  ? t("editor.dragDrop.maxWindows")
+                  : t("editor.dragDrop.openNewWindow")}
+              </div>
+            )}
           </div>
-        ) : (
-          <div className="empty-state">
-            <p>Open a file from Explorer to start editing</p>
-          </div>
-        )}
-      </div>
-      </>
+        </>
       )}
       {selectionPopup && !selectionPreview && (
         <div className="selection-popup" style={{ left: selectionPopup.left, top: selectionPopup.top }}>
-          <button onClick={() => void handleSelectionAi("polish")} disabled={selectionLoading}>润色</button>
-          <button onClick={() => void handleSelectionAi("correct")} disabled={selectionLoading}>纠错</button>
-          <button onClick={() => void handleSelectionAi("stylize")} disabled={selectionLoading}>风格化</button>
+          <button onClick={() => void handleSelectionAi("polish")} disabled={selectionLoading}>{t("editor.selection.polish")}</button>
+          <button onClick={() => void handleSelectionAi("correct")} disabled={selectionLoading}>{t("editor.selection.correct")}</button>
+          <button onClick={() => void handleSelectionAi("stylize")} disabled={selectionLoading}>{t("editor.selection.stylize")}</button>
         </div>
       )}
       {selectionPreview && (
         <div className="selection-preview-backdrop" onClick={() => setSelectionPreview(null)}>
           <div className="selection-preview-card" onClick={(event) => event.stopPropagation()}>
-            <h3>AI 文本处理预览</h3>
+            <h3>{t("editor.selection.previewTitle")}</h3>
             <div className="selection-preview-grid">
-              <div>
-                <h4>原文</h4>
-                <pre>{selectionPreview.original}</pre>
-              </div>
-              <div>
-                <h4>结果</h4>
-                <pre>{selectionPreview.result}</pre>
-              </div>
+              <div><h4>{t("editor.selection.original")}</h4><pre>{selectionPreview.original}</pre></div>
+              <div><h4>{t("editor.selection.result")}</h4><pre>{selectionPreview.result}</pre></div>
             </div>
             <div className="selection-preview-actions">
-              <button
-                className="secondary"
-                onClick={() => {
-                  setSelectionPreview(null);
-                  setSelectionError("");
-                }}
-              >
-                取消
-              </button>
-              <button
-                className="secondary"
-                onClick={() => {
-                  applySelectionPreview("insertAfterSelection", selectionPreview.result);
-                  setSelectionPreview(null);
-                }}
-              >
-                插入到后面
-              </button>
-              <button
-                onClick={() => {
-                  applySelectionPreview("replaceSelection", selectionPreview.result);
-                  setSelectionPreview(null);
-                }}
-              >
-                替换原文
-              </button>
+              <button className="secondary" onClick={() => { setSelectionPreview(null); setSelectionError(""); }}>{t("editor.common.cancel")}</button>
+              <button className="secondary" onClick={() => { applySelectionPreview("insertAfterSelection", selectionPreview.result); setSelectionPreview(null); }}>{t("editor.selection.insertAfter")}</button>
+              <button onClick={() => { applySelectionPreview("replaceSelection", selectionPreview.result); setSelectionPreview(null); }}>{t("editor.selection.replaceOriginal")}</button>
             </div>
           </div>
         </div>
       )}
       {selectionError && <div className="selection-error-banner">{selectionError}</div>}
       {isExportDialogOpen && activeFile && (
-        <div className="selection-preview-backdrop" onClick={() => setIsExportDialogOpen(false)}>
+        <div className="selection-preview-backdrop" onClick={closeExportDialog}>
           <div className="selection-preview-card export-dialog-card" onClick={(event) => event.stopPropagation()}>
-            <h3>Export Document</h3>
+            <h3>{t("editor.export.title")}</h3>
             <div className="export-dialog-fields">
               <label>
-                <span>Format</span>
+                  <span>{t("editor.export.format")}</span>
                 <select value={exportFormat} onChange={(event) => setExportFormat(event.target.value as ExportFormat)}>
                   <option value="txt">TXT</option>
                   <option value="pdf">PDF</option>
@@ -1403,15 +1123,10 @@ const EditorPanel: React.FC = () => {
               </label>
               {exportFormat !== "txt" && (
                 <label>
-                  <span>Template</span>
-                  <select
-                    value={exportTemplateId}
-                    onChange={(event) => setExportTemplateId(event.target.value as ExportTemplateId)}
-                  >
+                  <span>{t("editor.export.template")}</span>
+                  <select value={exportTemplateId} onChange={(event) => setExportTemplateId(event.target.value as ExportTemplateId)}>
                     {exportTemplates.map((template) => (
-                      <option key={template.id} value={template.id}>
-                        {template.label}
-                      </option>
+                      <option key={template.id} value={template.id}>{template.label}</option>
                     ))}
                   </select>
                 </label>
@@ -1433,23 +1148,60 @@ const EditorPanel: React.FC = () => {
               </div>
             )}
             <div className="selection-preview-actions">
-              <button className="secondary" onClick={() => setIsExportDialogOpen(false)}>
-                Cancel
-              </button>
-              <button onClick={() => void handleExport()}>
-                Export
-              </button>
+              <button className="secondary" onClick={closeExportDialog}>{t("editor.common.cancel")}</button>
+              <button onClick={() => void handleExport()}>{t("editor.export.action")}</button>
             </div>
             {exportError && <div className="selection-error-inline">{exportError}</div>}
           </div>
         </div>
       )}
+      <input
+        ref={imageInputRef}
+        type="file"
+        accept="image/*"
+        style={{ display: "none" }}
+        onChange={handleImageInputChange}
+      />
+      {isLinkDialogOpen && (
+        <div className="selection-preview-backdrop" onClick={closeLinkDialog}>
+          <div className="selection-preview-card insert-dialog-card" onClick={(event) => event.stopPropagation()}>
+            <h3>{t("editor.link.title")}</h3>
+            <div className="insert-dialog-fields">
+              <label>
+                <span>{t("editor.link.text")}</span>
+                <input
+                  type="text"
+                  value={linkText}
+                  onChange={(e) => setLinkText(e.target.value)}
+                  placeholder={t("editor.link.textPlaceholder")}
+                />
+              </label>
+              <label>
+                <span>{t("editor.link.url")}</span>
+                <input
+                  type="text"
+                  value={linkUrl}
+                  onChange={(e) => setLinkUrl(e.target.value)}
+                  placeholder="https://example.com"
+                  onKeyDown={(e) => { if (e.key === "Enter") insertLink(); }}
+                />
+              </label>
+            </div>
+            <div className="selection-preview-actions">
+              <button className="secondary" onClick={closeLinkDialog}>{t("editor.common.cancel")}</button>
+              <button onClick={insertLink} disabled={!linkUrl.trim()}>{t("editor.link.insert")}</button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="editor-statusbar">
         <span>{fileStats.language}</span>
-        <span>Ln {cursorPosition.line}, Col {cursorPosition.column}</span>
-        <span>{selectionLength > 0 ? `${selectionLength} selected` : `${fileStats.words} words`}</span>
-        <span>{fileStats.characters} chars</span>
-        <span>{wordWrap === "on" ? "Wrap On" : "Wrap Off"}</span>
+        <span>{t("editor.status.position", { line: cursorPosition.line, column: cursorPosition.column })}</span>
+        <span>{selectionLength > 0 ? t("editor.status.selected", { count: selectionLength }) : t("editor.status.words", { count: fileStats.words })}</span>
+        <span>{t("editor.status.characters", { count: fileStats.characters })}</span>
+        <span>{t("editor.status.paragraphs", { count: fileStats.paragraphs })}</span>
+        <span>{t("editor.status.readingTime", { count: fileStats.readingTime })}</span>
+        <span>{wordWrap === "on" ? t("editor.status.wrapOn") : t("editor.status.wrapOff")}</span>
       </div>
       {contextMenu && (
         <ContextMenu

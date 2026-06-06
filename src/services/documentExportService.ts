@@ -1,5 +1,6 @@
-import { Document, HeadingLevel, Packer, Paragraph, TextRun } from "docx";
+import { Document, HeadingLevel, Packer, Paragraph, Table, TableCell, TableRow, TextRun, WidthType } from "docx";
 import type { DocumentBlock, ExportFormat, ExportTemplate, ExportTemplateId } from "../types/export";
+import { serializeDocxBase64, type DocxPackageState, type ProseMirrorNode } from "./docxOoxmlService";
 
 const EXPORT_TEMPLATES: ExportTemplate[] = [
   {
@@ -148,6 +149,15 @@ function saveBlob(filename: string, blob: Blob) {
   URL.revokeObjectURL(url);
 }
 
+function saveBase64Blob(filename: string, base64: string, type: string) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  saveBlob(filename, new Blob([bytes], { type }));
+}
+
 function toDocxParagraph(block: DocumentBlock, template: ExportTemplate) {
   if (block.type === "heading") {
     const size = template.typography.headingSize[`h${block.level}` as "h1" | "h2" | "h3"];
@@ -257,6 +267,118 @@ async function exportAsDocx(filename: string, title: string, blocks: DocumentBlo
   saveBlob(filename, blob);
 }
 
+function textRunsFromNode(node: ProseMirrorNode, template: ExportTemplate, overrides: Record<string, any> = {}): TextRun[] {
+  if (node.type === "hardBreak") return [new TextRun({ text: "\n" })];
+  if (node.type !== "text") return [];
+
+  const options: Record<string, any> = {
+    text: node.text ?? "",
+    font: "Noto Serif SC",
+    size: template.typography.bodySize * 2,
+    ...overrides,
+  };
+
+  for (const mark of node.marks ?? []) {
+    if (mark.type === "bold") options.bold = true;
+    if (mark.type === "italic") options.italics = true;
+    if (mark.type === "underline") options.underline = {};
+    if (mark.type === "strike") options.strike = true;
+    if (mark.type === "textStyle") {
+      if (mark.attrs?.color) options.color = String(mark.attrs.color).replace(/^#/, "");
+      if (mark.attrs?.fontFamily) options.font = mark.attrs.fontFamily;
+      const fontSize = String(mark.attrs?.fontSize ?? "").match(/[\d.]+/)?.[0];
+      if (fontSize && overrides.size === undefined) options.size = Math.round(Number(fontSize) * 2);
+    }
+    if (mark.type === "highlight" && mark.attrs?.color) {
+      options.highlight = "yellow";
+    }
+  }
+
+  return [new TextRun(options)];
+}
+
+function paragraphFromNode(node: ProseMirrorNode, template: ExportTemplate) {
+  const level = node.type === "heading" ? Number(node.attrs?.level ?? 1) : 0;
+  const heading =
+    level === 1 ? HeadingLevel.HEADING_1 : level === 2 ? HeadingLevel.HEADING_2 : level === 3 ? HeadingLevel.HEADING_3 : undefined;
+  const size = level
+    ? template.typography.headingSize[`h${Math.min(level, 3)}` as "h1" | "h2" | "h3"] * 2
+    : template.typography.bodySize * 2;
+  const children = (node.content ?? []).flatMap((child) =>
+    textRunsFromNode(child, template, level ? { bold: true, size } : {})
+  );
+
+  return new Paragraph({
+    heading,
+    alignment: node.attrs?.textAlign,
+    spacing: {
+      before: 0,
+      after: 120,
+      line: Math.round(Number(node.attrs?.lineHeight ?? template.typography.lineHeight) * 240),
+    },
+    indent: node.attrs?.indent ? { firstLine: Number(node.attrs.indent) * 480 } : undefined,
+    children: children.length ? children : [new TextRun({ text: "" })],
+  });
+}
+
+function tableFromNode(node: ProseMirrorNode, template: ExportTemplate) {
+  return new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    rows: (node.content ?? []).map((row) =>
+      new TableRow({
+        tableHeader: row.content?.some((cell) => cell.type === "tableHeader"),
+        children: (row.content ?? []).map((cell) =>
+          new TableCell({
+            shading: cell.type === "tableHeader" ? { fill: "E5E7EB" } : undefined,
+            children: (cell.content ?? [{ type: "paragraph" }]).map((child) =>
+              child.type === "paragraph" || child.type === "heading"
+                ? paragraphFromNode(child, template)
+                : new Paragraph("")
+            ),
+          })
+        ),
+      })
+    ),
+  });
+}
+
+async function exportJsonAsDocx(filename: string, title: string, docJson: ProseMirrorNode, template: ExportTemplate) {
+  const children = (docJson.content ?? [])
+    .filter((node) => node.type !== "paragraph" || node.content?.length)
+    .map((node) => {
+      if (node.type === "table") return tableFromNode(node, template);
+      if (node.type === "paragraph" || node.type === "heading") return paragraphFromNode(node, template);
+      return new Paragraph("");
+    });
+
+  const document = new Document({
+    sections: [
+      {
+        properties: {
+          page: {
+            margin: {
+              top: template.page.marginTop * 20,
+              right: template.page.marginRight * 20,
+              bottom: template.page.marginBottom * 20,
+              left: template.page.marginLeft * 20,
+            },
+          },
+        },
+        children: [
+          new Paragraph({
+            spacing: { after: 240 },
+            children: [new TextRun({ text: title, font: "Noto Serif SC", size: template.typography.titleSize * 2, bold: true })],
+          }),
+          ...(children.length ? children : [new Paragraph("")]),
+        ],
+      },
+    ],
+  });
+
+  const blob = await Packer.toBlob(document);
+  saveBlob(filename, blob);
+}
+
 function escapeHtml(value: string) {
   return value
     .replace(/&/g, "&amp;")
@@ -352,8 +474,10 @@ export async function exportDocument(options: {
   title: string;
   content: string;
   filenameBase: string;
+  docJson?: ProseMirrorNode;
+  docxPackageState?: DocxPackageState;
 }) {
-  const { format, templateId, title, content, filenameBase } = options;
+  const { format, templateId, title, content, filenameBase, docJson, docxPackageState } = options;
   const template = getExportTemplate(templateId);
 
   if (format === "txt") {
@@ -364,6 +488,15 @@ export async function exportDocument(options: {
   const blocks = parseDocumentStructure(content);
 
   if (format === "docx") {
+    if (docJson && docxPackageState) {
+      const base64 = await serializeDocxBase64(docJson, docxPackageState);
+      saveBase64Blob(`${filenameBase}.docx`, base64, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+      return;
+    }
+    if (docJson) {
+      await exportJsonAsDocx(`${filenameBase}.docx`, title, docJson, template);
+      return;
+    }
     await exportAsDocx(`${filenameBase}.docx`, title, blocks, template);
     return;
   }

@@ -13,7 +13,8 @@ export default defineConfig(async () => ({
       external: (id) => id.startsWith("core-js/modules/"),
       output: {
         manualChunks(id) {
-          if (id.includes("@monaco-editor/react")) return "monaco";
+          if (id.includes("node_modules/@tiptap/") || id.includes("node_modules/tiptap-")) return "tiptap";
+          if (id.includes("node_modules/prosemirror-")) return "prosemirror";
           if (id.includes("@xterm/xterm") || id.includes("@xterm/addon-fit")) return "terminal";
           if (id.includes("node_modules/react/") || id.includes("node_modules/react-dom/")) return "react";
         },

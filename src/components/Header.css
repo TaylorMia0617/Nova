@@ -3,8 +3,8 @@
   justify-content: space-between;
   align-items: center;
   padding: 0 12px;
-  background: #1a1f2e;
-  border-bottom: 1px solid #2d3748;
+  background: var(--app-header-surface);
+  border-bottom: 1px solid var(--color-border);
   height: 36px;
   min-height: 36px;
   -webkit-app-region: drag;
@@ -20,11 +20,11 @@
 .header-title {
   font-size: 13px;
   font-weight: 600;
-  color: #e2e8f0;
+  color: var(--color-text);
 }
 
 .header-separator {
-  color: #4a5568;
+  color: var(--color-border-strong);
   font-size: 12px;
 }
 
@@ -35,6 +35,7 @@
   flex: 1;
   justify-content: center;
   -webkit-app-region: no-drag;
+  min-width: 0;
 }
 
 .header-right {
@@ -47,12 +48,12 @@
 .workspace-name {
   font-size: 13px;
   font-weight: 500;
-  color: #e2e8f0;
+  color: var(--color-text);
 }
 
 .workspace-hint {
   font-size: 11px;
-  color: #718096;
+  color: var(--color-text-subtle);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -69,7 +70,7 @@
   align-items: center;
   gap: 6px;
   background: transparent;
-  color: #a0aec0;
+  color: var(--color-text-muted);
   padding: 5px 10px;
   border: none;
   border-radius: 6px;
@@ -78,8 +79,8 @@
 }
 
 .workspace-button:hover:not(:disabled) {
-  background: #2d3748;
-  color: #e2e8f0;
+  background: var(--app-control-surface);
+  color: var(--color-text);
 }
 
 .workspace-button:disabled {
@@ -89,7 +90,7 @@
 
 .icon-button {
   background: transparent;
-  color: #a0aec0;
+  color: var(--color-text-muted);
   padding: 5px 8px;
   border-radius: 6px;
   transition: all 0.2s;
@@ -99,8 +100,29 @@
 }
 
 .icon-button:hover {
-  background-color: #2d3748;
-  color: #e2e8f0;
+  background-color: var(--app-control-surface);
+  color: var(--color-text);
+}
+
+.icon-button.active,
+.panel-toggle.active {
+  background: color-mix(in srgb, var(--color-accent) 24%, var(--app-control-surface));
+  color: var(--color-text);
+}
+
+.header-panel-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: 4px;
+  border-right: 1px solid var(--color-border);
+}
+
+.panel-toggle {
+  width: 30px;
+  height: 28px;
+  justify-content: center;
+  padding: 0;
 }
 
 .settings-launch {
@@ -115,13 +137,13 @@
   border: none;
   border-radius: 6px;
   padding: 4px 6px;
-  color: #a0aec0;
+  color: var(--color-text-muted);
 }
 
 .language-selector select {
   background: transparent;
   border: none;
-  color: #e2e8f0;
+  color: var(--color-text);
   font-size: 11px;
   cursor: pointer;
   outline: none;
@@ -129,6 +151,17 @@
 }
 
 .language-selector select option {
-  background: #2d3748;
-  color: #e2e8f0;
+  background: var(--app-control-surface);
+  color: var(--color-text);
+}
+
+@media (max-width: 900px) {
+  .workspace-hint {
+    display: none;
+  }
+
+  .workspace-button span,
+  .settings-launch span {
+    display: none;
+  }
 }

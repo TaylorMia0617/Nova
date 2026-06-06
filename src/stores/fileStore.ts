@@ -10,22 +10,52 @@ import {
   pickWorkspace,
   readDirectory,
   readFile,
+  readFileBinary,
   renamePath,
   type WorkspaceNode,
   writeFile,
+  writeFileBinary,
   getReferenceLists as getReferenceListsFromDisk,
   getReferenceList as getReferenceListFromDisk,
   saveReferenceList as saveReferenceListToDisk,
   deleteReferenceList as deleteReferenceListFromDisk,
   type ReferenceListData,
 } from "../services/fileSystemService";
+import {
+  createDocxBase64FromPlainText,
+  isInvalidDocxZipLike,
+  parseDocxBase64,
+  serializeDocxBase64,
+  type DocxPackageState,
+} from "../services/docxOoxmlService";
+import {
+  VERSION_HISTORY_IDLE_MS,
+  VERSION_HISTORY_SIZE_TRIGGER_BYTES,
+  estimateContentBytes,
+  recordSnapshot,
+  restoreSnapshot,
+  updateSnapshotPaths,
+} from "../services/versionHistoryService";
 import type { FileChange } from "../types/ai";
+import type { VersionSnapshot, VersionSnapshotReason } from "../types/versionHistory";
+
+export type FileMode = "txt" | "markdown" | "docx" | "blueprint" | "image" | "unsupported";
+export type HistoryViewMode = "browse" | "compare";
+export type HistoryDiffPart = { type: "same" | "added" | "removed"; text: string };
 
 export interface OpenFileTab {
   path: string;
   name: string;
   content: string;
   savedContent: string;
+  fileMode: FileMode;
+  docxPackageState?: DocxPackageState;
+  blueprintId?: string;
+  blueprintFocusedNodeId?: string | null;
+  isReadOnly?: boolean;
+  historySnapshotId?: string;
+  historySourcePath?: string;
+  historyViewMode?: HistoryViewMode;
   isDirty: boolean;
 }
 
@@ -43,6 +73,11 @@ export interface EditorGroup {
 
 const RECENT_WORKSPACES_KEY = "novel-assistance-recent-workspaces";
 const MAX_RECENT_WORKSPACES = 5;
+export const MAX_EDITOR_GROUPS = 3;
+let refreshWorkspaceRequestId = 0;
+const historyIdleTimers = new Map<string, number>();
+const historyBaselineKeys = new Set<string>();
+const historyLastSnapshotContent = new Map<string, string>();
 
 function loadRecentWorkspaces(): string[] {
   try {
@@ -57,6 +92,49 @@ function loadRecentWorkspaces(): string[] {
 
 function persistRecentWorkspaces(paths: string[]) {
   localStorage.setItem(RECENT_WORKSPACES_KEY, JSON.stringify(paths));
+}
+
+function clearHistoryIdleTimer(path: string) {
+  const timer = historyIdleTimers.get(path);
+  if (timer) {
+    window.clearTimeout(timer);
+    historyIdleTimers.delete(path);
+  }
+}
+
+function rememberSnapshotContent(path: string, content: string) {
+  historyLastSnapshotContent.set(path, content);
+}
+
+async function recordTextSnapshot(
+  rootPath: string | null,
+  path: string,
+  content: string,
+  reason: VersionSnapshotReason
+) {
+  await recordSnapshot({
+    rootPath,
+    path,
+    reason,
+    encoding: "utf8",
+    content,
+  });
+  rememberSnapshotContent(path, content);
+}
+
+async function recordBinarySnapshot(
+  rootPath: string | null,
+  path: string,
+  base64Content: string,
+  reason: VersionSnapshotReason
+) {
+  await recordSnapshot({
+    rootPath,
+    path,
+    reason,
+    encoding: "base64",
+    content: base64Content,
+  });
 }
 
 interface FileState {
@@ -81,13 +159,18 @@ interface FileState {
   clearRecentWorkspaces: () => void;
   removeRecentWorkspace: (path: string) => void;
   refreshWorkspace: () => Promise<void>;
+  refreshLoadedWorkspace: (changedPath?: string | null) => Promise<void>;
+  refreshFolder: (folderPath: string) => Promise<void>;
   ensureFolderLoaded: (path: string) => Promise<void>;
   loadFullWorkspaceTree: () => Promise<void>;
   openFile: (path: string, groupId?: string) => Promise<void>;
+  openBlueprintTab: (blueprintId: string, name: string, focusedNodeId?: string | null, groupId?: string) => void;
+  closeBlueprintTabs: (blueprintId: string) => void;
+  renameBlueprintTabs: (blueprintId: string, name: string) => void;
   setActiveFile: (path: string | null) => void;
   closeTab: (path: string) => void;
   updateFileContent: (path: string, content: string) => void;
-  saveFile: (path?: string) => Promise<void>;
+  saveFile: (path?: string, reason?: VersionSnapshotReason) => Promise<void>;
   saveAllFiles: () => Promise<void>;
   createFile: (name: string, parentPath?: string) => Promise<void>;
   createFolder: (name: string, parentPath?: string) => Promise<void>;
@@ -102,7 +185,11 @@ interface FileState {
   trackFileChange: (path: string, oldContent: string, newContent: string) => void;
   getFileChanges: (path: string) => FileChange[];
   clearFileChanges: (path: string) => void;
+  restoreVersionSnapshot: (snapshot: VersionSnapshot) => Promise<void>;
+  openHistorySnapshotPreview: (snapshot: VersionSnapshot) => Promise<void>;
+  openHistorySnapshotCompare: (snapshot: VersionSnapshot) => Promise<void>;
   splitEditor: (direction: "horizontal" | "vertical") => void;
+  openFileInNewGroup: (path: string) => Promise<void>;
   closeGroup: (groupId: string) => void;
   setActiveGroup: (groupId: string) => void;
   moveTabToGroup: (tabPath: string, targetGroupId: string) => void;
@@ -143,6 +230,21 @@ function replaceNodeChildren(nodes: WorkspaceNode[], path: string, children: Wor
       ...node,
       children: replaceNodeChildren(node.children, path, children),
     };
+  });
+}
+
+function mergeLoadedChildren(previous: WorkspaceNode[] | undefined, fresh: WorkspaceNode[]): WorkspaceNode[] {
+  const previousByPath = new Map((previous ?? []).map((node) => [node.path, node]));
+  return fresh.map((node) => {
+    const previousNode = previousByPath.get(node.path);
+    if (node.type === "folder" && previousNode?.type === "folder" && previousNode.isLoaded) {
+      return {
+        ...node,
+        isLoaded: true,
+        children: previousNode.children,
+      };
+    }
+    return node;
   });
 }
 
@@ -195,6 +297,181 @@ function assertValidNewEntryName(name: string): string {
   }
 
   return trimmedName;
+}
+
+function getFileExtension(name: string): string {
+  const dotIndex = name.lastIndexOf(".");
+  return dotIndex === -1 ? "" : name.slice(dotIndex).toLowerCase();
+}
+
+const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"]);
+const TEXT_EXTENSIONS = new Set(["", ".txt"]);
+
+function getImageMimeType(extension: string) {
+  if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg";
+  if (extension === ".svg") return "image/svg+xml";
+  return `image/${extension.slice(1)}`;
+}
+
+export function getFileMode(name: string): FileMode {
+  const extension = getFileExtension(name);
+  if (extension === ".docx") return "docx";
+  if (extension === ".md" || extension === ".markdown") return "markdown";
+  if (IMAGE_EXTENSIONS.has(extension)) return "image";
+  if (TEXT_EXTENSIONS.has(extension)) return "txt";
+  return "unsupported";
+}
+
+async function readDocxForOpen(path: string, name: string) {
+  try {
+    return parseDocxBase64(await readFileBinary(path));
+  } catch (error) {
+    if (!isInvalidDocxZipLike(error)) {
+      throw error;
+    }
+
+    let textContent = "";
+    try {
+      textContent = await readFile(path);
+    } catch {
+      throw error;
+    }
+
+    const looksLikeText = !textContent.includes("\u0000") && textContent.trim().length > 0;
+    if (!looksLikeText) {
+      throw error;
+    }
+
+    const shouldRepair = window.confirm(
+      `${name} is not a valid Word DOCX package. It looks like a text file with a .docx extension.\n\nConvert this text into a standard DOCX and overwrite the current file?`
+    );
+    if (!shouldRepair) {
+      throw new Error("DOCX repair was cancelled.");
+    }
+
+    const repairedBase64 = await createDocxBase64FromPlainText(textContent);
+    await writeFileBinary(path, repairedBase64);
+    return parseDocxBase64(repairedBase64);
+  }
+}
+
+function collectDocJsonText(node: unknown): string {
+  if (!node || typeof node !== "object") return "";
+  const record = node as { text?: unknown; content?: unknown };
+  if (typeof record.text === "string") return record.text;
+  if (Array.isArray(record.content)) {
+    return record.content.map(collectDocJsonText).filter(Boolean).join("\n");
+  }
+  return "";
+}
+
+function getHistoryTabTime(timestamp: string) {
+  return new Date(timestamp).toLocaleString([], {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+async function snapshotToEditableContent(snapshot: VersionSnapshot): Promise<{
+  content: string;
+  fileMode: FileMode;
+  docxPackageState?: DocxPackageState;
+  plainText: string;
+}> {
+  if (!snapshot.isContentStored || snapshot.content === undefined) {
+    throw new Error("This version content was not stored.");
+  }
+
+  const name = snapshot.path.split(/[/\\]/).pop() ?? snapshot.relativePath;
+  const inferredMode = getFileMode(name);
+
+  if (snapshot.mimeKind === "docx") {
+    if (snapshot.encoding !== "base64") {
+      throw new Error("DOCX history content is not stored as a DOCX package.");
+    }
+    const parsed = await parseDocxBase64(snapshot.content);
+    const content = JSON.stringify(parsed.docJson);
+    return {
+      content,
+      fileMode: "docx",
+      docxPackageState: parsed.packageState,
+      plainText: collectDocJsonText(parsed.docJson),
+    };
+  }
+
+  if (snapshot.mimeKind === "text") {
+    if (snapshot.encoding !== "utf8") {
+      throw new Error("Text history content is not stored as text.");
+    }
+    return {
+      content: snapshot.content,
+      fileMode: inferredMode === "markdown" ? "markdown" : "txt",
+      plainText: snapshot.content,
+    };
+  }
+
+  throw new Error("Binary history content cannot be opened in the editor.");
+}
+
+function tabToPlainText(tab: OpenFileTab): string {
+  if (tab.fileMode !== "docx") return tab.content;
+  try {
+    return collectDocJsonText(JSON.parse(tab.content));
+  } catch {
+    return "";
+  }
+}
+
+async function readCurrentPlainText(path: string, name: string, openTabs: OpenFileTab[]) {
+  const openTab = openTabs.find((tab) => tab.path === path && !tab.historyViewMode);
+  if (openTab) return tabToPlainText(openTab);
+
+  const mode = getFileMode(name);
+  if (mode === "docx") {
+    const parsed = await parseDocxBase64(await readFileBinary(path));
+    return collectDocJsonText(parsed.docJson);
+  }
+  if (mode === "markdown" || mode === "txt") {
+    return readFile(path);
+  }
+  return "";
+}
+
+function buildHistoryLineDiff(oldText: string, newText: string): HistoryDiffPart[] {
+  const oldLines = oldText.split(/\r?\n/);
+  const newLines = newText.split(/\r?\n/);
+  const rows = oldLines.length + 1;
+  const cols = newLines.length + 1;
+  const dp = Array.from({ length: rows }, () => Array(cols).fill(0));
+
+  for (let i = oldLines.length - 1; i >= 0; i--) {
+    for (let j = newLines.length - 1; j >= 0; j--) {
+      dp[i][j] = oldLines[i] === newLines[j]
+        ? dp[i + 1][j + 1] + 1
+        : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+
+  const parts: HistoryDiffPart[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < oldLines.length || j < newLines.length) {
+    if (i < oldLines.length && j < newLines.length && oldLines[i] === newLines[j]) {
+      parts.push({ type: "same", text: oldLines[i] });
+      i++;
+      j++;
+    } else if (j < newLines.length && (i >= oldLines.length || dp[i][j + 1] >= dp[i + 1][j])) {
+      parts.push({ type: "added", text: newLines[j] });
+      j++;
+    } else if (i < oldLines.length) {
+      parts.push({ type: "removed", text: oldLines[i] });
+      i++;
+    }
+  }
+
+  return parts.length > 0 ? parts : [{ type: "same", text: "" }];
 }
 
 function withDefaultMarkdownExtension(name: string): string {
@@ -363,6 +640,168 @@ export const useFileStore = create<FileState>()((set, get) => ({
       return { fileChanges: newMap };
     });
   },
+  restoreVersionSnapshot: async (snapshot) => {
+    if (!snapshot.isContentStored || snapshot.content === undefined) {
+      set({ errorMessage: "This version is too large to restore because its content was not stored." });
+      return;
+    }
+
+    try {
+      const name = snapshot.path.split(/[/\\]/).pop() ?? snapshot.relativePath;
+      const mode = getFileMode(name);
+      if (snapshot.mimeKind === "docx") {
+        if (snapshot.encoding !== "base64") {
+          throw new Error("DOCX history content is not stored as a DOCX package.");
+        }
+        const parsed = await parseDocxBase64(snapshot.content);
+        const content = JSON.stringify(parsed.docJson);
+        const restoredTab: OpenFileTab = {
+          path: snapshot.path,
+          name,
+          content,
+          savedContent: "",
+          fileMode: "docx",
+          docxPackageState: parsed.packageState,
+          isDirty: true,
+        };
+        set((state) => {
+          const targetGroupId = state.activeGroupId;
+          const groups = state.editorGroups.map((group) =>
+            group.id === targetGroupId
+              ? {
+                  ...group,
+                  tabs: group.tabs.some((tab) => tab.path === snapshot.path)
+                    ? group.tabs.map((tab) => (tab.path === snapshot.path ? restoredTab : tab))
+                    : [...group.tabs, restoredTab],
+                  activeTabPath: snapshot.path,
+                }
+              : group
+          );
+          return { editorGroups: groups, activeFile: restoredTab, errorMessage: null };
+        });
+        return;
+      }
+
+      if (snapshot.mimeKind === "text" && (mode === "txt" || mode === "markdown")) {
+        if (snapshot.encoding !== "utf8") {
+          throw new Error("Text history content is not stored as text.");
+        }
+        const restoredTab: OpenFileTab = {
+          path: snapshot.path,
+          name,
+          content: snapshot.content,
+          savedContent: "",
+          fileMode: mode,
+          isDirty: true,
+        };
+        set((state) => {
+          const targetGroupId = state.activeGroupId;
+          const groups = state.editorGroups.map((group) =>
+            group.id === targetGroupId
+              ? {
+                  ...group,
+                  tabs: group.tabs.some((tab) => tab.path === snapshot.path)
+                    ? group.tabs.map((tab) => (tab.path === snapshot.path ? restoredTab : tab))
+                    : [...group.tabs, restoredTab],
+                  activeTabPath: snapshot.path,
+                }
+              : group
+          );
+          return { editorGroups: groups, activeFile: restoredTab, errorMessage: null };
+        });
+        return;
+      }
+
+      await restoreSnapshot(snapshot);
+      await get().refreshWorkspace();
+      set({ errorMessage: null });
+    } catch (error) {
+      set({
+        errorMessage: error instanceof Error ? error.message : "Failed to restore version.",
+      });
+    }
+  },
+  openHistorySnapshotPreview: async (snapshot) => {
+    try {
+      const parsed = await snapshotToEditableContent(snapshot);
+      const name = snapshot.path.split(/[/\\]/).pop() ?? snapshot.relativePath;
+      const tabPath = `history-preview:${snapshot.id}`;
+      const historyTab: OpenFileTab = {
+        path: tabPath,
+        name: `${name} · 历史 ${getHistoryTabTime(snapshot.timestamp)}`,
+        content: parsed.content,
+        savedContent: parsed.content,
+        fileMode: parsed.fileMode,
+        docxPackageState: parsed.docxPackageState,
+        isReadOnly: true,
+        historySnapshotId: snapshot.id,
+        historySourcePath: snapshot.path,
+        historyViewMode: "browse",
+        isDirty: false,
+      };
+
+      set((state) => {
+        const targetGroupId = state.activeGroupId;
+        const groups = state.editorGroups.map((group) =>
+          group.id === targetGroupId
+            ? {
+                ...group,
+                tabs: group.tabs.some((tab) => tab.path === tabPath)
+                  ? group.tabs.map((tab) => (tab.path === tabPath ? historyTab : tab))
+                  : [...group.tabs, historyTab],
+                activeTabPath: tabPath,
+              }
+            : group
+        );
+        return { editorGroups: groups, activeFile: historyTab, errorMessage: null };
+      });
+    } catch (error) {
+      set({
+        errorMessage: error instanceof Error ? error.message : "Failed to open history preview.",
+      });
+    }
+  },
+  openHistorySnapshotCompare: async (snapshot) => {
+    try {
+      const parsed = await snapshotToEditableContent(snapshot);
+      const name = snapshot.path.split(/[/\\]/).pop() ?? snapshot.relativePath;
+      const currentText = await readCurrentPlainText(snapshot.path, name, get().getOpenTabs());
+      const diff = buildHistoryLineDiff(parsed.plainText, currentText);
+      const tabPath = `history-compare:${snapshot.id}`;
+      const historyTab: OpenFileTab = {
+        path: tabPath,
+        name: `${name} · 对比`,
+        content: JSON.stringify(diff),
+        savedContent: JSON.stringify(diff),
+        fileMode: "txt",
+        isReadOnly: true,
+        historySnapshotId: snapshot.id,
+        historySourcePath: snapshot.path,
+        historyViewMode: "compare",
+        isDirty: false,
+      };
+
+      set((state) => {
+        const targetGroupId = state.activeGroupId;
+        const groups = state.editorGroups.map((group) =>
+          group.id === targetGroupId
+            ? {
+                ...group,
+                tabs: group.tabs.some((tab) => tab.path === tabPath)
+                  ? group.tabs.map((tab) => (tab.path === tabPath ? historyTab : tab))
+                  : [...group.tabs, historyTab],
+                activeTabPath: tabPath,
+              }
+            : group
+        );
+        return { editorGroups: groups, activeFile: historyTab, errorMessage: null };
+      });
+    } catch (error) {
+      set({
+        errorMessage: error instanceof Error ? error.message : "Failed to compare history version.",
+      });
+    }
+  },
   openWorkspace: async () => {
     set({ isLoadingWorkspace: true, errorMessage: null });
 
@@ -420,7 +859,7 @@ export const useFileStore = create<FileState>()((set, get) => ({
     try {
       const children = await readDirectory(path);
       set((state) => ({
-        files: replaceNodeChildren(state.files, path, children),
+        files: replaceNodeChildren(state.files, path, mergeLoadedChildren(targetNode.children, children)),
         errorMessage: null,
       }));
     } catch (error) {
@@ -429,12 +868,28 @@ export const useFileStore = create<FileState>()((set, get) => ({
       });
     }
   },
+  refreshFolder: async (folderPath) => {
+    const targetNode = getNodeByPath(get().files, folderPath);
+    if (!targetNode || targetNode.type !== "folder") return;
+
+    try {
+      const children = await readDirectory(folderPath);
+      set((state) => ({
+        files: replaceNodeChildren(state.files, folderPath, mergeLoadedChildren(targetNode.children, children)),
+        errorMessage: null,
+      }));
+    } catch (error) {
+      set({
+        errorMessage: error instanceof Error ? error.message : "Failed to refresh folder.",
+      });
+    }
+  },
   loadFullWorkspaceTree: async () => {
     const { rootPath } = get();
     if (!rootPath) return;
 
     try {
-      const workspace = await loadWorkspaceTree(rootPath);
+      const workspace = await loadWorkspace(rootPath);
       set({
         rootName: workspace.rootName,
         files: workspace.nodes,
@@ -447,37 +902,88 @@ export const useFileStore = create<FileState>()((set, get) => ({
     }
   },
   refreshWorkspace: async () => {
-    const { rootPath, activeFile, editorGroups, activeGroupId } = get();
+    const { rootPath } = get();
     if (!rootPath) return;
-
-    const activeGroup = editorGroups.find((g) => g.id === activeGroupId);
-    const currentTabs = activeGroup?.tabs ?? [];
+    const requestId = ++refreshWorkspaceRequestId;
 
     try {
       const workspace = await loadWorkspaceTree(rootPath);
-      const validTabs = await Promise.all(
-        currentTabs
-          .filter((tab) => getNodeByPath(workspace.nodes, tab.path))
-          .map(async (tab) => {
-            if (tab.isDirty) return tab;
+      if (requestId !== refreshWorkspaceRequestId) return;
 
-            try {
-              const diskContent = await readFile(tab.path);
-              return {
-                ...tab,
-                content: diskContent,
-                savedContent: diskContent,
-                isDirty: false,
-              };
-            } catch {
-              return tab;
-            }
-          })
+      const latestState = get();
+      const { editorGroups, activeGroupId } = latestState;
+      const syncTab = async (tab: OpenFileTab): Promise<OpenFileTab> => {
+        if (tab.isDirty) return tab;
+
+        try {
+          const fileMode = getFileMode(tab.name);
+          if (tab.fileMode === "blueprint") {
+            return tab;
+          }
+          if (fileMode === "docx") {
+            const base64 = await readFileBinary(tab.path);
+            const parsed = await parseDocxBase64(base64);
+            const diskContent = JSON.stringify(parsed.docJson);
+            return {
+              ...tab,
+              content: diskContent,
+              savedContent: diskContent,
+              fileMode,
+              docxPackageState: parsed.packageState,
+              isDirty: false,
+            };
+          }
+          if (fileMode === "image") {
+            const extension = getFileExtension(tab.name);
+            const diskContent = `data:${getImageMimeType(extension)};base64,${await readFileBinary(tab.path)}`;
+            return {
+              ...tab,
+              content: diskContent,
+              savedContent: diskContent,
+              fileMode,
+              isDirty: false,
+            };
+          }
+          if (fileMode === "unsupported") {
+            return {
+              ...tab,
+              content: "",
+              savedContent: "",
+              fileMode,
+              isDirty: false,
+            };
+          }
+
+          const diskContent = await readFile(tab.path);
+          return {
+            ...tab,
+            content: diskContent,
+            savedContent: diskContent,
+            fileMode,
+            isDirty: false,
+          };
+        } catch {
+          return tab;
+        }
+      };
+
+      const updatedGroups = await Promise.all(
+        editorGroups.map(async (group) => {
+          const syncedTabs = await Promise.all(group.tabs.map(syncTab));
+          const activeTabPath = syncedTabs.some((tab) => tab.path === group.activeTabPath)
+            ? group.activeTabPath
+            : syncedTabs[0]?.path ?? null;
+
+          return {
+            ...group,
+            tabs: syncedTabs,
+            activeTabPath,
+          };
+        })
       );
-      const nextActiveFile =
-        activeFile && validTabs.some((tab) => tab.path === activeFile.path)
-          ? validTabs.find((tab) => tab.path === activeFile.path) ?? null
-          : validTabs[0] ?? null;
+
+      const activeGroup = updatedGroups.find((g) => g.id === activeGroupId);
+      const nextActiveFile = activeGroup?.tabs.find((tab) => tab.path === activeGroup.activeTabPath) ?? null;
 
       // 刷新参考列表（只更新 referenceLists，不更新 referenceEntries）
       let referenceLists = get().referenceLists;
@@ -496,14 +1002,12 @@ export const useFileStore = create<FileState>()((set, get) => ({
       // 不更新 referenceEntries，保持缓存
       const referenceEntries = get().referenceEntries;
 
+      if (requestId !== refreshWorkspaceRequestId) return;
+
       set({
         rootName: workspace.rootName,
         files: workspace.nodes,
-        editorGroups: editorGroups.map((g) =>
-          g.id === activeGroupId
-            ? { ...g, tabs: validTabs, activeTabPath: nextActiveFile?.path ?? null }
-            : g
-        ),
+        editorGroups: updatedGroups,
         activeFile: nextActiveFile,
         referenceEntries,
         referenceLists,
@@ -515,7 +1019,11 @@ export const useFileStore = create<FileState>()((set, get) => ({
       });
     }
   },
+  refreshLoadedWorkspace: async () => {
+    await get().refreshWorkspace();
+  },
   openFile: async (path, groupId) => {
+    refreshWorkspaceRequestId++;
     const targetGroupId = groupId ?? get().activeGroupId;
     const targetGroup = get().editorGroups.find((g) => g.id === targetGroupId);
     if (!targetGroup) return;
@@ -535,12 +1043,25 @@ export const useFileStore = create<FileState>()((set, get) => ({
     if (!node || node.type !== "file") return;
 
     try {
-      const content = await readFile(path);
+      const fileMode = getFileMode(node.name);
+      const parsedDocx = fileMode === "docx"
+        ? await readDocxForOpen(path, node.name)
+        : null;
+      const extension = getFileExtension(node.name);
+      const content = parsedDocx
+        ? JSON.stringify(parsedDocx.docJson)
+        : fileMode === "image"
+          ? `data:${getImageMimeType(extension)};base64,${await readFileBinary(path)}`
+          : fileMode === "unsupported"
+            ? ""
+            : await readFile(path);
       const newTab: OpenFileTab = {
         path,
         name: node.name,
         content,
         savedContent: content,
+        fileMode,
+        docxPackageState: parsedDocx?.packageState,
         isDirty: false,
       };
 
@@ -569,7 +1090,80 @@ export const useFileStore = create<FileState>()((set, get) => ({
       });
     }
   },
+  openBlueprintTab: (blueprintId, name, focusedNodeId = null, groupId) => {
+    const path = `blueprint:${blueprintId}`;
+    const targetGroupId = groupId ?? get().activeGroupId;
+    const tab: OpenFileTab = {
+      path,
+      name,
+      content: "",
+      savedContent: "",
+      fileMode: "blueprint",
+      blueprintId,
+      blueprintFocusedNodeId: focusedNodeId,
+      isDirty: false,
+    };
+
+    set((state) => {
+      const group = state.editorGroups.find((item) => item.id === targetGroupId);
+      if (!group) return state;
+      const nextGroups = state.editorGroups.map((item) => {
+        if (item.id !== targetGroupId) return item;
+        const hasTab = item.tabs.some((existing) => existing.path === path);
+        return {
+          ...item,
+          tabs: hasTab
+            ? item.tabs.map((existing) =>
+                existing.path === path
+                  ? { ...existing, name, blueprintFocusedNodeId: focusedNodeId }
+                  : existing
+              )
+            : [...item.tabs, tab],
+          activeTabPath: path,
+        };
+      });
+      const activeTab = nextGroups
+        .find((item) => item.id === targetGroupId)
+        ?.tabs.find((item) => item.path === path) ?? tab;
+      return {
+        editorGroups: nextGroups,
+        activeGroupId: targetGroupId,
+        activeFile: activeTab,
+      };
+    });
+  },
+  closeBlueprintTabs: (blueprintId) => {
+    const path = `blueprint:${blueprintId}`;
+    set((state) => {
+      const nextGroups = state.editorGroups.map((group) => {
+        const tabs = group.tabs.filter((tab) => tab.path !== path);
+        const activeTabPath = group.activeTabPath === path
+          ? tabs[tabs.length - 1]?.path ?? null
+          : group.activeTabPath;
+        return { ...group, tabs, activeTabPath };
+      });
+      const activeGroup = nextGroups.find((group) => group.id === state.activeGroupId);
+      return {
+        editorGroups: nextGroups,
+        activeFile: activeGroup?.tabs.find((tab) => tab.path === activeGroup.activeTabPath) ?? null,
+      };
+    });
+  },
+  renameBlueprintTabs: (blueprintId, name) => {
+    const path = `blueprint:${blueprintId}`;
+    set((state) => {
+      const updateTab = (tab: OpenFileTab) => (tab.path === path ? { ...tab, name } : tab);
+      return {
+        activeFile: state.activeFile?.path === path ? updateTab(state.activeFile) : state.activeFile,
+        editorGroups: state.editorGroups.map((group) => ({
+          ...group,
+          tabs: group.tabs.map(updateTab),
+        })),
+      };
+    });
+  },
   setActiveFile: (path) => {
+    refreshWorkspaceRequestId++;
     if (!path) {
       set((state) => ({
         activeFile: null,
@@ -589,14 +1183,18 @@ export const useFileStore = create<FileState>()((set, get) => ({
     }));
   },
   closeTab: (path) => {
+    refreshWorkspaceRequestId++;
     set((state) => {
       const activeGroup = state.editorGroups.find((g) => g.id === state.activeGroupId);
       const currentTabs = activeGroup?.tabs ?? [];
       const nextTabs = currentTabs.filter((tab) => tab.path !== path);
-      const nextActive =
-        state.activeFile?.path === path
-          ? nextTabs[nextTabs.length - 1] ?? null
-          : nextTabs.find((tab) => tab.path === state.activeFile?.path) ?? state.activeFile;
+      const nextActivePath =
+        activeGroup?.activeTabPath === path
+          ? nextTabs[nextTabs.length - 1]?.path ?? null
+          : activeGroup?.activeTabPath && nextTabs.some((tab) => tab.path === activeGroup.activeTabPath)
+            ? activeGroup.activeTabPath
+            : nextTabs[0]?.path ?? null;
+      const nextActive = nextTabs.find((tab) => tab.path === nextActivePath) ?? null;
 
       return {
         activeFile: nextActive,
@@ -605,7 +1203,7 @@ export const useFileStore = create<FileState>()((set, get) => ({
             ? {
                 ...g,
                 tabs: nextTabs,
-                activeTabPath: nextActive?.path ?? null,
+                activeTabPath: nextActivePath,
               }
             : g
         ),
@@ -613,6 +1211,13 @@ export const useFileStore = create<FileState>()((set, get) => ({
     });
   },
   updateFileContent: (path, content) => {
+    const previousTab = get().getOpenTabs().find((item) => item.path === path);
+    if (
+      previousTab?.isReadOnly ||
+      previousTab?.fileMode === "blueprint" ||
+      previousTab?.fileMode === "image" ||
+      previousTab?.fileMode === "unsupported"
+    ) return;
     set((state) => {
       let tab: OpenFileTab | undefined;
       for (const g of state.editorGroups) {
@@ -634,23 +1239,86 @@ export const useFileStore = create<FileState>()((set, get) => ({
         })),
       };
     });
+
+    const nextTab = get().getOpenTabs().find((item) => item.path === path);
+    if (!previousTab || !nextTab || previousTab.content === content) return;
+
+    const baselineKey = `${path}:${previousTab.savedContent.length}:${previousTab.savedContent.slice(0, 64)}`;
+    if (!previousTab.isDirty && !historyBaselineKeys.has(baselineKey)) {
+      historyBaselineKeys.add(baselineKey);
+      if (previousTab.fileMode === "docx" && previousTab.docxPackageState) {
+        void serializeDocxBase64(JSON.parse(previousTab.savedContent), previousTab.docxPackageState)
+          .then((base64) => recordBinarySnapshot(get().rootPath, path, base64, "manual"))
+          .then(() => rememberSnapshotContent(path, previousTab.savedContent))
+          .catch(() => undefined);
+      } else {
+        void recordTextSnapshot(get().rootPath, path, previousTab.savedContent, "manual").catch(() => undefined);
+      }
+    }
+
+    const lastSnapshotContent = historyLastSnapshotContent.get(path) ?? previousTab.savedContent;
+    const changedBytes = Math.abs(
+      estimateContentBytes(nextTab.content, "utf8") - estimateContentBytes(lastSnapshotContent, "utf8")
+    );
+
+    clearHistoryIdleTimer(path);
+    if (changedBytes >= VERSION_HISTORY_SIZE_TRIGGER_BYTES) {
+      void get().saveFile(path, "size");
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      const currentTab = get().getOpenTabs().find((item) => item.path === path);
+      if (currentTab?.isDirty) {
+        void get().saveFile(path, "idle");
+      }
+      historyIdleTimers.delete(path);
+    }, VERSION_HISTORY_IDLE_MS);
+    historyIdleTimers.set(path, timer);
   },
-  saveFile: async (path) => {
+  saveFile: async (path, reason = "manual") => {
     const targetPath = path ?? get().activeFile?.path;
     if (!targetPath) return;
 
     const tab = get().getOpenTabs().find((item) => item.path === targetPath);
     if (!tab) return;
+    if (tab.isReadOnly) {
+      set({ errorMessage: null });
+      return;
+    }
+    if (tab.fileMode === "blueprint" || tab.fileMode === "image" || tab.fileMode === "unsupported") {
+      set({ errorMessage: null });
+      return;
+    }
 
     const contentToSave = tab.content;
 
     try {
-      await writeFile(targetPath, contentToSave);
+      clearHistoryIdleTimer(targetPath);
+      if (tab.fileMode === "docx") {
+        if (!tab.docxPackageState) {
+          throw new Error("DOCX package state is missing. Reopen the file and try again.");
+        }
+        const docJson = JSON.parse(contentToSave);
+        const nextBase64 = await serializeDocxBase64(docJson, tab.docxPackageState);
+        await recordBinarySnapshot(get().rootPath, targetPath, nextBase64, reason);
+        await writeFileBinary(targetPath, nextBase64);
+        rememberSnapshotContent(targetPath, contentToSave);
+        tab.docxPackageState.originalBase64 = nextBase64;
+      } else {
+        await recordTextSnapshot(get().rootPath, targetPath, contentToSave, reason);
+        await writeFile(targetPath, contentToSave);
+      }
 
       set((state) => {
         const updateTab = (item: OpenFileTab) =>
           item.path === targetPath
-            ? { ...item, savedContent: contentToSave, isDirty: item.content !== contentToSave }
+            ? {
+                ...item,
+                savedContent: contentToSave,
+                docxPackageState: item.path === tab.path ? tab.docxPackageState : item.docxPackageState,
+                isDirty: item.content !== contentToSave,
+              }
             : item;
 
         const updatedActive = state.activeFile?.path === targetPath
@@ -691,6 +1359,10 @@ export const useFileStore = create<FileState>()((set, get) => ({
       }));
       await get().ensureFolderLoaded(targetFolder);
       await createFileOnDisk(fullPath);
+      if (getFileMode(safeName) === "docx") {
+        const emptyDocxBase64 = await createDocxBase64FromPlainText("");
+        await writeFileBinary(fullPath, emptyDocxBase64);
+      }
       await get().refreshWorkspace();
       await get().openFile(fullPath);
       set({ errorMessage: null });
@@ -723,6 +1395,7 @@ export const useFileStore = create<FileState>()((set, get) => ({
   renameFile: async (path, newName) => {
     try {
       const newPath = await renamePath(path, newName);
+      await updateSnapshotPaths(path, newPath);
       set((state) => {
         const renameInTabs = (tabs: OpenFileTab[]) =>
           updateTabsWithRenamedPath(tabs, path, newPath, newName);
@@ -798,6 +1471,7 @@ export const useFileStore = create<FileState>()((set, get) => ({
   moveFile: async (sourcePath, destinationFolderPath) => {
     try {
       const newPath = await movePath(sourcePath, destinationFolderPath);
+      await updateSnapshotPaths(sourcePath, newPath);
       const movedName = newPath.split(/[/\\]/).pop() ?? newPath;
       set((state) => {
         const renameInTabs = (tabs: OpenFileTab[]) =>
@@ -890,6 +1564,8 @@ export const useFileStore = create<FileState>()((set, get) => ({
   },
   splitEditor: (_direction) => {
     const { editorGroups, activeFile } = get();
+    if (editorGroups.length >= MAX_EDITOR_GROUPS) return;
+
     const newGroupId = `group-${Date.now()}`;
     const newGroup = createEditorGroup(newGroupId);
 
@@ -902,6 +1578,23 @@ export const useFileStore = create<FileState>()((set, get) => ({
       editorGroups: [...editorGroups, newGroup],
       activeGroupId: newGroupId,
     });
+  },
+  openFileInNewGroup: async (path) => {
+    const { editorGroups } = get();
+    if (editorGroups.length >= MAX_EDITOR_GROUPS) {
+      await get().openFile(path, get().activeGroupId);
+      set({ errorMessage: "A maximum of 3 editor windows is supported." });
+      return;
+    }
+
+    const newGroupId = `group-${Date.now()}`;
+    const newGroup = createEditorGroup(newGroupId);
+    set((state) => ({
+      editorGroups: [...state.editorGroups, newGroup],
+      activeGroupId: newGroupId,
+      activeFile: null,
+    }));
+    await get().openFile(path, newGroupId);
   },
   closeGroup: (groupId) => {
     const { editorGroups, activeGroupId } = get();

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { Activity, ExternalLink, Play, RefreshCw, TerminalSquare, X } from "lucide-react";
+import { Activity, ExternalLink, Play, RefreshCw, TerminalSquare } from "lucide-react";
 import { useFileStore } from "../stores/fileStore";
 import {
   diagnoseTerminal,
@@ -18,17 +18,12 @@ import {
 import "@xterm/xterm/css/xterm.css";
 import "./TerminalPanel.css";
 
-interface TerminalPanelProps {
-  height: number;
-}
-
-const TerminalPanel: React.FC<TerminalPanelProps> = ({ height }) => {
+const TerminalPanel: React.FC = () => {
   const rootPath = useFileStore((state) => state.rootPath);
   const terminalElementRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const terminalIdRef = useRef<string | null>(null);
-  const [isOpen, setIsOpen] = useState(true);
   const [sessionKey, setSessionKey] = useState(0);
   const [shellInfo, setShellInfo] = useState<{ label: string; command: string } | null>(null);
   const [status, setStatus] = useState<"idle" | "starting" | "ready" | "unavailable" | "exited">("idle");
@@ -101,7 +96,7 @@ const TerminalPanel: React.FC<TerminalPanelProps> = ({ height }) => {
   };
 
   useEffect(() => {
-    if (!isOpen || !terminalElementRef.current) return;
+    if (!terminalElementRef.current) return;
 
     if (!isTerminalAvailable()) {
       setStatus("unavailable");
@@ -226,19 +221,10 @@ const TerminalPanel: React.FC<TerminalPanelProps> = ({ height }) => {
       fitAddonRef.current = null;
       terminalIdRef.current = null;
     };
-  }, [isOpen, rootPath, sessionKey]);
-
-  if (!isOpen) {
-    return (
-      <button className="terminal-restore" onClick={() => setIsOpen(true)} title="Show Terminal">
-        <TerminalSquare size={15} />
-        <span>Terminal</span>
-      </button>
-    );
-  }
+  }, [rootPath, sessionKey]);
 
   return (
-    <section className="terminal-panel" style={{ height }}>
+    <section className="terminal-panel">
       <div className="terminal-header">
         <div className="terminal-title">
           <TerminalSquare size={15} />
@@ -258,9 +244,6 @@ const TerminalPanel: React.FC<TerminalPanelProps> = ({ height }) => {
           </button>
           <button onClick={() => void handleOpenExternal()} title="Open External Terminal Here">
             <ExternalLink size={14} />
-          </button>
-          <button onClick={() => setIsOpen(false)} title="Hide Terminal">
-            <X size={14} />
           </button>
         </div>
       </div>

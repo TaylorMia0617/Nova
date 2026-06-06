@@ -1,0 +1,92 @@
+.find-replace-panel {
+  position: absolute;
+  top: 0;
+  right: 16px;
+  z-index: 1100;
+  background: #1a1f2e;
+  border: 1px solid #4a5568;
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  padding: 10px 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 360px;
+}
+
+.find-replace-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.find-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  background: #2d3748;
+  border: 1px solid #4a5568;
+  border-radius: 4px;
+  color: #e2e8f0;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.find-input:focus {
+  border-color: #5a9e8f;
+}
+
+.find-input::placeholder {
+  color: #718096;
+}
+
+.match-count {
+  font-size: 12px;
+  color: #a0aec0;
+  min-width: 60px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.find-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
+  background: #2d3748;
+  color: #e2e8f0;
+  border: 1px solid #4a5568;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+
+.find-btn:hover:not(:disabled) {
+  background: #4a5568;
+  border-color: #718096;
+}
+
+.find-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.find-btn.toggle {
+  font-size: 11px;
+}
+
+.find-btn.close {
+  color: #fc5c65;
+  font-size: 14px;
+}
+
+.find-btn.close:hover {
+  background: #fc5c65;
+  color: #ffffff;
+  border-color: #fc5c65;
+}

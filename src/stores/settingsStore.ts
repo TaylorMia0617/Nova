@@ -6,9 +6,13 @@ import type { Locale } from "../i18n";
 import { setLocale } from "../i18n";
 
 type PromptKey = keyof SelectionPromptTemplates;
+export type AppTheme = "dark" | "light";
 
 interface SettingsState {
   language: Locale;
+  theme: AppTheme;
+  backgroundImage: string | null;
+  backgroundOpacity: number;
   modelProfiles: ModelProfile[];
   defaultChatModelId: string;
   defaultSelectionModelId: string;
@@ -18,6 +22,10 @@ interface SettingsState {
   tavilyApiKey: string;
   webSearchLimit: number;
   setLanguage: (locale: Locale) => void;
+  setTheme: (theme: AppTheme) => void;
+  setBackgroundImage: (value: string) => void;
+  clearBackgroundImage: () => void;
+  setBackgroundOpacity: (value: number) => void;
   setModelProfiles: (profiles: ModelProfile[]) => void;
   updateModelProfile: (id: string, patch: Partial<ModelProfile>) => void;
   removeModelProfile: (id: string) => void;
@@ -130,6 +138,12 @@ export async function syncFromFile(): Promise<boolean> {
       JSON.stringify(parsed.defaultSelectionModelId) !==
         JSON.stringify(currentState.defaultSelectionModelId) ||
       parsed.chatMaxTokens !== currentState.chatMaxTokens ||
+      parsed.contextMaxLength !== currentState.contextMaxLength ||
+      parsed.tavilyApiKey !== currentState.tavilyApiKey ||
+      parsed.webSearchLimit !== currentState.webSearchLimit ||
+      parsed.theme !== currentState.theme ||
+      parsed.backgroundImage !== currentState.backgroundImage ||
+      (parsed.backgroundOpacity ?? currentState.backgroundOpacity) !== currentState.backgroundOpacity ||
       parsed.language !== currentState.language;
 
     if (hasChanges) {
@@ -153,6 +167,12 @@ export async function exportToFile(): Promise<boolean> {
       defaultSelectionModelId: state.defaultSelectionModelId,
       selectionPromptTemplates: state.selectionPromptTemplates,
       chatMaxTokens: state.chatMaxTokens,
+      contextMaxLength: state.contextMaxLength,
+      tavilyApiKey: state.tavilyApiKey,
+      webSearchLimit: state.webSearchLimit,
+      theme: state.theme,
+      backgroundImage: state.backgroundImage,
+      backgroundOpacity: state.backgroundOpacity,
     };
     await writeGlobalApiConfig(JSON.stringify(dataToExport, null, 2));
     return true;
@@ -166,6 +186,9 @@ export const useSettingsStore = create<SettingsState>()(
   persist(
     (set, get) => ({
       language: "zh-CN" as Locale,
+      theme: "dark",
+      backgroundImage: null,
+      backgroundOpacity: 35,
       modelProfiles: [DEFAULT_PROFILE],
       defaultChatModelId: DEFAULT_PROFILE.id,
       defaultSelectionModelId: DEFAULT_PROFILE.id,
@@ -178,6 +201,10 @@ export const useSettingsStore = create<SettingsState>()(
         setLocale(locale);
         set({ language: locale });
       },
+      setTheme: (theme) => set({ theme }),
+      setBackgroundImage: (value) => set({ backgroundImage: value }),
+      clearBackgroundImage: () => set({ backgroundImage: null }),
+      setBackgroundOpacity: (value) => set({ backgroundOpacity: Math.min(100, Math.max(0, value)) }),
       setModelProfiles: (profiles) =>
         set((state) => {
           const nextProfiles = profiles.length > 0 ? profiles : [DEFAULT_PROFILE];
@@ -249,6 +276,9 @@ export const useSettingsStore = create<SettingsState>()(
         contextMaxLength: state.contextMaxLength,
         tavilyApiKey: state.tavilyApiKey,
         webSearchLimit: state.webSearchLimit,
+        theme: state.theme,
+        backgroundImage: state.backgroundImage,
+        backgroundOpacity: state.backgroundOpacity,
       }),
       onRehydrateStorage: () => {
         return (_state, error) => {
@@ -264,7 +294,19 @@ export const useSettingsStore = create<SettingsState>()(
                     JSON.stringify(parsed.modelProfiles) !==
                       JSON.stringify(currentState.modelProfiles) ||
                     JSON.stringify(parsed.selectionPromptTemplates) !==
-                      JSON.stringify(currentState.selectionPromptTemplates);
+                      JSON.stringify(currentState.selectionPromptTemplates) ||
+                    JSON.stringify(parsed.defaultChatModelId) !==
+                      JSON.stringify(currentState.defaultChatModelId) ||
+                    JSON.stringify(parsed.defaultSelectionModelId) !==
+                      JSON.stringify(currentState.defaultSelectionModelId) ||
+                    parsed.chatMaxTokens !== currentState.chatMaxTokens ||
+                    parsed.contextMaxLength !== currentState.contextMaxLength ||
+                    parsed.tavilyApiKey !== currentState.tavilyApiKey ||
+                    parsed.webSearchLimit !== currentState.webSearchLimit ||
+                    parsed.language !== currentState.language ||
+                    parsed.theme !== currentState.theme ||
+                    parsed.backgroundImage !== currentState.backgroundImage ||
+                    (parsed.backgroundOpacity ?? currentState.backgroundOpacity) !== currentState.backgroundOpacity;
 
                   if (hasChanges) {
                     useSettingsStore.setState(parsed);

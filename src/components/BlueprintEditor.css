@@ -1,0 +1,688 @@
+.blueprint-editor {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #0b0f17;
+  color: var(--color-text, #e2e8f0);
+}
+
+.blueprint-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--color-border, #2d3748);
+  background: var(--app-header-surface, #0f172a);
+}
+
+.blueprint-toolbar-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 160px;
+  margin-right: auto;
+}
+
+.blueprint-toolbar button,
+.blueprint-inspector button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--color-border-strong, #4a5568);
+  border-radius: 6px;
+  background: var(--color-surface-raised, #1a1f2e);
+  color: var(--color-text, #e2e8f0);
+  padding: 7px 10px;
+}
+
+.blueprint-toolbar button.active {
+  border-color: var(--color-accent, #5a9e8f);
+  box-shadow: inset 0 0 0 1px var(--color-accent, #5a9e8f);
+}
+
+.blueprint-save-button.saved {
+  border-color: #5a9e8f;
+}
+
+.blueprint-save-button.error {
+  border-color: #f87171;
+}
+
+.blueprint-save-status {
+  font-size: 12px;
+  color: var(--color-text-subtle, #94a3b8);
+}
+
+.blueprint-save-status.saved {
+  color: #7dd3c7;
+}
+
+.blueprint-save-status.error {
+  color: #fca5a5;
+}
+
+.blueprint-toolbar button:disabled {
+  opacity: 0.5;
+}
+
+.blueprint-editor-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.blueprint-editor-body.is-resizing,
+.blueprint-editor-body.is-resizing * {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.blueprint-canvas {
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 1px 1px, rgba(148, 163, 184, 0.16) 1px, transparent 0),
+    #080c13;
+  background-size: 22px 22px;
+  cursor: grab;
+}
+
+.blueprint-canvas:active {
+  cursor: grabbing;
+}
+
+.blueprint-node-palette-shell {
+  position: absolute;
+  left: 50%;
+  bottom: 24px;
+  z-index: 12;
+  width: min(1040px, calc(100% - 48px));
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.blueprint-node-palette {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 64px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-behavior: smooth;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+  background: transparent;
+  padding: 8px max(50%, 16px);
+  pointer-events: auto;
+}
+
+.blueprint-node-palette::-webkit-scrollbar {
+  display: none;
+}
+
+.blueprint-node-palette button {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 96px;
+  max-width: 180px;
+  height: 42px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.58);
+  color: var(--color-text, #e2e8f0);
+  padding: 0 14px;
+  scroll-snap-align: center;
+  white-space: nowrap;
+  backdrop-filter: blur(8px);
+}
+
+.blueprint-node-palette button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.blueprint-node-palette button:hover,
+.blueprint-node-palette button.active {
+  border-color: var(--color-accent, #5a9e8f);
+  background: rgba(26, 31, 46, 0.82);
+  box-shadow: 0 0 0 1px rgba(90, 158, 143, 0.28), 0 12px 28px rgba(0, 0, 0, 0.28);
+}
+
+.blueprint-world {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 4000px;
+  height: 4000px;
+  transform-origin: 0 0;
+}
+
+.blueprint-edges {
+  position: absolute;
+  inset: 0;
+  width: 4000px;
+  height: 4000px;
+  pointer-events: none;
+}
+
+.blueprint-edges path {
+  fill: none;
+  stroke: rgba(90, 158, 143, 0.78);
+  stroke-width: 2.25;
+  pointer-events: stroke;
+  cursor: pointer;
+  transition: stroke 0.16s ease, stroke-width 0.16s ease, filter 0.16s ease;
+}
+
+.blueprint-edges path:hover,
+.blueprint-edges path.selected {
+  stroke: #fbbf24;
+  stroke-width: 3.5;
+  filter: drop-shadow(0 0 8px rgba(251, 191, 36, 0.24));
+}
+
+.blueprint-edges path.draft {
+  stroke: #fbbf24;
+  stroke-dasharray: 8 6;
+  pointer-events: none;
+}
+
+.blueprint-node {
+  position: absolute;
+  width: 220px;
+  min-height: 126px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: rgba(17, 24, 39, 0.94);
+  box-shadow: 0 16px 30px rgba(0, 0, 0, 0.32);
+  padding: 10px;
+  cursor: grab;
+  user-select: none;
+  backdrop-filter: blur(6px);
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
+}
+
+.blueprint-node:hover {
+  border-color: rgba(148, 163, 184, 0.64);
+  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.38);
+}
+
+.blueprint-node.story {
+  border-top: 3px solid #5a9e8f;
+}
+
+.blueprint-node.character {
+  border-top: 3px solid #8b5cf6;
+}
+
+.blueprint-node.custom {
+  border-top: 3px solid #f59e0b;
+}
+
+.blueprint-node.selected,
+.blueprint-node.connecting {
+  border-color: #fbbf24;
+  box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.24), 0 18px 34px rgba(0, 0, 0, 0.36);
+}
+
+.blueprint-node-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--color-text-subtle, #94a3b8);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.blueprint-node-header span,
+.blueprint-node-header small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.blueprint-node strong {
+  display: block;
+  font-size: 14px;
+  margin-bottom: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.blueprint-node p {
+  margin: 0;
+  color: var(--color-text-muted, #a0aec0);
+  font-size: 12px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.node-port {
+  position: absolute;
+  top: 58px;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: #5a9e8f;
+  border: 2px solid #0b0f17;
+  cursor: crosshair;
+  transition: transform 0.15s ease, background-color 0.15s ease;
+}
+
+.node-port:hover {
+  transform: scale(1.45);
+  background: #fbbf24;
+}
+
+.node-port.input {
+  left: -6px;
+}
+
+.node-port.output {
+  right: -6px;
+}
+
+.blueprint-inspector {
+  background: var(--app-panel-bg, #0f172a);
+  padding: 16px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  min-width: 0;
+}
+
+.blueprint-inspector-resize {
+  width: 6px;
+  border-left: 1px solid var(--color-border, #2d3748);
+  border-right: 1px solid rgba(148, 163, 184, 0.08);
+  background: linear-gradient(90deg, transparent, rgba(148, 163, 184, 0.08), transparent);
+  cursor: col-resize;
+}
+
+.blueprint-inspector-resize:hover,
+.blueprint-inspector-resize:focus-visible {
+  outline: none;
+  background: rgba(90, 158, 143, 0.22);
+  border-left-color: var(--color-accent, #5a9e8f);
+}
+
+.blueprint-inspector-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.blueprint-inspector h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.blueprint-inspector label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+  color: var(--color-text-subtle, #94a3b8);
+  font-size: 12px;
+}
+
+.blueprint-inspector input,
+.blueprint-inspector textarea,
+.blueprint-inspector select {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--color-border-strong, #4a5568);
+  border-radius: 6px;
+  background: var(--color-bg-soft, #111827);
+  color: var(--color-text, #e2e8f0);
+  padding: 8px 10px;
+}
+
+.blueprint-inspector textarea {
+  min-height: 78px;
+  resize: vertical;
+}
+
+.blueprint-field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.blueprint-field-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--color-text-subtle, #94a3b8);
+  font-size: 12px;
+}
+
+.blueprint-field-header button,
+.blueprint-inline-row button {
+  padding: 6px 8px;
+}
+
+.blueprint-inline-row {
+  display: grid;
+  gap: 6px;
+  align-items: start;
+}
+
+.blueprint-inline-row.single {
+  grid-template-columns: 1fr auto;
+}
+
+.blueprint-inline-row.relationship {
+  grid-template-columns: 1fr auto;
+}
+
+.blueprint-inline-row.story-event {
+  grid-template-columns: 1fr auto;
+}
+
+.blueprint-inline-row textarea {
+  min-height: 42px;
+}
+
+.blueprint-detail-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.72);
+}
+
+.blueprint-detail-card-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+}
+
+.blueprint-detail-card-header.custom-field-header {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.blueprint-detail-card-header.custom-field-header button span {
+  max-width: 72px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.blueprint-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.blueprint-detail-textarea {
+  min-height: 72px;
+}
+
+.blueprint-detail-card.story-event .blueprint-detail-textarea {
+  min-height: 82px;
+}
+
+.blueprint-field-inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.blueprint-field-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px 34px;
+  gap: 6px;
+  align-items: center;
+}
+
+.blueprint-field-input-row.fixed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.blueprint-field-input-row button {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+}
+
+.blueprint-field-input-row button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.blueprint-field-settings-button {
+  width: fit-content;
+}
+
+.blueprint-detail-card.template-field {
+  gap: 10px;
+}
+
+.blueprint-wide-button {
+  width: 100%;
+  justify-content: center;
+}
+
+.blueprint-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+  background: rgba(3, 7, 18, 0.68);
+}
+
+.blueprint-template-modal {
+  width: min(920px, calc(100vw - 56px));
+  max-height: min(720px, calc(100vh - 56px));
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border-strong, #4a5568);
+  border-radius: 10px;
+  background: var(--app-panel-bg, #0f172a);
+  color: var(--color-text, #e2e8f0);
+  box-shadow: 0 24px 72px rgba(0, 0, 0, 0.52);
+}
+
+.blueprint-template-modal-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px;
+  border-bottom: 1px solid var(--color-border, #2d3748);
+}
+
+.blueprint-template-modal-header h3,
+.blueprint-template-modal-header p {
+  margin: 0;
+}
+
+.blueprint-template-modal-header p {
+  margin-top: 4px;
+  color: var(--color-text-subtle, #94a3b8);
+  font-size: 12px;
+}
+
+.blueprint-template-modal button,
+.blueprint-template-modal input,
+.blueprint-template-modal textarea,
+.blueprint-template-modal select {
+  border: 1px solid var(--color-border-strong, #4a5568);
+  border-radius: 6px;
+  background: var(--color-bg-soft, #111827);
+  color: var(--color-text, #e2e8f0);
+}
+
+.blueprint-template-modal button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 10px;
+}
+
+.blueprint-template-modal input,
+.blueprint-template-modal textarea,
+.blueprint-template-modal select {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+}
+
+.blueprint-template-modal textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.blueprint-template-modal-body {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.blueprint-template-list {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  overflow: auto;
+  border-right: 1px solid var(--color-border, #2d3748);
+}
+
+.blueprint-template-new {
+  width: 100%;
+}
+
+.blueprint-template-list article {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.72);
+}
+
+.blueprint-template-list article.active {
+  border-color: var(--color-accent, #5a9e8f);
+}
+
+.blueprint-template-list article > button {
+  display: flex;
+  flex-direction: column;
+  align-items: start;
+  border: none;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+}
+
+.blueprint-template-list article span {
+  color: var(--color-text-subtle, #94a3b8);
+  font-size: 12px;
+}
+
+.blueprint-template-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.blueprint-template-form {
+  min-height: 0;
+  padding: 16px;
+  overflow: auto;
+}
+
+.blueprint-template-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+  color: var(--color-text-subtle, #94a3b8);
+  font-size: 12px;
+}
+
+.blueprint-template-error {
+  margin-top: 10px;
+  color: #fca5a5;
+  font-size: 12px;
+}
+
+.blueprint-template-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+@media (max-width: 1180px) {
+  .blueprint-detail-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .blueprint-template-modal-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .blueprint-template-list {
+    max-height: 220px;
+    border-right: none;
+    border-bottom: 1px solid var(--color-border, #2d3748);
+  }
+}
+
+.blueprint-editor-empty,
+.blueprint-inspector-empty {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-subtle, #718096);
+}
+
+.blueprint-context-menu {
+  position: fixed;
+  z-index: 2000;
+  min-width: 120px;
+  padding: 6px;
+  border: 1px solid var(--color-border-strong, #4a5568);
+  border-radius: 8px;
+  background: var(--color-surface-raised, #1a1f2e);
+  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.42);
+}
+
+.blueprint-context-menu button {
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text, #e2e8f0);
+  text-align: left;
+}
+
+.blueprint-context-menu button:hover {
+  background: var(--color-bg-soft, #111827);
+}

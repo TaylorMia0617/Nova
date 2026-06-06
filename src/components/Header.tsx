@@ -1,10 +1,10 @@
-import React, { useMemo, useState } from "react";
-import { FolderOpen, SaveAll, Settings, Globe } from "lucide-react";
+import React, { useMemo } from "react";
+import { Bot, FolderOpen, Globe, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, SaveAll, Settings } from "lucide-react";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useFileStore } from "../stores/fileStore";
+import { useAppUIStore } from "../stores/appUIStore";
 import { useTranslation } from "../hooks/useTranslation";
 import type { Locale } from "../i18n";
-import SettingsModal from "./SettingsModal";
 import "./Header.css";
 
 const LOCALE_OPTIONS: { value: Locale; label: string }[] = [
@@ -15,7 +15,13 @@ const LOCALE_OPTIONS: { value: Locale; label: string }[] = [
 const Header: React.FC = () => {
   const { modelProfiles, defaultChatModelId, defaultSelectionModelId, language, setLanguage } = useSettingsStore();
   const { t } = useTranslation();
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const {
+    isExplorerOpen,
+    isCopilotOpen,
+    toggleExplorer,
+    toggleCopilot,
+    openSettings,
+  } = useAppUIStore();
 
   const {
     rootName,
@@ -38,8 +44,7 @@ const Header: React.FC = () => {
   );
 
   return (
-    <>
-      <header className="header">
+    <header className="header">
         <div className="header-left">
           <span className="header-title">Nova</span>
           {rootName && (
@@ -64,6 +69,25 @@ const Header: React.FC = () => {
           )}
         </div>
         <div className="header-right">
+          <div className="header-panel-controls" aria-label={t("layout.panelControls")}>
+            <button
+              className={`icon-button panel-toggle ${isExplorerOpen ? "active" : ""}`}
+              title={t(isExplorerOpen ? "layout.closeExplorer" : "layout.openExplorer")}
+              onClick={toggleExplorer}
+              type="button"
+            >
+              {isExplorerOpen ? <PanelLeftClose size={15} /> : <PanelLeftOpen size={15} />}
+            </button>
+            <button
+              className={`icon-button panel-toggle ${isCopilotOpen ? "active" : ""}`}
+              title={t(isCopilotOpen ? "layout.closeCopilot" : "layout.openCopilot")}
+              onClick={toggleCopilot}
+              type="button"
+            >
+              {isCopilotOpen ? <PanelRightClose size={15} /> : <PanelRightOpen size={15} />}
+              <Bot size={13} />
+            </button>
+          </div>
           <div className="language-selector">
             <Globe size={12} />
             <select
@@ -86,14 +110,12 @@ const Header: React.FC = () => {
             <SaveAll size={14} />
             <span>{dirtyCount > 0 ? t("header.saveAllCount", { count: dirtyCount }) : t("header.saveAll")}</span>
           </button>
-          <button className="icon-button settings-launch" title={t("header.settings")} onClick={() => setIsSettingsOpen(true)}>
+          <button className="icon-button settings-launch" title={t("header.settings")} onClick={openSettings}>
             <Settings size={16} />
             <span>{t("header.settings")}</span>
           </button>
         </div>
-      </header>
-      <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
-    </>
+    </header>
   );
 };
 

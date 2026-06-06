@@ -1,9 +1,10 @@
 .terminal-panel {
-  min-height: 160px;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
   display: flex;
   flex-direction: column;
   background: #111111;
-  border-top: 1px solid #333333;
 }
 
 .terminal-header {
@@ -68,8 +69,7 @@
   background: #f87171;
 }
 
-.terminal-header button,
-.terminal-restore {
+.terminal-header button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -87,7 +87,7 @@
 }
 
 .terminal-header button:hover,
-.terminal-restore:hover {
+.terminal-header button:hover {
   background: rgba(255, 255, 255, 0.08);
 }
 
@@ -96,14 +96,6 @@
   min-height: 0;
   padding: 8px 10px;
   overflow: hidden;
-}
-
-.terminal-restore {
-  align-self: flex-start;
-  margin: 8px;
-  font-size: 12px;
-  border: 1px solid #333333;
-  background: #181818;
 }
 
 .terminal-body .xterm {

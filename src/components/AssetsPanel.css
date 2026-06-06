@@ -250,6 +250,22 @@
   border-color: #0078d4;
 }
 
+.create-file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.create-file-name-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.create-extension-select {
+  flex: 0 0 96px;
+  width: 96px;
+}
+
 .dialog-actions {
   display: flex;
   justify-content: flex-end;
@@ -366,6 +382,17 @@
   color: #feb2b2;
 }
 
+@media (max-width: 420px) {
+  .create-file-row {
+    flex-wrap: wrap;
+  }
+
+  .create-extension-select {
+    flex: 0 0 100%;
+    width: 100%;
+  }
+}
+
 .settings-sidebar-actions {
   display: flex;
   gap: 8px;
@@ -375,4 +402,122 @@
   background: #5a1d1d;
   color: #feb2b2;
   border-color: #742a2a;
+}
+
+.assets-panel {
+  background-color: var(--app-surface);
+  border-right-color: var(--color-border);
+  color: var(--color-text);
+}
+
+.assets-panel .panel-header,
+.explorer-search {
+  background-color: var(--app-header-surface);
+  border-color: var(--color-border);
+}
+
+.assets-panel .panel-header h2,
+.file-tree-item.active .file-name,
+.dialog-card h3,
+.reference-table-key,
+.reference-table-value {
+  color: var(--color-text);
+}
+
+.panel-actions button,
+.folder-icon,
+.file-icon,
+.file-name,
+.context-menu button,
+.dialog-card p,
+.dialog-actions button.secondary,
+.reference-table-header,
+.reference-table-delete {
+  color: var(--color-text-muted);
+}
+
+.explorer-empty,
+.search-icon,
+.clear-search-button,
+.search-input::placeholder {
+  color: var(--color-text-subtle);
+}
+
+.search-input-wrap,
+.rename-input,
+.dialog-input,
+.reference-table-key,
+.reference-table-value {
+  background: var(--app-control-surface);
+  border-color: var(--color-border);
+  color: var(--color-text);
+}
+
+.search-input {
+  color: var(--color-text);
+}
+
+.search-input-wrap:focus-within,
+.rename-input,
+.dialog-input:focus,
+.reference-table-key:focus,
+.reference-table-value:focus {
+  border-color: var(--color-accent);
+}
+
+.panel-actions button:hover,
+.clear-search-button:hover,
+.file-tree-item:hover,
+.file-tree-item.active,
+.file-tree-item.selected {
+  background-color: var(--app-control-surface);
+  color: var(--color-text);
+}
+
+.file-tree-item.drop-target {
+  background-color: color-mix(in srgb, var(--color-accent) 22%, var(--app-control-surface));
+  outline-color: var(--color-accent);
+}
+
+.context-menu,
+.dialog-card {
+  background: var(--app-menu-surface);
+  border-color: var(--color-border);
+}
+
+.context-menu button:hover,
+.dialog-actions button.secondary:hover {
+  background: var(--app-control-surface);
+  color: var(--color-text);
+}
+
+.dialog-actions button:not(.secondary):not(.danger-action) {
+  background: var(--color-accent);
+}
+
+.dialog-actions button:not(.secondary):not(.danger-action):hover {
+  background: var(--color-accent-strong);
+}
+
+.reference-table-body {
+  scrollbar-color: var(--color-border-strong) transparent;
+}
+
+.assets-panel {
+  background: var(--app-surface);
+}
+
+.assets-panel .panel-header,
+.explorer-search {
+  background: var(--app-header-surface);
+}
+
+.file-tree-item:hover,
+.file-tree-item.active,
+.file-tree-item.selected,
+.search-input-wrap,
+.rename-input,
+.reference-table-key,
+.reference-table-value {
+  background: var(--app-control-surface);
 }

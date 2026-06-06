@@ -28,6 +28,10 @@ type CreateDialogState =
   | { type: "folder"; targetNodePath: string | null }
   | null;
 
+type CreateFileExtension = ".docx" | ".txt" | ".md";
+
+const CREATE_FILE_EXTENSIONS: CreateFileExtension[] = [".docx", ".txt", ".md"];
+
 const createDraftList = (): ReferenceListData => ({
   id: `list-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
   name: "New List",
@@ -43,7 +47,6 @@ const AssetsPanel: React.FC = () => {
     referenceLists,
     selectedListId,
     ensureFolderLoaded,
-    loadFullWorkspaceTree,
     openFile,
     createFile,
     createFolder,
@@ -65,6 +68,7 @@ const AssetsPanel: React.FC = () => {
   const [dropTargetPath, setDropTargetPath] = useState<string | null>(null);
   const [createDialog, setCreateDialog] = useState<CreateDialogState>(null);
   const [createValue, setCreateValue] = useState("");
+  const [createExtension, setCreateExtension] = useState<CreateFileExtension>(".docx");
   const [deleteConfirmPath, setDeleteConfirmPath] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [referenceDialogOpen, setReferenceDialogOpen] = useState(false);
@@ -161,12 +165,14 @@ const AssetsPanel: React.FC = () => {
   const openCreateDialog = (type: "file" | "folder", targetNodePath: string | null = selectedNodePath) => {
     setCreateDialog({ type, targetNodePath });
     setCreateValue("");
+    setCreateExtension(".docx");
     setContextPos(null);
   };
 
   const closeCreateDialog = () => {
     setCreateDialog(null);
     setCreateValue("");
+    setCreateExtension(".docx");
   };
 
   const openReferenceDialog = () => {
@@ -335,6 +341,17 @@ const AssetsPanel: React.FC = () => {
     setReferenceSaveStatus("");
   };
 
+  const normalizeCreateFileName = (rawName: string) => {
+    const matchedExtension = CREATE_FILE_EXTENSIONS.find((extension) =>
+      rawName.toLowerCase().endsWith(extension)
+    );
+    const extension = matchedExtension ?? createExtension;
+    const nameWithoutExtension = matchedExtension
+      ? rawName.slice(0, -matchedExtension.length)
+      : rawName.replace(/\.[^./\\]+$/, "");
+    return `${nameWithoutExtension || "untitled"}${extension}`;
+  };
+
   const submitCreateDialog = async () => {
     if (!createDialog) return;
 
@@ -343,7 +360,7 @@ const AssetsPanel: React.FC = () => {
 
     const targetFolderPath = getTargetFolderPath(createDialog.targetNodePath);
     if (createDialog.type === "file") {
-      await createFile(name, targetFolderPath);
+      await createFile(normalizeCreateFileName(name), targetFolderPath);
     } else {
       await createFolder(name, targetFolderPath);
     }
@@ -417,8 +434,12 @@ const AssetsPanel: React.FC = () => {
             onDragStart={(e) => {
               e.stopPropagation();
               setDraggedNodePath(node.path);
-              e.dataTransfer.effectAllowed = "move";
+              e.dataTransfer.effectAllowed = "copyMove";
               e.dataTransfer.setData("text/plain", node.path);
+              e.dataTransfer.setData("application/x-novel-node-type", node.type);
+              if (!isFolder) {
+                e.dataTransfer.setData("application/x-novel-file-path", node.path);
+              }
             }}
             onDragOver={(e) => {
               if (!isFolder || draggedNodePath === node.path) return;
@@ -494,11 +515,6 @@ const AssetsPanel: React.FC = () => {
       void ensureFolderLoaded(rootPath);
     }
   }, [ensureFolderLoaded, rootPath]);
-
-  useEffect(() => {
-    if (!normalizedSearchQuery || !rootPath) return;
-    void loadFullWorkspaceTree();
-  }, [loadFullWorkspaceTree, normalizedSearchQuery, rootPath]);
 
   useEffect(() => {
     const handleClick = () => setContextPos(null);
@@ -669,16 +685,46 @@ const AssetsPanel: React.FC = () => {
             <h3>{createDialog.type === "file" ? "Create New File" : "Create New Folder"}</h3>
             <p>
               {createDialog.type === "file"
-                ? "Enter a file name. If you omit the extension, the app creates a text file (.txt)."
+                ? "Enter a file name and choose a file type."
                 : "Enter a folder name."}
             </p>
-            <input
-              ref={createInputRef}
-              className="dialog-input"
-              value={createValue}
-              onChange={(event) => setCreateValue(event.target.value)}
-              placeholder={createDialog.type === "file" ? "chapter-01" : "notes"}
-            />
+            {createDialog.type === "file" ? (
+              <div className="create-file-row">
+                <input
+                  ref={createInputRef}
+                  className="dialog-input create-file-name-input"
+                  value={createValue}
+                  onChange={(event) => {
+                    const nextValue = event.target.value;
+                    setCreateValue(nextValue);
+                    const matchedExtension = CREATE_FILE_EXTENSIONS.find((extension) =>
+                      nextValue.toLowerCase().endsWith(extension)
+                    );
+                    if (matchedExtension) setCreateExtension(matchedExtension);
+                  }}
+                  placeholder="chapter-01"
+                />
+                <select
+                  className="dialog-input create-extension-select"
+                  value={createExtension}
+                  onChange={(event) => setCreateExtension(event.target.value as CreateFileExtension)}
+                >
+                  {CREATE_FILE_EXTENSIONS.map((extension) => (
+                    <option key={extension} value={extension}>
+                      {extension}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : (
+              <input
+                ref={createInputRef}
+                className="dialog-input"
+                value={createValue}
+                onChange={(event) => setCreateValue(event.target.value)}
+                placeholder="notes"
+              />
+            )}
             <div className="dialog-actions">
               <button type="button" className="secondary" onClick={closeCreateDialog}>
                 Cancel
