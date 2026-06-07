@@ -490,7 +490,12 @@ async function readVersionSnapshots() {
   try {
     const content = await fs.readFile(versionHistoryPath, "utf8");
     const parsed = JSON.parse(content);
-    return pruneVersionSnapshots(Array.isArray(parsed) ? parsed : []);
+    const snapshots = Array.isArray(parsed) ? parsed : [];
+    const pruned = pruneVersionSnapshots(snapshots);
+    if (pruned.length !== snapshots.length) {
+      await fs.writeFile(versionHistoryPath, JSON.stringify(pruned, null, 2), "utf8");
+    }
+    return pruned;
   } catch {
     return [];
   }

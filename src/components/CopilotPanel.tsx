@@ -78,8 +78,49 @@ function buildTitleFromMessage(content: string) {
   return singleLine.length > 32 ? `${singleLine.slice(0, 32)}...` : singleLine || "New conversation";
 }
 
+type WriteToolMetadata = {
+  ok?: boolean;
+  action?: "create_file" | "edit_file";
+  relativePath?: string;
+  absolutePath?: string;
+  fileType?: "text" | "docx";
+  bytes?: number;
+  edits?: number;
+};
+
+function normalizeWorkspacePath(path: string) {
+  return path.trim().replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+/g, "/");
+}
+
+function joinWorkspacePath(rootPath: string, relativePath: string) {
+  const separator = rootPath.includes("\\") ? "\\" : "/";
+  return `${rootPath.replace(/[/\\]+$/, "")}${separator}${normalizeWorkspacePath(relativePath).replace(/\//g, separator)}`;
+}
+
+function findWorkspaceNode(nodes: WorkspaceNode[], targetPath: string): WorkspaceNode | null {
+  const normalizedTarget = normalizeWorkspacePath(targetPath);
+  for (const node of nodes) {
+    if (normalizeWorkspacePath(node.path) === normalizedTarget) return node;
+    if (node.children) {
+      const found = findWorkspaceNode(node.children, targetPath);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function parseWriteToolMetadata(result: string): WriteToolMetadata | null {
+  try {
+    const parsed = JSON.parse(result) as WriteToolMetadata;
+    if (parsed?.ok && parsed.relativePath && parsed.absolutePath) return parsed;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 const CopilotPanel: React.FC = () => {
-  const { activeFile, rootPath, getOpenTabs, files, refreshWorkspace } = useFileStore();
+  const { activeFile, rootPath, getOpenTabs, files, refreshLoadedWorkspace } = useFileStore();
   const { modelProfiles, defaultChatModelId, getModelProfileById, chatMaxTokens, setChatMaxTokens, contextMaxLength, webSearchLimit } = useSettingsStore();
   const { t } = useTranslation();
   const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
@@ -650,6 +691,25 @@ const CopilotPanel: React.FC = () => {
         return { path, completedEdits, lastPartialEdit: null, estimatedTotalEdits: completedEdits.length };
       };
 
+      const handleWriteToolSuccess = async (name: string, result: string, fallbackPath: string) => {
+        const metadata = parseWriteToolMetadata(result);
+        const relativePath = metadata?.relativePath ?? normalizeWorkspacePath(fallbackPath);
+        const absolutePath = metadata?.absolutePath ?? (rootPath && relativePath ? joinWorkspacePath(rootPath, relativePath) : "");
+        if (!relativePath || !absolutePath) return;
+
+        await refreshLoadedWorkspace(absolutePath);
+
+        const latestStore = useFileStore.getState();
+        const node = findWorkspaceNode(latestStore.files, absolutePath);
+        if (node?.type === "file") {
+          await latestStore.openFile(absolutePath, latestStore.activeGroupId);
+          setStatusText(`${name === "create_file" ? "已创建" : "已更新"}：${relativePath}`);
+          return;
+        }
+
+        setStatusText(`文件已写入 ${absolutePath}，但工作区树未刷新到该路径`);
+      };
+
       const MAX_CONTINUATION_RETRIES = 3;
       let continuationCount = 0;
 
@@ -658,7 +718,6 @@ const CopilotPanel: React.FC = () => {
         if (extractedCalls.length === 0 || !rootPath) break;
 
         const toolResults: Array<{ name: string; result: string }> = [];
-        const writeOps: Array<{ name: string; path: string }> = [];
 
         for (const call of extractedCalls) {
           if (!isLikelyCompleteJson(call.json)) {
@@ -689,7 +748,9 @@ const CopilotPanel: React.FC = () => {
                 agentSubMode: isAgentMode ? chatSkills.agentSubMode : undefined,
               });
               toolResults.push({ name: "edit_file", result: toolResult.result });
-              await refreshWorkspace();
+              if (!toolResult.result.startsWith("Error")) {
+                await handleWriteToolSuccess("edit_file", toolResult.result, partial.path);
+              }
 
               const todoInfo = {
                 tool: "edit_file",
@@ -746,8 +807,7 @@ const CopilotPanel: React.FC = () => {
             }
 
             if (WRITE_TOOLS.has(parsed.name) && !toolResult.result.startsWith("Error")) {
-              writeOps.push({ name: parsed.name, path: parsed.args?.path as string ?? "" });
-              await refreshWorkspace();
+              await handleWriteToolSuccess(parsed.name, toolResult.result, parsed.args?.path as string ?? "");
             }
 
             toolResults.push({ name: parsed.name, result: toolResult.result });

@@ -14,6 +14,9 @@ export interface OutlineBlueprintMatch {
   nodeId: string;
   blueprintName: string;
   nodeTitle: string;
+  nodeKind: string;
+  nodeKindLabel: string;
+  summaryLines: string[];
 }
 
 export interface OutlinePanelProps {
@@ -26,6 +29,7 @@ export interface OutlinePanelProps {
 export function OutlinePanel({ editor, visible, getBlueprintMatches, onBlueprintMatchClick }: OutlinePanelProps) {
   const { t } = useTranslation();
   const [items, setItems] = useState<OutlineItem[]>([]);
+  const [expandedBlueprintItems, setExpandedBlueprintItems] = useState<Set<string>>(() => new Set());
 
   const extractHeadings = useCallback(() => {
     if (!editor) {
@@ -67,6 +71,18 @@ export function OutlinePanel({ editor, visible, getBlueprintMatches, onBlueprint
     editor.chain().focus().setTextSelection(pos).scrollIntoView().run();
   };
 
+  const toggleBlueprintItem = (key: string) => {
+    setExpandedBlueprintItems((current) => {
+      const next = new Set(current);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  };
+
   if (!visible) return null;
 
   return (
@@ -87,16 +103,43 @@ export function OutlinePanel({ editor, visible, getBlueprintMatches, onBlueprint
                 >
                   {item.text}
                 </button>
-                {blueprintMatches.map((match) => (
-                  <button
-                    key={`${match.blueprintId}-${match.nodeId}`}
-                    className={`outline-blueprint-item level-${item.level}`}
-                    onClick={() => onBlueprintMatchClick?.(match)}
-                    title={match.blueprintName}
-                  >
-                    {match.nodeTitle}
-                  </button>
-                ))}
+                {blueprintMatches.map((match) => {
+                  const matchKey = `${match.blueprintId}-${match.nodeId}`;
+                  const isExpanded = expandedBlueprintItems.has(matchKey);
+                  return (
+                    <div
+                      key={matchKey}
+                      className={`outline-blueprint-card level-${item.level} ${isExpanded ? "expanded" : ""}`}
+                    >
+                      <div className="outline-blueprint-card-row">
+                        <button
+                          type="button"
+                          className="outline-blueprint-toggle"
+                          onClick={() => toggleBlueprintItem(matchKey)}
+                          title={isExpanded ? t("editor.outline.collapseBlueprint") : t("editor.outline.expandBlueprint")}
+                        >
+                          {isExpanded ? "-" : "+"}
+                        </button>
+                        <button
+                          type="button"
+                          className="outline-blueprint-title"
+                          onClick={() => onBlueprintMatchClick?.(match)}
+                          title={match.blueprintName}
+                        >
+                          <span>{match.nodeTitle}</span>
+                          <small>{match.blueprintName} · {match.nodeKindLabel}</small>
+                        </button>
+                      </div>
+                      {isExpanded && (
+                        <div className="outline-blueprint-summary">
+                          {match.summaryLines.map((line, lineIndex) => (
+                            <p key={`${matchKey}-line-${lineIndex}`}>{line}</p>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             );
           })

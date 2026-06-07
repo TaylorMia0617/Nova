@@ -79,37 +79,98 @@
   flex-direction: column;
 }
 
-.outline-blueprint-item {
+.outline-blueprint-card {
   width: calc(100% - 16px);
   margin: 2px 8px 4px;
-  padding: 4px 8px;
   border: 1px solid var(--color-border, #2d3748);
   border-radius: 6px;
   background: color-mix(in srgb, var(--color-accent, #5a9e8f) 12%, transparent);
   color: var(--color-text-muted, #a0aec0);
   font-size: 11px;
-  text-align: left;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  cursor: pointer;
 }
 
-.outline-blueprint-item.level-1 {
+.outline-blueprint-card.level-1 {
   margin-left: 18px;
 }
 
-.outline-blueprint-item.level-2 {
+.outline-blueprint-card.level-2 {
   margin-left: 32px;
   width: calc(100% - 40px);
 }
 
-.outline-blueprint-item.level-3 {
+.outline-blueprint-card.level-3 {
   margin-left: 46px;
   width: calc(100% - 54px);
 }
 
-.outline-blueprint-item:hover {
-  color: var(--color-text, #e2e8f0);
+.outline-blueprint-card:hover,
+.outline-blueprint-card.expanded {
   border-color: var(--color-accent, #5a9e8f);
+}
+
+.outline-blueprint-card-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: stretch;
+}
+
+.outline-blueprint-toggle,
+.outline-blueprint-title {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.outline-blueprint-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  border-right: 1px solid rgba(148, 163, 184, 0.14);
+  color: var(--color-text-subtle, #718096);
+}
+
+.outline-blueprint-title {
+  min-width: 0;
+  padding: 5px 8px;
+  text-align: left;
+}
+
+.outline-blueprint-title span,
+.outline-blueprint-title small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.outline-blueprint-title span {
+  color: var(--color-text-muted, #a0aec0);
+}
+
+.outline-blueprint-title small {
+  margin-top: 2px;
+  color: var(--color-text-subtle, #718096);
+  font-size: 10px;
+}
+
+.outline-blueprint-title:hover span {
+  color: var(--color-text, #e2e8f0);
+}
+
+.outline-blueprint-summary {
+  padding: 0 8px 8px 32px;
+}
+
+.outline-blueprint-summary p {
+  margin: 4px 0 0;
+  color: var(--color-text-subtle, #718096);
+  font-size: 11px;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }

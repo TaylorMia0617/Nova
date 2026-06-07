@@ -93,6 +93,8 @@ function buildSystemPrompt(
 
 ## Important Rules
 - Do NOT use Base64 encoding - output content as plain text
+- All file paths must be relative to the workspace root. Never use absolute paths, drive-letter paths, or ".."
+- Do not use edit_file on existing .docx files. To create a .docx file, use create_file with plain text content
 - Always read a file before editing it (to understand current content)
 - When editing, specify precise line numbers (startLine, endLine)
 - Keep content concise - avoid generating excessively long text
@@ -139,6 +141,12 @@ Stats: ${meta.charCount} characters, ${meta.lineCount} lines, ${meta.wordCount} 
     ? `\n\nYou have access to the following tools to explore the workspace:
 - list_directory: List files and folders in a directory (supports recursive listing). Use path="" for root directory.
 - read_file: Read file content (max 50KB). Use relative path from workspace root (e.g., "第四章.txt" or "notes/characters.txt").${enableWebSearch ? '\n- web_search: Search the internet for information. Use when you need external knowledge.' : ''}${agentSubMode === "build" ? '\n- edit_file: Edit a file with line-level precision. Provide path and edits array with startLine, endLine, and newContent (plain text).\n- create_file: Create a new file with optional initial content. Provide path and content (plain text).' : ''}
+
+Path rules for file tools:
+- Always use workspace-relative paths such as "章节/测试.docx".
+- Never use absolute paths, Windows drive-letter paths, "/tmp/...", or paths containing "..".
+- The tool result includes relativePath and absolutePath after writing.
+- Existing .docx files cannot be edited with edit_file. To create a .docx file, call create_file with plain text content.
 
 Use these tools when you need to read files that are not currently bound to this conversation. You can call them by responding with a JSON block like:
 \`\`\`tool_call

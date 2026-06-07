@@ -1,6 +1,22 @@
 export type BlueprintNodeKind = "story" | "character" | "custom";
 export type BlueprintStoryType = "start" | "ending" | "custom";
 export type BlueprintFieldInputMode = "fixed" | "repeatable";
+export type BlueprintFieldBindingKey =
+  | "custom"
+  | "title"
+  | "summary"
+  | "linkedChapters"
+  | "storyType"
+  | "storyEventContent"
+  | "storyEventTime"
+  | "storyEventForeshadowing"
+  | "characterName"
+  | "identity"
+  | "relationshipTarget"
+  | "relationshipDescription"
+  | "characterEventTime"
+  | "characterEventStory"
+  | "characterEventLocation";
 
 export type BlueprintRelationship = {
   id: string;
@@ -24,6 +40,8 @@ export type BlueprintCustomField = {
   value: string;
   values?: string[];
   inputMode?: BlueprintFieldInputMode;
+  bindingKey?: BlueprintFieldBindingKey;
+  showInCard?: boolean;
 };
 
 export type BlueprintNode = {
@@ -85,6 +103,8 @@ export type BlueprintNodeTemplate = {
     defaultValue: string;
     defaultValues?: string[];
     inputMode?: BlueprintFieldInputMode;
+    bindingKey?: BlueprintFieldBindingKey;
+    showInCard?: boolean;
   }>;
   createdAt: string;
   updatedAt: string;

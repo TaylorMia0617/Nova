@@ -28,12 +28,15 @@ import type { TipTapContentFormat, TipTapEditorHandle } from "./TipTapEditor";
 import { FindReplacePanel } from "./TipTapEditor/FindReplacePanel";
 import { OutlinePanel } from "./TipTapEditor/OutlinePanel";
 import type { OutlineBlueprintMatch } from "./TipTapEditor/OutlinePanel";
+import type { BlueprintNode } from "../types/blueprint";
 import { EditorToolbar } from "./EditorToolbar";
 import BlueprintEditor from "./BlueprintEditor";
 import { useTranslation } from "../hooks/useTranslation";
 import "./EditorPanel.css";
 
 const TXT_MERGE_EXTENSIONS = new Set([".txt", ".md", ".markdown"]);
+const EDITOR_FILE_DRAG_TYPE = "application/x-novel-file-path";
+const EDITOR_TAB_DRAG_TYPE = "application/x-novel-tab-path";
 
 const getEditorContentFormat = (fileMode?: string): TipTapContentFormat => {
   if (fileMode === "markdown") return "markdown";
@@ -150,6 +153,7 @@ const EditorPanel: React.FC = () => {
     closeGroup,
     setActiveGroup,
     moveTabToGroup,
+    moveTabToNewGroup,
   } = useFileStore();
   const { blueprints, loadBlueprints, focusNode: focusBlueprintNode } = useBlueprintStore();
   const { defaultSelectionModelId, selectionPromptTemplates, getModelProfileById } = useSettingsStore();
@@ -165,6 +169,7 @@ const EditorPanel: React.FC = () => {
   const [selectionError, setSelectionError] = useState("");
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tabPath: string } | null>(null);
   const [isEditorDragActive, setIsEditorDragActive] = useState(false);
+  const [editorDragKind, setEditorDragKind] = useState<"file" | "tab" | null>(null);
   const [editorDropTarget, setEditorDropTarget] = useState<{ type: "group"; groupId: string } | { type: "new" } | null>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
 
@@ -552,6 +557,42 @@ const EditorPanel: React.FC = () => {
     };
   }, [activeFile, isReferenceFile, t]);
 
+  const getBlueprintNodeKindLabel = useCallback((node: BlueprintNode) => {
+    if (node.kind === "story") return t("blueprint.story");
+    if (node.kind === "character") return t("blueprint.character");
+    return t("blueprint.customNode");
+  }, [t]);
+
+  const getBlueprintNodeSummaryLines = useCallback((node: BlueprintNode) => {
+    const lines: string[] = [];
+    if (node.kind === "story") {
+      if (node.summary) lines.push(node.summary);
+      if (node.linkedChapters?.length) lines.push(`${t("blueprint.linkedChapter")}: ${node.linkedChapters.slice(0, 2).join(" / ")}`);
+      for (const event of node.storyEvents ?? []) {
+        const text = [event.time, event.content, event.foreshadowing].filter(Boolean).join(" · ");
+        if (text) lines.push(text);
+      }
+    } else if (node.kind === "character") {
+      if (node.characterName || node.identity) lines.push([node.characterName, node.identity].filter(Boolean).join(" · "));
+      for (const relationship of node.relationships ?? []) {
+        const text = [relationship.relation, relationship.name, relationship.identity].filter(Boolean).join(" · ");
+        if (text) lines.push(text);
+      }
+      for (const event of node.characterEvents ?? []) {
+        const text = [event.time, event.story, event.location].filter(Boolean).join(" · ");
+        if (text) lines.push(text);
+      }
+    } else {
+      for (const field of node.customFields ?? []) {
+        if (field.showInCard === false) continue;
+        const value = (field.values?.length ? field.values : [field.value]).filter(Boolean).join(" / ");
+        const text = [field.key, value].filter(Boolean).join(": ");
+        if (text) lines.push(text);
+      }
+    }
+    return (lines.length ? lines : [t("blueprint.emptyNode")]).slice(0, 4);
+  }, [t]);
+
   const getBlueprintMatchesForHeading = useCallback((headingText: string): OutlineBlueprintMatch[] => {
     if (!activeFile || isBlueprintTab(activeFile)) return [];
     const fileName = activeFile.name.toLowerCase();
@@ -580,12 +621,15 @@ const EditorPanel: React.FC = () => {
             nodeId: node.id,
             blueprintName: blueprint.name,
             nodeTitle: node.title || node.characterName || t("blueprint.untitledNode"),
+            nodeKind: node.kind,
+            nodeKindLabel: getBlueprintNodeKindLabel(node),
+            summaryLines: getBlueprintNodeSummaryLines(node),
           });
         }
       }
     }
     return matches;
-  }, [activeFile, blueprints, t]);
+  }, [activeFile, blueprints, getBlueprintNodeKindLabel, getBlueprintNodeSummaryLines, t]);
 
   const handleOutlineBlueprintClick = useCallback((match: OutlineBlueprintMatch) => {
     focusBlueprintNode(match.blueprintId, match.nodeId);
@@ -597,45 +641,86 @@ const EditorPanel: React.FC = () => {
     setContextMenu({ x: e.clientX, y: e.clientY, tabPath });
   }, []);
 
-  const hasEditorFileDrag = (event: React.DragEvent) =>
-    Array.from(event.dataTransfer.types).includes("application/x-novel-file-path");
+  const getEditorDragKind = (event: React.DragEvent): "file" | "tab" | null => {
+    const types = Array.from(event.dataTransfer.types);
+    if (types.includes(EDITOR_TAB_DRAG_TYPE)) return "tab";
+    if (types.includes(EDITOR_FILE_DRAG_TYPE)) return "file";
+    return null;
+  };
 
   const getEditorDraggedFilePath = (event: React.DragEvent) =>
-    event.dataTransfer.getData("application/x-novel-file-path");
+    event.dataTransfer.getData(EDITOR_FILE_DRAG_TYPE);
+
+  const getEditorDraggedTabPath = (event: React.DragEvent) =>
+    event.dataTransfer.getData(EDITOR_TAB_DRAG_TYPE);
+
+  const handleTabDragStart = useCallback((event: React.DragEvent, tabPath: string) => {
+    event.dataTransfer.setData(EDITOR_TAB_DRAG_TYPE, tabPath);
+    event.dataTransfer.effectAllowed = "move";
+    setIsEditorDragActive(true);
+    setEditorDragKind("tab");
+  }, []);
+
+  const handleTabDragEnd = useCallback(() => {
+    setIsEditorDragActive(false);
+    setEditorDragKind(null);
+    setEditorDropTarget(null);
+  }, []);
 
   const handleEditorDragOver = useCallback((event: React.DragEvent, target: { type: "group"; groupId: string } | { type: "new" }) => {
-    if (!hasEditorFileDrag(event)) return;
+    const dragKind = getEditorDragKind(event);
+    if (!dragKind) return;
     event.preventDefault();
-    event.dataTransfer.dropEffect = target.type === "new" && editorGroups.length >= MAX_EDITOR_GROUPS ? "none" : "copy";
+    event.dataTransfer.dropEffect = dragKind === "tab" ? "move" : target.type === "new" && editorGroups.length >= MAX_EDITOR_GROUPS ? "none" : "copy";
     setIsEditorDragActive(true);
+    setEditorDragKind(dragKind);
     setEditorDropTarget(target);
   }, [editorGroups.length]);
 
   const handleEditorDragLeave = useCallback((event: React.DragEvent) => {
     if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
     setIsEditorDragActive(false);
+    setEditorDragKind(null);
     setEditorDropTarget(null);
   }, []);
 
   const handleDropOnEditorGroup = useCallback(async (event: React.DragEvent, groupId: string) => {
-    if (!hasEditorFileDrag(event)) return;
+    const dragKind = getEditorDragKind(event);
+    if (!dragKind) return;
     event.preventDefault();
     event.stopPropagation();
-    const filePath = getEditorDraggedFilePath(event);
     setIsEditorDragActive(false);
+    setEditorDragKind(null);
     setEditorDropTarget(null);
-    if (!filePath) return;
     setActiveGroup(groupId);
-    await openFile(filePath, groupId);
-  }, [openFile, setActiveGroup]);
+    if (dragKind === "tab") {
+      const tabPath = getEditorDraggedTabPath(event);
+      if (tabPath) moveTabToGroup(tabPath, groupId);
+      return;
+    }
+    const filePath = getEditorDraggedFilePath(event);
+    if (filePath) await openFile(filePath, groupId);
+  }, [moveTabToGroup, openFile, setActiveGroup]);
 
   const handleDropOnNewEditorGroup = useCallback(async (event: React.DragEvent) => {
-    if (!hasEditorFileDrag(event)) return;
+    const dragKind = getEditorDragKind(event);
+    if (!dragKind) return;
     event.preventDefault();
     event.stopPropagation();
-    const filePath = getEditorDraggedFilePath(event);
     setIsEditorDragActive(false);
+    setEditorDragKind(null);
     setEditorDropTarget(null);
+    if (dragKind === "tab") {
+      const tabPath = getEditorDraggedTabPath(event);
+      if (tabPath) {
+        if (editorGroups.length >= MAX_EDITOR_GROUPS) {
+          setErrorMessage(t("editor.dragDrop.maxWindows"));
+        }
+        moveTabToNewGroup(tabPath);
+      }
+      return;
+    }
+    const filePath = getEditorDraggedFilePath(event);
     if (!filePath) return;
     if (editorGroups.length >= MAX_EDITOR_GROUPS) {
       setErrorMessage(t("editor.dragDrop.maxWindows"));
@@ -643,7 +728,7 @@ const EditorPanel: React.FC = () => {
       return;
     }
     await openFileInNewGroup(filePath);
-  }, [activeGroupId, editorGroups.length, openFile, openFileInNewGroup, setErrorMessage, t]);
+  }, [activeGroupId, editorGroups.length, moveTabToNewGroup, openFile, openFileInNewGroup, setErrorMessage, t]);
 
   const getContextMenuItems = useCallback((tabPath: string): ContextMenuItem[] => {
     const otherGroups = editorGroups.filter((g) => g.id !== activeGroupId);
@@ -831,6 +916,9 @@ const EditorPanel: React.FC = () => {
                     <button
                       key={tab.path}
                       className={`tab-button ${group.activeTabPath === tab.path ? "active" : ""}`}
+                      draggable
+                      onDragStart={(event) => handleTabDragStart(event, tab.path)}
+                      onDragEnd={handleTabDragEnd}
                       onClick={() => { setActiveGroup(group.id); setActiveFile(tab.path); }}
                       onContextMenu={(e) => handleTabContextMenu(e, tab.path)}
                     >
@@ -852,7 +940,9 @@ const EditorPanel: React.FC = () => {
               </div>
               <div className="editor-container">
                 {editorDropTarget?.type === "group" && editorDropTarget.groupId === group.id && (
-                  <div className="editor-drop-overlay">{t("editor.dragDrop.openHere")}</div>
+                  <div className="editor-drop-overlay">
+                    {editorDragKind === "tab" ? t("editor.dragDrop.moveHere") : t("editor.dragDrop.openHere")}
+                  </div>
                 )}
                 {(() => {
                   const groupActiveTab = group.tabs.find((t) => t.path === group.activeTabPath);
@@ -912,7 +1002,9 @@ const EditorPanel: React.FC = () => {
             >
               {editorGroups.length >= MAX_EDITOR_GROUPS
                 ? t("editor.dragDrop.maxWindows")
-                : t("editor.dragDrop.openNewWindow")}
+                : editorDragKind === "tab"
+                  ? t("editor.dragDrop.moveToNewWindow")
+                  : t("editor.dragDrop.openNewWindow")}
             </div>
           )}
         </div>
@@ -924,6 +1016,9 @@ const EditorPanel: React.FC = () => {
                 <button
                   key={tab.path}
                   className={`tab-button ${activeFile?.path === tab.path ? "active" : ""}`}
+                  draggable
+                  onDragStart={(event) => handleTabDragStart(event, tab.path)}
+                  onDragEnd={handleTabDragEnd}
                   onClick={() => setActiveFile(tab.path)}
                   onContextMenu={(e) => handleTabContextMenu(e, tab.path)}
                 >
@@ -1003,7 +1098,9 @@ const EditorPanel: React.FC = () => {
               onDrop={(event) => void handleDropOnEditorGroup(event, activeGroupId)}
             >
               {editorDropTarget?.type === "group" && editorDropTarget.groupId === activeGroupId && (
-                <div className="editor-drop-overlay">{t("editor.dragDrop.openHere")}</div>
+                <div className="editor-drop-overlay">
+                  {editorDragKind === "tab" ? t("editor.dragDrop.moveHere") : t("editor.dragDrop.openHere")}
+                </div>
               )}
               {isFindReplaceOpen && activeFile && !isNonTextPreviewTab(activeFile) && (
                 <FindReplacePanel
@@ -1078,7 +1175,9 @@ const EditorPanel: React.FC = () => {
               >
                 {editorGroups.length >= MAX_EDITOR_GROUPS
                   ? t("editor.dragDrop.maxWindows")
-                  : t("editor.dragDrop.openNewWindow")}
+                  : editorDragKind === "tab"
+                    ? t("editor.dragDrop.moveToNewWindow")
+                    : t("editor.dragDrop.openNewWindow")}
               </div>
             )}
           </div>

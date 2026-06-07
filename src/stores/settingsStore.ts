@@ -7,12 +7,18 @@ import { setLocale } from "../i18n";
 
 type PromptKey = keyof SelectionPromptTemplates;
 export type AppTheme = "dark" | "light";
+export type HeadingColors = {
+  h1: string;
+  h2: string;
+  h3: string;
+};
 
 interface SettingsState {
   language: Locale;
   theme: AppTheme;
   backgroundImage: string | null;
   backgroundOpacity: number;
+  headingColors: HeadingColors;
   modelProfiles: ModelProfile[];
   defaultChatModelId: string;
   defaultSelectionModelId: string;
@@ -26,6 +32,7 @@ interface SettingsState {
   setBackgroundImage: (value: string) => void;
   clearBackgroundImage: () => void;
   setBackgroundOpacity: (value: number) => void;
+  setHeadingColor: (level: keyof HeadingColors, color: string) => void;
   setModelProfiles: (profiles: ModelProfile[]) => void;
   updateModelProfile: (id: string, patch: Partial<ModelProfile>) => void;
   removeModelProfile: (id: string) => void;
@@ -57,6 +64,12 @@ const DEFAULT_PROMPTS: SelectionPromptTemplates = {
   stylize: "请在保留核心信息的前提下，将这段文字风格化得更有文学性和画面感，只返回改写后的文本。",
 };
 
+const DEFAULT_HEADING_COLORS: HeadingColors = {
+  h1: "#e2e8f0",
+  h2: "#e2e8f0",
+  h3: "#e2e8f0",
+};
+
 const sanitizeProfile = (profile: ModelProfile): ModelProfile => ({
   ...profile,
   apiKey: profile.rememberSecrets ? profile.apiKey : "",
@@ -64,6 +77,7 @@ const sanitizeProfile = (profile: ModelProfile): ModelProfile => ({
 });
 
 const SETTINGS_STORAGE_NAME = "novel-assistance-settings";
+const fallbackSettingsStorage = new Map<string, string>();
 
 const getGlobalSettingsHost = () =>
   typeof window === "undefined"
@@ -82,24 +96,24 @@ const globalSettingsStorage = {
   getItem: async (name: string): Promise<string | null> => {
     const host = getGlobalSettingsHost();
     if (host?.readGlobalSettings) {
-      return host.readGlobalSettings(name);
+      const appSettings = await host.readGlobalSettings(name);
+      if (appSettings) return appSettings;
+      if (host.readGlobalApiConfig) {
+        return host.readGlobalApiConfig();
+      }
+      return null;
     }
 
-    return localStorage.getItem(name);
+    return fallbackSettingsStorage.get(name) ?? null;
   },
   setItem: async (name: string, value: string): Promise<void> => {
     const host = getGlobalSettingsHost();
     if (host?.writeGlobalSettings) {
       await host.writeGlobalSettings(name, value);
     } else {
-      localStorage.setItem(name, value);
+      fallbackSettingsStorage.set(name, value);
     }
 
-    if (host?.writeGlobalApiConfig) {
-      host.writeGlobalApiConfig(value).catch((err) =>
-        console.warn("Failed to sync settings to global config file:", err)
-      );
-    }
   },
   removeItem: async (name: string): Promise<void> => {
     const host = getGlobalSettingsHost();
@@ -108,18 +122,9 @@ const globalSettingsStorage = {
       return;
     }
 
-    localStorage.removeItem(name);
+    fallbackSettingsStorage.delete(name);
   },
 };
-
-async function loadFromFile(): Promise<string | null> {
-  try {
-    return await readGlobalApiConfig();
-  } catch (error) {
-    console.warn("Failed to load settings from global config file:", error);
-    return null;
-  }
-}
 
 export async function syncFromFile(): Promise<boolean> {
   try {
@@ -144,10 +149,18 @@ export async function syncFromFile(): Promise<boolean> {
       parsed.theme !== currentState.theme ||
       parsed.backgroundImage !== currentState.backgroundImage ||
       (parsed.backgroundOpacity ?? currentState.backgroundOpacity) !== currentState.backgroundOpacity ||
-      parsed.language !== currentState.language;
+      parsed.language !== currentState.language ||
+      JSON.stringify(parsed.headingColors ?? DEFAULT_HEADING_COLORS) !==
+        JSON.stringify(currentState.headingColors);
 
     if (hasChanges) {
-      useSettingsStore.setState(parsed);
+      useSettingsStore.setState({
+        ...parsed,
+        headingColors: {
+          ...DEFAULT_HEADING_COLORS,
+          ...(parsed.headingColors ?? {}),
+        },
+      });
       return true;
     }
     return false;
@@ -160,7 +173,17 @@ export async function syncFromFile(): Promise<boolean> {
 export async function exportToFile(): Promise<boolean> {
   try {
     const state = useSettingsStore.getState();
+    let existing: Record<string, unknown> = {};
+    const existingContent = await readGlobalApiConfig();
+    if (existingContent) {
+      try {
+        existing = JSON.parse(existingContent);
+      } catch {
+        existing = {};
+      }
+    }
     const dataToExport = {
+      ...existing,
       language: state.language,
       modelProfiles: state.modelProfiles.map(sanitizeProfile),
       defaultChatModelId: state.defaultChatModelId,
@@ -173,6 +196,7 @@ export async function exportToFile(): Promise<boolean> {
       theme: state.theme,
       backgroundImage: state.backgroundImage,
       backgroundOpacity: state.backgroundOpacity,
+      headingColors: state.headingColors,
     };
     await writeGlobalApiConfig(JSON.stringify(dataToExport, null, 2));
     return true;
@@ -189,6 +213,7 @@ export const useSettingsStore = create<SettingsState>()(
       theme: "dark",
       backgroundImage: null,
       backgroundOpacity: 35,
+      headingColors: DEFAULT_HEADING_COLORS,
       modelProfiles: [DEFAULT_PROFILE],
       defaultChatModelId: DEFAULT_PROFILE.id,
       defaultSelectionModelId: DEFAULT_PROFILE.id,
@@ -205,6 +230,13 @@ export const useSettingsStore = create<SettingsState>()(
       setBackgroundImage: (value) => set({ backgroundImage: value }),
       clearBackgroundImage: () => set({ backgroundImage: null }),
       setBackgroundOpacity: (value) => set({ backgroundOpacity: Math.min(100, Math.max(0, value)) }),
+      setHeadingColor: (level, color) =>
+        set((state) => ({
+          headingColors: {
+            ...state.headingColors,
+            [level]: color,
+          },
+        })),
       setModelProfiles: (profiles) =>
         set((state) => {
           const nextProfiles = profiles.length > 0 ? profiles : [DEFAULT_PROFILE];
@@ -279,43 +311,24 @@ export const useSettingsStore = create<SettingsState>()(
         theme: state.theme,
         backgroundImage: state.backgroundImage,
         backgroundOpacity: state.backgroundOpacity,
+        headingColors: state.headingColors,
       }),
+      merge: (persistedState, currentState) => {
+        const persisted = persistedState as Partial<SettingsState> | null;
+        return {
+          ...currentState,
+          ...(persisted ?? {}),
+          headingColors: {
+            ...DEFAULT_HEADING_COLORS,
+            ...(persisted?.headingColors ?? {}),
+          },
+        };
+      },
       onRehydrateStorage: () => {
         return (_state, error) => {
           if (!error) {
             const currentLanguage = useSettingsStore.getState().language;
             setLocale(currentLanguage);
-            loadFromFile().then((fileContent) => {
-              if (fileContent) {
-                try {
-                  const parsed = JSON.parse(fileContent);
-                  const currentState = useSettingsStore.getState();
-                  const hasChanges =
-                    JSON.stringify(parsed.modelProfiles) !==
-                      JSON.stringify(currentState.modelProfiles) ||
-                    JSON.stringify(parsed.selectionPromptTemplates) !==
-                      JSON.stringify(currentState.selectionPromptTemplates) ||
-                    JSON.stringify(parsed.defaultChatModelId) !==
-                      JSON.stringify(currentState.defaultChatModelId) ||
-                    JSON.stringify(parsed.defaultSelectionModelId) !==
-                      JSON.stringify(currentState.defaultSelectionModelId) ||
-                    parsed.chatMaxTokens !== currentState.chatMaxTokens ||
-                    parsed.contextMaxLength !== currentState.contextMaxLength ||
-                    parsed.tavilyApiKey !== currentState.tavilyApiKey ||
-                    parsed.webSearchLimit !== currentState.webSearchLimit ||
-                    parsed.language !== currentState.language ||
-                    parsed.theme !== currentState.theme ||
-                    parsed.backgroundImage !== currentState.backgroundImage ||
-                    (parsed.backgroundOpacity ?? currentState.backgroundOpacity) !== currentState.backgroundOpacity;
-
-                  if (hasChanges) {
-                    useSettingsStore.setState(parsed);
-                  }
-                } catch (e) {
-                  console.warn("Failed to parse global config file:", e);
-                }
-              }
-            });
           }
         };
       },

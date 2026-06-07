@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { GitBranch, LayoutTemplate, Minus, Plus, RotateCcw, Save, Settings2, Trash2, UserRound } from "lucide-react";
 import { useBlueprintStore } from "../stores/blueprintStore";
-import type { BlueprintDocument, BlueprintFieldInputMode, BlueprintNode, BlueprintNodeKind, BlueprintNodeTemplate } from "../types/blueprint";
+import { useFileStore } from "../stores/fileStore";
+import type { BlueprintDocument, BlueprintFieldBindingKey, BlueprintFieldInputMode, BlueprintNode, BlueprintNodeKind, BlueprintNodeTemplate } from "../types/blueprint";
 import { useTranslation } from "../hooks/useTranslation";
 import "./BlueprintEditor.css";
 
@@ -11,19 +12,38 @@ interface Props {
 
 const NODE_WIDTH = 220;
 const NODE_HEIGHT = 126;
+const MIN_ZOOM = 0.35;
+const MAX_ZOOM = 2.5;
+const MINIMAP_WIDTH = 180;
+const MINIMAP_HEIGHT = 128;
+const MINIMAP_PADDING = 80;
+const ZOOM_SAVE_DELAY_MS = 280;
 
 type PanState = { startX: number; startY: number; originX: number; originY: number } | null;
 type NodeDragState = { nodeId: string; offsetX: number; offsetY: number } | null;
 type ConnectionDragState = { from: string; x: number; y: number } | null;
+type MinimapDragState = { bounds: MinimapBounds } | null;
 type SaveState = "idle" | "saving" | "saved" | "error";
 type BlueprintClipboard = Pick<BlueprintDocument, "nodes" | "edges">;
 type BlueprintPaletteItem =
   | { id: string; type: "base"; kind: BlueprintNodeKind; label: string }
   | { id: string; type: "template"; kind: BlueprintNodeKind; templateId: string; label: string };
+type BlueprintContextMenuState = { x: number; y: number; canvasX: number; canvasY: number } | null;
+type MinimapBounds = { minX: number; minY: number; width: number; height: number; scale: number };
 
 const newLocalId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const ensureFieldValues = (values: string[] | undefined, fallback = "") => (values?.length ? values : [fallback]);
 const nextFieldMode = (mode: BlueprintFieldInputMode | undefined): BlueprintFieldInputMode => (mode === "fixed" ? "repeatable" : "fixed");
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+const newTemplateField = () => ({
+  id: newLocalId("template-field"),
+  key: "",
+  defaultValue: "",
+  defaultValues: [""],
+  inputMode: "repeatable" as BlueprintFieldInputMode,
+  bindingKey: "custom" as BlueprintFieldBindingKey,
+  showInCard: true,
+});
 
 const createBlankTemplate = (): BlueprintNodeTemplate => {
   const now = new Date().toISOString();
@@ -32,26 +52,7 @@ const createBlankTemplate = (): BlueprintNodeTemplate => {
     name: "",
     nodeKind: "custom",
     inputCount: 1,
-    fields: [{ id: newLocalId("template-field"), key: "", defaultValue: "", defaultValues: [""], inputMode: "repeatable" }],
-    createdAt: now,
-    updatedAt: now,
-  };
-};
-
-const templateFromNode = (node: BlueprintNode): BlueprintNodeTemplate => {
-  const now = new Date().toISOString();
-  return {
-    id: newLocalId("template"),
-    name: node.templateName || node.title || "",
-    nodeKind: node.kind,
-    inputCount: Math.max(1, Number(node.inputCount) || 1),
-    fields: (node.customFields ?? []).map((field) => ({
-      id: newLocalId("template-field"),
-      key: field.key,
-      defaultValue: field.values?.[0] ?? field.value,
-      defaultValues: field.values?.length ? field.values : [field.value],
-      inputMode: field.inputMode ?? "repeatable",
-    })),
+    fields: [newTemplateField()],
     createdAt: now,
     updatedAt: now,
   };
@@ -62,13 +63,16 @@ const isEditableEventTarget = (target: EventTarget | null) => {
   return Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
 };
 
-const screenToCanvas = (event: React.PointerEvent, canvas: HTMLDivElement, blueprint: BlueprintDocument) => {
+const clientToCanvas = (clientX: number, clientY: number, canvas: HTMLDivElement, blueprint: BlueprintDocument) => {
   const rect = canvas.getBoundingClientRect();
   return {
-    x: (event.clientX - rect.left - blueprint.viewport.x) / blueprint.viewport.zoom,
-    y: (event.clientY - rect.top - blueprint.viewport.y) / blueprint.viewport.zoom,
+    x: (clientX - rect.left - blueprint.viewport.x) / blueprint.viewport.zoom,
+    y: (clientY - rect.top - blueprint.viewport.y) / blueprint.viewport.zoom,
   };
 };
+
+const screenToCanvas = (event: React.PointerEvent, canvas: HTMLDivElement, blueprint: BlueprintDocument) =>
+  clientToCanvas(event.clientX, event.clientY, canvas, blueprint);
 
 export default function BlueprintEditor({ blueprintId }: Props) {
   const { t } = useTranslation();
@@ -93,6 +97,7 @@ export default function BlueprintEditor({ blueprintId }: Props) {
     deleteEdge,
     focusNode,
   } = useBlueprintStore();
+  const { referenceEntries } = useFileStore();
   const blueprint = blueprints.find((item) => item.id === blueprintId) ?? null;
   const focusedNodeId = focusedNodeByBlueprintId[blueprintId] ?? null;
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>(focusedNodeId ? [focusedNodeId] : []);
@@ -100,19 +105,25 @@ export default function BlueprintEditor({ blueprintId }: Props) {
   const [nodeDrag, setNodeDrag] = useState<NodeDragState>(null);
   const [panState, setPanState] = useState<PanState>(null);
   const [connectionDrag, setConnectionDrag] = useState<ConnectionDragState>(null);
+  const [connectionHoverNodeId, setConnectionHoverNodeId] = useState<string | null>(null);
+  const [minimapDrag, setMinimapDrag] = useState<MinimapDragState>(null);
   const [connectMode, setConnectMode] = useState(false);
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [contextMenu, setContextMenu] = useState<BlueprintContextMenuState>(null);
+  const [isCreateMenuOpen, setIsCreateMenuOpen] = useState(false);
   const [inspectorWidth, setInspectorWidth] = useState(360);
   const [isResizingInspector, setIsResizingInspector] = useState(false);
   const [isTemplateModalOpen, setIsTemplateModalOpen] = useState(false);
   const [templateDraft, setTemplateDraft] = useState<BlueprintNodeTemplate>(() => createBlankTemplate());
-  const [selectedPaletteItemId, setSelectedPaletteItemId] = useState<string | null | undefined>(undefined);
+  const [activeTemplateKeyInput, setActiveTemplateKeyInput] = useState<{ fieldId: string; index: number } | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [saveMessage, setSaveMessage] = useState("");
   const canvasRef = useRef<HTMLDivElement>(null);
+  const minimapRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
-  const paletteItemRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const createMenuRef = useRef<HTMLDivElement>(null);
+  const createButtonRef = useRef<HTMLButtonElement>(null);
   const saveTimerRef = useRef<number | null>(null);
+  const zoomSaveTimerRef = useRef<number | null>(null);
   const clipboardRef = useRef<BlueprintClipboard | null>(null);
 
   useEffect(() => {
@@ -129,7 +140,19 @@ export default function BlueprintEditor({ blueprintId }: Props) {
 
   useEffect(() => () => {
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    if (zoomSaveTimerRef.current) window.clearTimeout(zoomSaveTimerRef.current);
   }, []);
+
+  useEffect(() => {
+    if (!isCreateMenuOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (createMenuRef.current?.contains(target) || createButtonRef.current?.contains(target)) return;
+      setIsCreateMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [isCreateMenuOpen]);
 
   const selectedNode = blueprint?.nodes.find((node) => node.id === selectedNodeIds[selectedNodeIds.length - 1]) ?? null;
   const paletteItems = useMemo<BlueprintPaletteItem[]>(() => [
@@ -144,28 +167,8 @@ export default function BlueprintEditor({ blueprintId }: Props) {
       label: template.name || t("blueprint.untitledNode"),
     })),
   ], [t, templates]);
-  const selectedPaletteItem = paletteItems.find((item) => item.id === selectedPaletteItemId) ?? null;
 
   const clampInspectorWidth = (width: number) => Math.min(560, Math.max(320, width));
-
-  useEffect(() => {
-    if (selectedPaletteItemId === undefined && paletteItems[0]) {
-      setSelectedPaletteItemId(paletteItems[0].id);
-      return;
-    }
-    if (selectedPaletteItemId && !paletteItems.some((item) => item.id === selectedPaletteItemId)) {
-      setSelectedPaletteItemId(paletteItems[0]?.id ?? null);
-    }
-  }, [paletteItems, selectedPaletteItemId]);
-
-  useEffect(() => {
-    if (!selectedPaletteItemId) return;
-    paletteItemRefs.current[selectedPaletteItemId]?.scrollIntoView({
-      behavior: "smooth",
-      block: "nearest",
-      inline: "center",
-    });
-  }, [selectedPaletteItemId]);
 
   useEffect(() => {
     if (!isResizingInspector) return;
@@ -188,19 +191,62 @@ export default function BlueprintEditor({ blueprintId }: Props) {
     };
   }, [isResizingInspector]);
 
+  useEffect(() => {
+    if (!minimapDrag) return;
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const target = minimapRef.current;
+      if (!target || !blueprint || !canvasRef.current) return;
+      const rect = target.getBoundingClientRect();
+      const bounds = minimapDrag.bounds;
+      const offsetX = (MINIMAP_WIDTH - bounds.width * bounds.scale) / 2;
+      const offsetY = (MINIMAP_HEIGHT - bounds.height * bounds.scale) / 2;
+      const localX = clamp(event.clientX - rect.left - offsetX, 0, bounds.width * bounds.scale);
+      const localY = clamp(event.clientY - rect.top - offsetY, 0, bounds.height * bounds.scale);
+      const worldX = bounds.minX + localX / bounds.scale;
+      const worldY = bounds.minY + localY / bounds.scale;
+      const canvasRect = canvasRef.current.getBoundingClientRect();
+      updateViewport({
+        x: canvasRect.width / 2 - worldX * blueprint.viewport.zoom,
+        y: canvasRect.height / 2 - worldY * blueprint.viewport.zoom,
+      });
+    };
+
+    const handlePointerUp = () => {
+      setMinimapDrag(null);
+      scheduleViewportSave();
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [blueprint, minimapDrag]);
+
   const nodeById = useMemo(() => {
     const map = new Map<string, BlueprintNode>();
     blueprint?.nodes.forEach((node) => map.set(node.id, node));
     return map;
   }, [blueprint]);
 
-  const commitBlueprint = (next: BlueprintDocument, options?: { skipUndo?: boolean }) => {
+  const commitBlueprint = (next: BlueprintDocument, options?: { skipUndo?: boolean; skipPersist?: boolean }) => {
     replaceBlueprint(next, options);
   };
 
   const updateViewport = (patch: Partial<BlueprintDocument["viewport"]>) => {
     if (!blueprint) return;
-    commitBlueprint({ ...blueprint, viewport: { ...blueprint.viewport, ...patch } }, { skipUndo: true });
+    commitBlueprint({ ...blueprint, viewport: { ...blueprint.viewport, ...patch } }, { skipUndo: true, skipPersist: true });
+  };
+
+  const scheduleViewportSave = () => {
+    if (zoomSaveTimerRef.current) window.clearTimeout(zoomSaveTimerRef.current);
+    zoomSaveTimerRef.current = window.setTimeout(() => {
+      const latestBlueprint = useBlueprintStore.getState().blueprints.find((item) => item.id === blueprintId);
+      if (latestBlueprint) void saveBlueprint(latestBlueprint);
+      zoomSaveTimerRef.current = null;
+    }, ZOOM_SAVE_DELAY_MS);
   };
 
   const deleteSelection = () => {
@@ -248,13 +294,17 @@ export default function BlueprintEditor({ blueprintId }: Props) {
     })),
   });
 
-  const pasteClipboard = () => {
+  const pasteClipboard = (target?: { x: number; y: number }) => {
     if (!blueprint || !clipboardRef.current || clipboardRef.current.nodes.length === 0) return;
+    const sourceNodes = clipboardRef.current.nodes;
+    const minX = Math.min(...sourceNodes.map((node) => node.x));
+    const minY = Math.min(...sourceNodes.map((node) => node.y));
     const idMap = new Map<string, string>();
-    const nextNodes = clipboardRef.current.nodes.map((node) => {
+    const nextNodes = sourceNodes.map((node) => {
       const nextId = newLocalId("node");
       idMap.set(node.id, nextId);
-      return cloneNodeForPaste(node, nextId);
+      const cloned = cloneNodeForPaste(node, nextId);
+      return target ? { ...cloned, x: target.x + node.x - minX, y: target.y + node.y - minY } : cloned;
     });
     const nextEdges = clipboardRef.current.edges
       .map((edge) => {
@@ -274,42 +324,81 @@ export default function BlueprintEditor({ blueprintId }: Props) {
     };
   };
 
-  const selectPaletteItem = (itemId: string) => {
-    setSelectedPaletteItemId(itemId);
-    setConnectMode(false);
-  };
-
-  const handlePaletteWheel = (event: React.WheelEvent<HTMLDivElement>) => {
-    if (paletteItems.length === 0) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const currentId = selectedPaletteItemId ?? paletteItems[0].id;
-    const currentIndex = Math.max(0, paletteItems.findIndex((item) => item.id === currentId));
-    const direction = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
-    const nextIndex = direction > 0
-      ? (currentIndex + 1) % paletteItems.length
-      : (currentIndex - 1 + paletteItems.length) % paletteItems.length;
-    selectPaletteItem(paletteItems[nextIndex].id);
-  };
-
-  const placeSelectedPaletteItem = (x: number, y: number) => {
-    if (!selectedPaletteItem) return false;
-    if (selectedPaletteItem.type === "template") {
-      createCustomNodeFromTemplate(blueprintId, selectedPaletteItem.templateId, x, y);
+  const placePaletteItem = (item: BlueprintPaletteItem, x: number, y: number) => {
+    if (item.type === "template") {
+      createCustomNodeFromTemplate(blueprintId, item.templateId, x, y);
     } else {
-      addNode(blueprintId, selectedPaletteItem.kind, x, y);
+      addNode(blueprintId, item.kind, x, y);
     }
-    setSelectedPaletteItemId(null);
     setSelectedEdgeId(null);
     setContextMenu(null);
-    return true;
+    setIsCreateMenuOpen(false);
+  };
+
+  const getViewportCenterPoint = () => {
+    if (!blueprint || !canvasRef.current) return { x: 200, y: 160 };
+    const rect = canvasRef.current.getBoundingClientRect();
+    return {
+      x: (rect.width / 2 - blueprint.viewport.x) / blueprint.viewport.zoom,
+      y: (rect.height / 2 - blueprint.viewport.y) / blueprint.viewport.zoom,
+    };
+  };
+
+  const minimapBounds = useMemo<MinimapBounds>(() => {
+    if (!blueprint || blueprint.nodes.length === 0) {
+      const width = 1200;
+      const height = 860;
+      const scale = Math.min(MINIMAP_WIDTH / width, MINIMAP_HEIGHT / height);
+      return { minX: -width / 2, minY: -height / 2, width, height, scale };
+    }
+    const minX = Math.min(...blueprint.nodes.map((node) => node.x)) - MINIMAP_PADDING;
+    const minY = Math.min(...blueprint.nodes.map((node) => node.y)) - MINIMAP_PADDING;
+    const maxX = Math.max(...blueprint.nodes.map((node) => node.x + NODE_WIDTH)) + MINIMAP_PADDING;
+    const maxY = Math.max(...blueprint.nodes.map((node) => node.y + NODE_HEIGHT)) + MINIMAP_PADDING;
+    const width = Math.max(1, maxX - minX);
+    const height = Math.max(1, maxY - minY);
+    const scale = Math.min(MINIMAP_WIDTH / width, MINIMAP_HEIGHT / height);
+    return { minX, minY, width, height, scale };
+  }, [blueprint]);
+
+  const minimapOffset = {
+    x: (MINIMAP_WIDTH - minimapBounds.width * minimapBounds.scale) / 2,
+    y: (MINIMAP_HEIGHT - minimapBounds.height * minimapBounds.scale) / 2,
+  };
+
+  const viewRect = (() => {
+    if (!blueprint || !canvasRef.current) return { x: 0, y: 0, width: 0, height: 0 };
+    const rect = canvasRef.current.getBoundingClientRect();
+    const worldX = -blueprint.viewport.x / blueprint.viewport.zoom;
+    const worldY = -blueprint.viewport.y / blueprint.viewport.zoom;
+    return {
+      x: minimapOffset.x + (worldX - minimapBounds.minX) * minimapBounds.scale,
+      y: minimapOffset.y + (worldY - minimapBounds.minY) * minimapBounds.scale,
+      width: (rect.width / blueprint.viewport.zoom) * minimapBounds.scale,
+      height: (rect.height / blueprint.viewport.zoom) * minimapBounds.scale,
+    };
+  })();
+
+  const navigateMinimap = (event: React.PointerEvent<HTMLElement>, bounds = minimapBounds) => {
+    if (!blueprint || !canvasRef.current) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const localX = clamp(event.clientX - rect.left - (MINIMAP_WIDTH - bounds.width * bounds.scale) / 2, 0, bounds.width * bounds.scale);
+    const localY = clamp(event.clientY - rect.top - (MINIMAP_HEIGHT - bounds.height * bounds.scale) / 2, 0, bounds.height * bounds.scale);
+    const worldX = bounds.minX + localX / bounds.scale;
+    const worldY = bounds.minY + localY / bounds.scale;
+    const canvasRect = canvasRef.current.getBoundingClientRect();
+    updateViewport({
+      x: canvasRect.width / 2 - worldX * blueprint.viewport.zoom,
+      y: canvasRect.height / 2 - worldY * blueprint.viewport.zoom,
+    });
   };
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (isEditableEventTarget(event.target)) return;
       if (event.key === "Escape") {
-        setSelectedPaletteItemId(null);
+        setContextMenu(null);
+        setIsCreateMenuOpen(false);
         return;
       }
       if (event.key === "Delete" || event.key === "Backspace") {
@@ -341,11 +430,7 @@ export default function BlueprintEditor({ blueprintId }: Props) {
     if (!blueprint || (event.target !== event.currentTarget && !(event.target as HTMLElement).classList.contains("blueprint-world"))) return;
     event.preventDefault();
     setContextMenu(null);
-    if (selectedPaletteItem && event.button === 0 && canvasRef.current) {
-      const point = screenToCanvas(event, canvasRef.current, blueprint);
-      placeSelectedPaletteItem(point.x, point.y);
-      return;
-    }
+    setIsCreateMenuOpen(false);
     setSelectedNodeIds([]);
     setSelectedEdgeId(null);
     focusNode(blueprintId, null);
@@ -373,13 +458,34 @@ export default function BlueprintEditor({ blueprintId }: Props) {
       updateNode(blueprintId, nodeDrag.nodeId, {
         x: point.x - nodeDrag.offsetX,
         y: point.y - nodeDrag.offsetY,
-      }, { skipUndo: true });
+      }, { skipUndo: true, skipPersist: true });
       return;
     }
     if (connectionDrag) {
       const point = screenToCanvas(event, canvasRef.current, blueprint);
       setConnectionDrag({ ...connectionDrag, x: point.x, y: point.y });
     }
+  };
+
+  const handleCanvasWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    if (!blueprint || !canvasRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = canvasRef.current.getBoundingClientRect();
+    const mouseX = event.clientX - rect.left;
+    const mouseY = event.clientY - rect.top;
+    const currentZoom = blueprint.viewport.zoom;
+    const nextZoom = clamp(currentZoom * Math.exp(-event.deltaY * 0.0012), MIN_ZOOM, MAX_ZOOM);
+    if (Math.abs(nextZoom - currentZoom) < 0.001) return;
+
+    const canvasX = (mouseX - blueprint.viewport.x) / currentZoom;
+    const canvasY = (mouseY - blueprint.viewport.y) / currentZoom;
+    updateViewport({
+      zoom: nextZoom,
+      x: mouseX - canvasX * nextZoom,
+      y: mouseY - canvasY * nextZoom,
+    });
+    scheduleViewportSave();
   };
 
   const handleNodePointerDown = (event: React.PointerEvent, node: BlueprintNode) => {
@@ -406,6 +512,7 @@ export default function BlueprintEditor({ blueprintId }: Props) {
     event.stopPropagation();
     const point = screenToCanvas(event, canvasRef.current, blueprint);
     setConnectionDrag({ from: nodeId, x: point.x, y: point.y });
+    setConnectionHoverNodeId(null);
   };
 
   const handleConnectionEnd = (event: React.PointerEvent, nodeId: string) => {
@@ -415,12 +522,30 @@ export default function BlueprintEditor({ blueprintId }: Props) {
       addEdge(blueprintId, connectionDrag.from, nodeId);
     }
     setConnectionDrag(null);
+    setConnectionHoverNodeId(null);
+  };
+
+  const handleNodePointerEnter = (nodeId: string) => {
+    if (!connectionDrag || connectionDrag.from === nodeId) return;
+    setConnectionHoverNodeId(nodeId);
+  };
+
+  const handleNodePointerLeave = (nodeId: string) => {
+    setConnectionHoverNodeId((current) => (current === nodeId ? null : current));
   };
 
   const handlePointerUp = () => {
+    if (connectionDrag && connectionHoverNodeId && connectionDrag.from !== connectionHoverNodeId) {
+      addEdge(blueprintId, connectionDrag.from, connectionHoverNodeId);
+    }
+    if (nodeDrag || panState) {
+      const latestBlueprint = useBlueprintStore.getState().blueprints.find((item) => item.id === blueprintId);
+      if (latestBlueprint) void saveBlueprint(latestBlueprint);
+    }
     setNodeDrag(null);
     setPanState(null);
     setConnectionDrag(null);
+    setConnectionHoverNodeId(null);
   };
 
   const updateSelected = (patch: Partial<BlueprintNode>) => {
@@ -543,6 +668,133 @@ export default function BlueprintEditor({ blueprintId }: Props) {
     }));
   };
 
+  const savedTemplate = templates.find((template) => template.id === templateDraft.id);
+
+  const isTemplateFieldKeyLocked = (fieldId: string) => (
+    Boolean(savedTemplate?.fields.some((field) => field.id === fieldId))
+  );
+
+  const getTemplateBindingField = (bindingKey: BlueprintFieldBindingKey) => (
+    templateDraft.fields.find((field) => (field.bindingKey ?? "custom") === bindingKey)
+  );
+
+  const getTemplateBindingValues = (bindingKey: BlueprintFieldBindingKey, fallback = "") => {
+    const field = getTemplateBindingField(bindingKey);
+    return ensureFieldValues(field?.defaultValues, field?.defaultValue ?? fallback);
+  };
+
+  const getTemplateBindingValue = (bindingKey: BlueprintFieldBindingKey, fallback = "") => (
+    getTemplateBindingValues(bindingKey, fallback)[0] ?? ""
+  );
+
+  const setTemplateBindingValues = (
+    bindingKey: BlueprintFieldBindingKey,
+    key: string,
+    values: string[],
+    options: Partial<Pick<BlueprintNodeTemplate["fields"][number], "inputMode" | "showInCard">> = {}
+  ) => {
+    setTemplateDraft((draft) => {
+      const defaultValues = ensureFieldValues(values, "");
+      const existing = draft.fields.find((field) => (field.bindingKey ?? "custom") === bindingKey);
+      const nextField = {
+        ...(existing ?? {
+          id: newLocalId("template-field"),
+          defaultValue: "",
+          defaultValues: [""],
+        }),
+        key,
+        bindingKey,
+        defaultValue: defaultValues[0] ?? "",
+        defaultValues,
+        inputMode: options.inputMode ?? existing?.inputMode ?? "repeatable",
+        showInCard: options.showInCard ?? existing?.showInCard ?? true,
+      };
+      return {
+        ...draft,
+        fields: existing
+          ? draft.fields.map((field) => field.id === existing.id ? nextField : field)
+          : [...draft.fields, nextField],
+      };
+    });
+  };
+
+  const setTemplateBindingValue = (
+    bindingKey: BlueprintFieldBindingKey,
+    key: string,
+    value: string,
+    options: Partial<Pick<BlueprintNodeTemplate["fields"][number], "inputMode" | "showInCard">> = {}
+  ) => setTemplateBindingValues(bindingKey, key, [value], { inputMode: "fixed", ...options });
+
+  const addTemplateBindingInput = (bindingKey: BlueprintFieldBindingKey, key: string) => {
+    setTemplateBindingValues(bindingKey, key, [...getTemplateBindingValues(bindingKey), ""]);
+  };
+
+  const removeTemplateBindingInput = (bindingKey: BlueprintFieldBindingKey, key: string, index: number) => {
+    const values = getTemplateBindingValues(bindingKey);
+    setTemplateBindingValues(bindingKey, key, values.length <= 1 ? [""] : values.filter((_, itemIndex) => itemIndex !== index));
+  };
+
+  const updateTemplateBindingInput = (bindingKey: BlueprintFieldBindingKey, key: string, index: number, value: string) => {
+    const values = [...getTemplateBindingValues(bindingKey)];
+    values[index] = value;
+    setTemplateBindingValues(bindingKey, key, values);
+  };
+
+  const getTemplateRowCount = (bindingKeys: BlueprintFieldBindingKey[]) => (
+    Math.max(1, ...bindingKeys.map((bindingKey) => getTemplateBindingValues(bindingKey).length))
+  );
+
+  const updateStoryTemplateEvent = (index: number, patch: Partial<{ time: string; content: string; foreshadowing: string }>) => {
+    if (patch.time !== undefined) updateTemplateBindingInput("storyEventTime", t("blueprint.time"), index, patch.time);
+    if (patch.content !== undefined) updateTemplateBindingInput("storyEventContent", t("blueprint.content"), index, patch.content);
+    if (patch.foreshadowing !== undefined) updateTemplateBindingInput("storyEventForeshadowing", t("blueprint.foreshadowing"), index, patch.foreshadowing);
+  };
+
+  const addStoryTemplateEvent = () => {
+    addTemplateBindingInput("storyEventTime", t("blueprint.time"));
+    addTemplateBindingInput("storyEventContent", t("blueprint.content"));
+    addTemplateBindingInput("storyEventForeshadowing", t("blueprint.foreshadowing"));
+  };
+
+  const removeStoryTemplateEvent = (index: number) => {
+    removeTemplateBindingInput("storyEventTime", t("blueprint.time"), index);
+    removeTemplateBindingInput("storyEventContent", t("blueprint.content"), index);
+    removeTemplateBindingInput("storyEventForeshadowing", t("blueprint.foreshadowing"), index);
+  };
+
+  const updateCharacterTemplateEvent = (index: number, patch: Partial<{ time: string; story: string; location: string }>) => {
+    if (patch.time !== undefined) updateTemplateBindingInput("characterEventTime", t("blueprint.time"), index, patch.time);
+    if (patch.story !== undefined) updateTemplateBindingInput("characterEventStory", t("blueprint.storyText"), index, patch.story);
+    if (patch.location !== undefined) updateTemplateBindingInput("characterEventLocation", t("blueprint.location"), index, patch.location);
+  };
+
+  const addCharacterTemplateEvent = () => {
+    addTemplateBindingInput("characterEventTime", t("blueprint.time"));
+    addTemplateBindingInput("characterEventStory", t("blueprint.storyText"));
+    addTemplateBindingInput("characterEventLocation", t("blueprint.location"));
+  };
+
+  const removeCharacterTemplateEvent = (index: number) => {
+    removeTemplateBindingInput("characterEventTime", t("blueprint.time"), index);
+    removeTemplateBindingInput("characterEventStory", t("blueprint.storyText"), index);
+    removeTemplateBindingInput("characterEventLocation", t("blueprint.location"), index);
+  };
+
+  const updateTemplateRelationship = (index: number, patch: Partial<{ target: string; description: string }>) => {
+    if (patch.target !== undefined) updateTemplateBindingInput("relationshipTarget", t("blueprint.relationshipTarget"), index, patch.target);
+    if (patch.description !== undefined) updateTemplateBindingInput("relationshipDescription", t("blueprint.relationshipDescription"), index, patch.description);
+  };
+
+  const addTemplateRelationship = () => {
+    addTemplateBindingInput("relationshipTarget", t("blueprint.relationshipTarget"));
+    addTemplateBindingInput("relationshipDescription", t("blueprint.relationshipDescription"));
+  };
+
+  const removeTemplateRelationship = (index: number) => {
+    removeTemplateBindingInput("relationshipTarget", t("blueprint.relationshipTarget"), index);
+    removeTemplateBindingInput("relationshipDescription", t("blueprint.relationshipDescription"), index);
+  };
+
   const handleSaveBlueprint = async () => {
     if (!blueprint || saveState === "saving") return;
     setSaveState("saving");
@@ -560,11 +812,6 @@ export default function BlueprintEditor({ blueprintId }: Props) {
       setSaveState("error");
       setSaveMessage(error instanceof Error ? error.message : t("blueprint.saveFailed"));
     }
-  };
-
-  const openTemplateModal = (draft?: BlueprintNodeTemplate) => {
-    setTemplateDraft(draft ?? templates[0] ?? createBlankTemplate());
-    setIsTemplateModalOpen(true);
   };
 
   const handleSaveTemplate = async () => {
@@ -601,6 +848,7 @@ export default function BlueprintEditor({ blueprintId }: Props) {
       return [node.characterName, node.identity, relationshipCount ? `${relationshipCount} ${t("blueprint.relationships")}` : "", eventCount ? `${eventCount} ${t("blueprint.characterStories")}` : ""].filter(Boolean).join(" · ") || t("blueprint.emptyNode");
     }
     return (node.customFields ?? [])
+      .filter((field) => field.showInCard !== false)
       .map((field) => (field.values?.length ? field.values : [field.value]).filter(Boolean).join(" / ") || field.key)
       .filter(Boolean)
       .slice(0, 3)
@@ -623,6 +871,27 @@ export default function BlueprintEditor({ blueprintId }: Props) {
     mode === "fixed" ? t("blueprint.fixedInputs") : t("blueprint.repeatableInputs")
   );
 
+  const getBindingOptions = (): Array<{ key: BlueprintFieldBindingKey; label: string }> => [
+    { key: "custom", label: t("blueprint.binding.custom") },
+    { key: "linkedChapters", label: t("blueprint.linkedChapter") },
+  ];
+
+  const getReferenceKeySuggestions = (value: string) => {
+    const query = value.trim().toLowerCase();
+    const unique = new Map<string, string>();
+    for (const entry of referenceEntries) {
+      const name = entry.name.trim();
+      if (!name || unique.has(name)) continue;
+      const lower = name.toLowerCase();
+      if (!query || lower.includes(query)) {
+        unique.set(name, entry.description ?? entry.sourceList ?? "");
+      }
+    }
+    return [...unique.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .slice(0, 8);
+  };
+
   const renderPaletteIcon = (kind: BlueprintNodeKind) => {
     if (kind === "story") return <GitBranch size={15} />;
     if (kind === "character") return <UserRound size={15} />;
@@ -635,7 +904,7 @@ export default function BlueprintEditor({ blueprintId }: Props) {
       <div className="blueprint-field-group">
         <div className="blueprint-field-header">
           <span>{t("blueprint.configManagement")}</span>
-          <button type="button" onClick={() => updateSelected({ customFields: [...(selectedNode.customFields ?? []), { id: newLocalId("field"), key: "", value: "", values: [""], inputMode: "repeatable" }] })}>
+          <button type="button" onClick={() => updateSelected({ customFields: [...(selectedNode.customFields ?? []), { id: newLocalId("field"), key: "", value: "", values: [""], inputMode: "repeatable", bindingKey: "custom", showInCard: true }] })}>
             <Plus size={13} /> {t("blueprint.add")}
           </button>
         </div>
@@ -680,28 +949,76 @@ export default function BlueprintEditor({ blueprintId }: Props) {
     <div className="blueprint-field-group">
       <div className="blueprint-field-header">
         <span>{t("blueprint.configManagement")}</span>
-        <button type="button" onClick={() => setTemplateDraft((draft) => ({ ...draft, fields: [...draft.fields, { id: newLocalId("template-field"), key: "", defaultValue: "", defaultValues: [""], inputMode: "repeatable" }] }))}>
+        <button type="button" onClick={() => setTemplateDraft((draft) => ({ ...draft, fields: [...draft.fields, newTemplateField()] }))}>
           <Plus size={13} /> {t("blueprint.add")}
         </button>
       </div>
       {templateDraft.fields.map((field) => {
         const values = ensureFieldValues(field.defaultValues, field.defaultValue ?? "");
         const isFixed = field.inputMode === "fixed";
+        const bindingOptions = getBindingOptions();
+        const isKeyLocked = isTemplateFieldKeyLocked(field.id);
         return (
           <div key={field.id} className="blueprint-detail-card custom-field template-field">
-            <div className="blueprint-detail-card-header custom-field-header">
-              <input value={field.key} placeholder={t("blueprint.fieldKey")} onChange={(event) => setTemplateDraft((draft) => ({
+            <div className="blueprint-template-field-row top">
+              <input
+                className={isKeyLocked ? "blueprint-template-field-key locked" : "blueprint-template-field-key"}
+                value={field.key}
+                placeholder={t("blueprint.fieldKey")}
+                readOnly={isKeyLocked}
+                onChange={(event) => setTemplateDraft((draft) => ({
+                  ...draft,
+                  fields: draft.fields.map((item) => item.id === field.id ? { ...item, key: event.target.value } : item),
+                }))}
+              />
+              <select value={field.bindingKey ?? "custom"} onChange={(event) => setTemplateDraft((draft) => ({
                 ...draft,
-                fields: draft.fields.map((item) => item.id === field.id ? { ...item, key: event.target.value } : item),
-              }))} />
+                fields: draft.fields.map((item) => item.id === field.id ? { ...item, bindingKey: event.target.value as BlueprintFieldBindingKey } : item),
+              }))}>
+                {bindingOptions.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}
+              </select>
               <button type="button" onClick={() => setTemplateDraft((draft) => ({ ...draft, fields: draft.fields.filter((item) => item.id !== field.id) }))}>
                 <Trash2 size={13} />
               </button>
             </div>
             <div className="blueprint-field-inputs">
               {values.map((value, index) => (
-                <div key={index} className={`blueprint-field-input-row ${isFixed ? "fixed" : ""}`}>
-                  <input value={value} placeholder={`${t("blueprint.input")} ${index + 1}`} onChange={(event) => updateTemplateFieldInput(field.id, index, event.target.value)} />
+                <div key={index} className={`blueprint-template-field-row input ${isFixed ? "fixed" : ""}`}>
+                  <div className="blueprint-template-key-input-cell">
+                    <input
+                      value={value}
+                      placeholder={t("blueprint.templateInputPlaceholder")}
+                      onFocus={() => {
+                        if ((field.bindingKey ?? "custom") === "custom") setActiveTemplateKeyInput({ fieldId: field.id, index });
+                      }}
+                      onBlur={() => window.setTimeout(() => setActiveTemplateKeyInput(null), 120)}
+                      onChange={(event) => {
+                        updateTemplateFieldInput(field.id, index, event.target.value);
+                        if ((field.bindingKey ?? "custom") === "custom") setActiveTemplateKeyInput({ fieldId: field.id, index });
+                      }}
+                    />
+                    {(field.bindingKey ?? "custom") === "custom" &&
+                      activeTemplateKeyInput?.fieldId === field.id &&
+                      activeTemplateKeyInput.index === index &&
+                      getReferenceKeySuggestions(value).length > 0 && (
+                        <div className="blueprint-template-key-suggestions">
+                          {getReferenceKeySuggestions(value).map(([name, description]) => (
+                            <button
+                              key={name}
+                              type="button"
+                              onMouseDown={(event) => event.preventDefault()}
+                              onClick={() => {
+                                updateTemplateFieldInput(field.id, index, name);
+                                setActiveTemplateKeyInput(null);
+                              }}
+                            >
+                              <strong>{name}</strong>
+                              {description && <span>{description}</span>}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                  </div>
                   {!isFixed && (
                     <>
                       <button type="button" onClick={() => removeTemplateFieldInput(field.id, index)} title={t("blueprint.removeInput")}>
@@ -717,24 +1034,171 @@ export default function BlueprintEditor({ blueprintId }: Props) {
                 </div>
               ))}
             </div>
+            <div className="blueprint-template-field-settings-row">
             <button type="button" className="blueprint-field-settings-button" onClick={() => setTemplateDraft((draft) => ({
               ...draft,
               fields: draft.fields.map((item) => item.id === field.id ? { ...item, inputMode: nextFieldMode(item.inputMode) } : item),
             }))} title={t("blueprint.fieldSettings")}>
               <Settings2 size={13} /> {t("blueprint.settings")} · {getFieldModeLabel(field.inputMode)}
             </button>
+            <label className="blueprint-template-field-visible">
+              <input type="checkbox" checked={field.showInCard ?? true} onChange={(event) => setTemplateDraft((draft) => ({
+                ...draft,
+                fields: draft.fields.map((item) => item.id === field.id ? { ...item, showInCard: event.target.checked } : item),
+              }))} />
+              {t("blueprint.showInCard")}
+            </label>
+            </div>
           </div>
         );
       })}
     </div>
   );
 
+  const renderStoryTemplateFieldsSection = () => {
+    const linkedChapters = getTemplateBindingValues("linkedChapters");
+    const storyEventCount = getTemplateRowCount(["storyEventTime", "storyEventContent", "storyEventForeshadowing"]);
+    const storyEventTimes = getTemplateBindingValues("storyEventTime");
+    const storyEventContents = getTemplateBindingValues("storyEventContent");
+    const storyEventForeshadowings = getTemplateBindingValues("storyEventForeshadowing");
+    return (
+      <div className="blueprint-template-builtins">
+        <label>
+          <span>{t("blueprint.nodeTitle")}</span>
+          <input value={getTemplateBindingValue("title")} placeholder={t("blueprint.nodeTitle")} onChange={(event) => setTemplateBindingValue("title", t("blueprint.nodeTitle"), event.target.value)} />
+        </label>
+        <label>
+          <span>{t("blueprint.storyType.label")}</span>
+          <select value={getTemplateBindingValue("storyType", "custom")} onChange={(event) => setTemplateBindingValue("storyType", t("blueprint.storyType.label"), event.target.value)}>
+            <option value="custom">{t("blueprint.storyType.custom")}</option>
+            <option value="start">{t("blueprint.storyType.start")}</option>
+            <option value="ending">{t("blueprint.storyType.ending")}</option>
+          </select>
+        </label>
+        <label>
+          <span>{t("blueprint.summary")}</span>
+          <textarea value={getTemplateBindingValue("summary")} placeholder={t("blueprint.templateInputPlaceholder")} onChange={(event) => setTemplateBindingValue("summary", t("blueprint.summary"), event.target.value)} />
+        </label>
+        <div className="blueprint-field-group">
+          <div className="blueprint-field-header">
+            <span>{t("blueprint.linkedChapter")}</span>
+            <button type="button" onClick={() => addTemplateBindingInput("linkedChapters", t("blueprint.linkedChapter"))}>
+              <Plus size={13} /> {t("blueprint.add")}
+            </button>
+          </div>
+          {linkedChapters.map((chapter, index) => (
+            <div key={index} className="blueprint-template-inline-row">
+              <input value={chapter} placeholder={t("blueprint.templateInputPlaceholder")} onChange={(event) => updateTemplateBindingInput("linkedChapters", t("blueprint.linkedChapter"), index, event.target.value)} />
+              <button type="button" onClick={() => removeTemplateBindingInput("linkedChapters", t("blueprint.linkedChapter"), index)}>
+                <Trash2 size={13} />
+              </button>
+            </div>
+          ))}
+        </div>
+        <div className="blueprint-field-group">
+          <div className="blueprint-field-header">
+            <span>{t("blueprint.storyEvents")}</span>
+            <button type="button" onClick={addStoryTemplateEvent}>
+              <Plus size={13} /> {t("blueprint.add")}
+            </button>
+          </div>
+          {Array.from({ length: storyEventCount }).map((_, index) => (
+            <div key={index} className="blueprint-detail-card story-event template-builtin-card">
+              <div className="blueprint-detail-card-header custom-field-header">
+                <input value={storyEventTimes[index] ?? ""} placeholder={t("blueprint.time")} onChange={(event) => updateStoryTemplateEvent(index, { time: event.target.value })} />
+                <button type="button" onClick={() => removeStoryTemplateEvent(index)}>
+                  <Trash2 size={13} />
+                </button>
+              </div>
+              <textarea className="blueprint-detail-textarea" value={storyEventContents[index] ?? ""} placeholder={t("blueprint.content")} onChange={(event) => updateStoryTemplateEvent(index, { content: event.target.value })} />
+              <textarea className="blueprint-detail-textarea" value={storyEventForeshadowings[index] ?? ""} placeholder={t("blueprint.foreshadowing")} onChange={(event) => updateStoryTemplateEvent(index, { foreshadowing: event.target.value })} />
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  const renderCharacterTemplateFieldsSection = () => {
+    const characterEventCount = getTemplateRowCount(["characterEventTime", "characterEventStory", "characterEventLocation"]);
+    const characterEventTimes = getTemplateBindingValues("characterEventTime");
+    const characterEventStories = getTemplateBindingValues("characterEventStory");
+    const characterEventLocations = getTemplateBindingValues("characterEventLocation");
+    const relationshipCount = getTemplateRowCount(["relationshipTarget", "relationshipDescription"]);
+    const relationshipTargets = getTemplateBindingValues("relationshipTarget");
+    const relationshipDescriptions = getTemplateBindingValues("relationshipDescription");
+    return (
+      <div className="blueprint-template-builtins">
+        <label>
+          <span>{t("blueprint.nodeTitle")}</span>
+          <input value={getTemplateBindingValue("title")} placeholder={t("blueprint.nodeTitle")} onChange={(event) => setTemplateBindingValue("title", t("blueprint.nodeTitle"), event.target.value)} />
+        </label>
+        <label>
+          <span>{t("blueprint.characterName")}</span>
+          <input value={getTemplateBindingValue("characterName")} placeholder={t("blueprint.templateInputPlaceholder")} onChange={(event) => setTemplateBindingValue("characterName", t("blueprint.characterName"), event.target.value)} />
+        </label>
+        <label>
+          <span>{t("blueprint.identity")}</span>
+          <input value={getTemplateBindingValue("identity")} placeholder={t("blueprint.templateInputPlaceholder")} onChange={(event) => setTemplateBindingValue("identity", t("blueprint.identity"), event.target.value)} />
+        </label>
+        <div className="blueprint-field-group">
+          <div className="blueprint-field-header">
+            <span>{t("blueprint.characterStories")}</span>
+            <button type="button" onClick={addCharacterTemplateEvent}>
+              <Plus size={13} /> {t("blueprint.add")}
+            </button>
+          </div>
+          {Array.from({ length: characterEventCount }).map((_, index) => (
+            <div key={index} className="blueprint-detail-card character-event template-builtin-card">
+              <div className="blueprint-detail-card-header custom-field-header">
+                <input value={characterEventTimes[index] ?? ""} placeholder={t("blueprint.time")} onChange={(event) => updateCharacterTemplateEvent(index, { time: event.target.value })} />
+                <button type="button" onClick={() => removeCharacterTemplateEvent(index)}>
+                  <Trash2 size={13} />
+                </button>
+              </div>
+              <textarea className="blueprint-detail-textarea" value={characterEventStories[index] ?? ""} placeholder={t("blueprint.storyText")} onChange={(event) => updateCharacterTemplateEvent(index, { story: event.target.value })} />
+              <input value={characterEventLocations[index] ?? ""} placeholder={t("blueprint.location")} onChange={(event) => updateCharacterTemplateEvent(index, { location: event.target.value })} />
+            </div>
+          ))}
+        </div>
+        <div className="blueprint-field-group">
+          <div className="blueprint-field-header">
+            <span>{t("blueprint.relationship")}</span>
+            <button type="button" onClick={addTemplateRelationship}>
+              <Plus size={13} /> {t("blueprint.add")}
+            </button>
+          </div>
+          {Array.from({ length: relationshipCount }).map((_, index) => (
+            <div key={index} className="blueprint-detail-card template-builtin-card">
+              <div className="blueprint-detail-card-header custom-field-header">
+                <input value={relationshipTargets[index] ?? ""} placeholder={t("blueprint.relationshipTarget")} onChange={(event) => updateTemplateRelationship(index, { target: event.target.value })} />
+                <button type="button" onClick={() => removeTemplateRelationship(index)}>
+                  <Trash2 size={13} />
+                </button>
+              </div>
+              <textarea className="blueprint-detail-textarea" value={relationshipDescriptions[index] ?? ""} placeholder={t("blueprint.relationshipDescription")} onChange={(event) => updateTemplateRelationship(index, { description: event.target.value })} />
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  const renderTemplateConfiguration = () => {
+    if ((templateDraft.nodeKind ?? "custom") === "story") return renderStoryTemplateFieldsSection();
+    if ((templateDraft.nodeKind ?? "custom") === "character") return renderCharacterTemplateFieldsSection();
+    return renderTemplateFieldsSection();
+  };
+
   return (
     <section
       className="blueprint-editor"
       onContextMenu={(event) => {
+        if (!blueprint || !canvasRef.current || !(event.target as HTMLElement).closest(".blueprint-canvas")) return;
         event.preventDefault();
-        setContextMenu({ x: event.clientX, y: event.clientY });
+        const point = clientToCanvas(event.clientX, event.clientY, canvasRef.current, blueprint);
+        setIsCreateMenuOpen(false);
+        setContextMenu({ x: event.clientX, y: event.clientY, canvasX: point.x, canvasY: point.y });
       }}
     >
       <div
@@ -751,6 +1215,7 @@ export default function BlueprintEditor({ blueprintId }: Props) {
           onPointerMove={handleCanvasPointerMove}
           onPointerUp={handlePointerUp}
           onPointerLeave={handlePointerUp}
+          onWheel={handleCanvasWheel}
         >
           <div
             className="blueprint-world"
@@ -788,9 +1253,11 @@ export default function BlueprintEditor({ blueprintId }: Props) {
               return (
                 <div
                   key={node.id}
-                  className={`blueprint-node ${node.kind} ${selectedNodeIds.includes(node.id) ? "selected" : ""} ${connectMode ? "connect-mode" : ""}`}
+                  className={`blueprint-node ${node.kind} ${selectedNodeIds.includes(node.id) ? "selected" : ""} ${connectMode ? "connect-mode" : ""} ${connectionDrag?.from === node.id ? "connecting" : ""} ${connectionHoverNodeId === node.id ? "connection-target" : ""}`}
                   style={{ left: node.x, top: node.y }}
                   onPointerDown={(event) => handleNodePointerDown(event, node)}
+                  onPointerEnter={() => handleNodePointerEnter(node.id)}
+                  onPointerLeave={() => handleNodePointerLeave(node.id)}
                 >
                   {Array.from({ length: inputCount }).map((_, index) => (
                     <span
@@ -816,27 +1283,58 @@ export default function BlueprintEditor({ blueprintId }: Props) {
               );
             })}
           </div>
-          <div className="blueprint-node-palette-shell" onWheel={handlePaletteWheel}>
-            <div className="blueprint-node-palette" aria-label={t("blueprint.nodePalette")}>
-              {paletteItems.map((item) => (
-                <button
-                  key={item.id}
-                  ref={(element) => {
-                    paletteItemRefs.current[item.id] = element;
+          <div
+            ref={minimapRef}
+            className="blueprint-minimap"
+            onPointerDown={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              navigateMinimap(event);
+              setMinimapDrag({ bounds: minimapBounds });
+            }}
+            onPointerMove={(event) => event.stopPropagation()}
+            onWheel={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+            }}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+            }}
+            aria-label="Blueprint minimap"
+          >
+            <span className="blueprint-minimap-zoom">{Math.round(blueprint.viewport.zoom * 100)}%</span>
+            <div
+              className="blueprint-minimap-plane"
+              style={{
+                left: minimapOffset.x,
+                top: minimapOffset.y,
+                width: minimapBounds.width * minimapBounds.scale,
+                height: minimapBounds.height * minimapBounds.scale,
+              }}
+            >
+              {blueprint.nodes.length === 0 && <span className="blueprint-minimap-empty" />}
+              {blueprint.nodes.map((node) => (
+                <span
+                  key={node.id}
+                  className={`blueprint-minimap-node ${node.kind}`}
+                  style={{
+                    left: (node.x - minimapBounds.minX) * minimapBounds.scale,
+                    top: (node.y - minimapBounds.minY) * minimapBounds.scale,
+                    width: Math.max(4, NODE_WIDTH * minimapBounds.scale),
+                    height: Math.max(3, NODE_HEIGHT * minimapBounds.scale),
                   }}
-                  type="button"
-                  className={selectedPaletteItemId === item.id ? "active" : ""}
-                  title={t("blueprint.placeNodeHint")}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    selectPaletteItem(item.id);
-                  }}
-                >
-                  {renderPaletteIcon(item.kind)}
-                  <span>{item.label}</span>
-                </button>
+                />
               ))}
+              <span
+                className="blueprint-minimap-view"
+                style={{
+                  left: viewRect.x - minimapOffset.x,
+                  top: viewRect.y - minimapOffset.y,
+                  width: Math.max(12, viewRect.width),
+                  height: Math.max(10, viewRect.height),
+                }}
+              />
             </div>
           </div>
         </div>
@@ -990,9 +1488,6 @@ export default function BlueprintEditor({ blueprintId }: Props) {
                     <input type="number" min={1} value={selectedNode.inputCount ?? 1} onChange={(event) => updateSelected({ inputCount: Math.max(1, Number(event.target.value) || 1) })} />
                   </label>
                   {renderCustomFieldsSection()}
-                  <button type="button" className="blueprint-wide-button" onClick={() => openTemplateModal(templateFromNode(selectedNode))}>
-                    <LayoutTemplate size={14} /> {t("blueprint.saveAsTemplate")}
-                  </button>
                 </>
               )}
             </aside>
@@ -1004,11 +1499,46 @@ export default function BlueprintEditor({ blueprintId }: Props) {
           <GitBranch size={16} />
           <strong>{blueprint.name}</strong>
         </div>
-        <button type="button" onClick={() => openTemplateModal()}>
+        <div className="blueprint-toolbar-create">
+          <button
+            ref={createButtonRef}
+            type="button"
+            className={isCreateMenuOpen ? "active" : ""}
+            onClick={(event) => {
+              event.stopPropagation();
+              setContextMenu(null);
+              setIsCreateMenuOpen((value) => !value);
+            }}
+          >
+            <Plus size={15} /> {t("blueprint.createBlueprint")}
+          </button>
+          {isCreateMenuOpen && (
+            <div ref={createMenuRef} className="blueprint-create-menu">
+              {paletteItems.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => {
+                    const point = getViewportCenterPoint();
+                    placePaletteItem(item, point.x, point.y);
+                  }}
+                >
+                  {renderPaletteIcon(item.kind)}
+                  <span>{item.label}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <button type="button" onClick={() => {
+          setContextMenu(null);
+          setIsCreateMenuOpen(false);
+          setTemplateDraft(templates[0] ?? createBlankTemplate());
+          setIsTemplateModalOpen(true);
+        }}>
           <LayoutTemplate size={15} /> {t("blueprint.templates")}
         </button>
         <button type="button" className={connectMode ? "active" : ""} onClick={() => {
-          setSelectedPaletteItemId(null);
           setConnectMode((value) => !value);
         }}>
           <GitBranch size={15} /> {t("blueprint.connect")}
@@ -1029,6 +1559,23 @@ export default function BlueprintEditor({ blueprintId }: Props) {
           <button type="button" onClick={() => { undoBlueprint(blueprintId); setContextMenu(null); }}>
             {t("blueprint.undo")}
           </button>
+          <button type="button" onClick={() => { copySelection(); setContextMenu(null); }}>
+            {t("blueprint.copy")}
+          </button>
+          <button type="button" onClick={() => { pasteClipboard({ x: contextMenu.canvasX, y: contextMenu.canvasY }); setContextMenu(null); }}>
+            {t("blueprint.paste")}
+          </button>
+          <div className="blueprint-context-submenu">
+            <span>{t("blueprint.create")} &gt; {t("blueprint.title")}</span>
+            <div>
+              {paletteItems.map((item) => (
+                <button key={item.id} type="button" onClick={() => placePaletteItem(item, contextMenu.canvasX, contextMenu.canvasY)}>
+                  {renderPaletteIcon(item.kind)}
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
       )}
       {isTemplateModalOpen && (
@@ -1072,13 +1619,7 @@ export default function BlueprintEditor({ blueprintId }: Props) {
                     <option value="character">{t("blueprint.character")}</option>
                   </select>
                 </label>
-                {(templateDraft.nodeKind ?? "custom") === "custom" && (
-                  <label>
-                    <span>{t("blueprint.inputCount")}</span>
-                    <input type="number" min={1} value={templateDraft.inputCount} onChange={(event) => setTemplateDraft((draft) => ({ ...draft, inputCount: Math.max(1, Number(event.target.value) || 1) }))} />
-                  </label>
-                )}
-                {renderTemplateFieldsSection()}
+                {renderTemplateConfiguration()}
                 {templateErrorMessage && <div className="blueprint-template-error">{templateErrorMessage}</div>}
                 <div className="blueprint-template-form-actions">
                   <button type="button" onClick={() => void handleSaveTemplate()}>

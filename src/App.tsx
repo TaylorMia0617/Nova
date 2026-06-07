@@ -85,7 +85,7 @@ function App() {
     openSettings,
     closeSettings,
   } = useAppUIStore();
-  const { theme, backgroundImage, backgroundOpacity } = useSettingsStore();
+  const { theme, backgroundImage, backgroundOpacity, headingColors } = useSettingsStore();
   const backgroundVisibility = Math.min(100, Math.max(0, backgroundOpacity)) / 100;
   const surfaceOpacity = Math.max(0.42, Math.min(0.96, 0.96 - backgroundVisibility * 0.42));
   const headerOpacity = Math.max(0.5, Math.min(0.96, 0.94 - backgroundVisibility * 0.32));
@@ -136,6 +136,9 @@ function App() {
           "--surface-opacity": surfaceOpacity,
           "--header-opacity": headerOpacity,
           "--editor-opacity": editorOpacity,
+          "--editor-heading-h1-color": headingColors.h1,
+          "--editor-heading-h2-color": headingColors.h2,
+          "--editor-heading-h3-color": headingColors.h3,
         } as CSSProperties
       }
     >

@@ -35,6 +35,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     theme,
     backgroundImage,
     backgroundOpacity,
+    headingColors,
     modelProfiles,
     defaultChatModelId,
     defaultSelectionModelId,
@@ -46,6 +47,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     setBackgroundImage,
     clearBackgroundImage,
     setBackgroundOpacity,
+    setHeadingColor,
     setModelProfiles,
     updateModelProfile,
     removeModelProfile,
@@ -524,6 +526,22 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
           </div>
         </div>
         <p className="settings-hint">{t("settings.backgroundImageHint")}</p>
+      </div>
+      <div className="settings-section">
+        <h3>{t("settings.headingColors")}</h3>
+        <div className="settings-color-grid">
+          {(["h1", "h2", "h3"] as const).map((level) => (
+            <label key={level} className="settings-color-control">
+              <span>{t(`settings.${level}Color`)}</span>
+              <input
+                type="color"
+                value={headingColors[level]}
+                onChange={(event) => setHeadingColor(level, event.target.value)}
+              />
+            </label>
+          ))}
+        </div>
+        <p className="settings-hint">{t("settings.headingColorsHint")}</p>
       </div>
       {basicStatus && <div className="settings-status">{basicStatus}</div>}
     </>

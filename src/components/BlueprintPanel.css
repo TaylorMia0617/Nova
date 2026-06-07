@@ -62,6 +62,15 @@
   background: color-mix(in srgb, var(--color-bg-soft, #111827) 82%, transparent);
 }
 
+.blueprint-list-item:hover {
+  background: var(--app-control-surface, #1a1f2e);
+}
+
+.blueprint-list-item.selected {
+  border-color: var(--color-accent, #5a9e8f);
+  background: color-mix(in srgb, var(--color-accent, #5a9e8f) 18%, var(--color-bg-soft, #111827));
+}
+
 .blueprint-open-button {
   width: 100%;
   display: grid;
@@ -91,6 +100,41 @@
   margin: 12px;
   color: var(--color-text-subtle, #718096);
   font-size: 13px;
+}
+
+.blueprint-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 12px;
+  min-height: 88px;
+  border: 1px solid var(--color-border, #2d3748);
+  border-radius: 8px;
+  color: var(--color-text-muted, #a0aec0);
+  background: color-mix(in srgb, var(--color-bg-soft, #111827) 70%, transparent);
+  font-size: 13px;
+}
+
+.blueprint-loading svg {
+  color: var(--color-accent, #5a9e8f);
+  animation: blueprint-loading-spin 0.9s linear infinite, blueprint-loading-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes blueprint-loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes blueprint-loading-pulse {
+  0%,
+  100% {
+    opacity: 0.65;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 .blueprint-error {

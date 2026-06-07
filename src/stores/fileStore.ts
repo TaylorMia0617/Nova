@@ -193,6 +193,7 @@ interface FileState {
   closeGroup: (groupId: string) => void;
   setActiveGroup: (groupId: string) => void;
   moveTabToGroup: (tabPath: string, targetGroupId: string) => void;
+  moveTabToNewGroup: (tabPath: string) => void;
 }
 
 function getNodeByPath(nodes: WorkspaceNode[], path: string): WorkspaceNode | null {
@@ -515,8 +516,41 @@ function buildReferenceEntriesFromLists(lists: ReferenceListData[]): ReferenceEn
 
 const PRIMARY_GROUP_ID = "primary";
 
+function createEditorGroupId(): string {
+  return `group-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 function createEditorGroup(id: string): EditorGroup {
   return { id, tabs: [], activeTabPath: null };
+}
+
+function placeTabInHistoryTarget(editorGroups: EditorGroup[], tab: OpenFileTab) {
+  const nextGroups = editorGroups.length < MAX_EDITOR_GROUPS
+    ? [...editorGroups, createEditorGroup(createEditorGroupId())]
+    : editorGroups;
+  const targetGroupId = nextGroups.length >= MAX_EDITOR_GROUPS
+    ? nextGroups[MAX_EDITOR_GROUPS - 1].id
+    : nextGroups[nextGroups.length - 1].id;
+
+  const groups = nextGroups.map((group) => {
+    const tabsWithoutDuplicate = group.tabs.filter((item) => item.path !== tab.path);
+    if (group.id !== targetGroupId) {
+      return {
+        ...group,
+        tabs: tabsWithoutDuplicate,
+        activeTabPath: group.activeTabPath === tab.path
+          ? (tabsWithoutDuplicate[0]?.path ?? null)
+          : group.activeTabPath,
+      };
+    }
+    return {
+      ...group,
+      tabs: [...tabsWithoutDuplicate, tab],
+      activeTabPath: tab.path,
+    };
+  });
+
+  return { groups, targetGroupId };
 }
 
 export const useFileStore = create<FileState>()((set, get) => ({
@@ -741,19 +775,8 @@ export const useFileStore = create<FileState>()((set, get) => ({
       };
 
       set((state) => {
-        const targetGroupId = state.activeGroupId;
-        const groups = state.editorGroups.map((group) =>
-          group.id === targetGroupId
-            ? {
-                ...group,
-                tabs: group.tabs.some((tab) => tab.path === tabPath)
-                  ? group.tabs.map((tab) => (tab.path === tabPath ? historyTab : tab))
-                  : [...group.tabs, historyTab],
-                activeTabPath: tabPath,
-              }
-            : group
-        );
-        return { editorGroups: groups, activeFile: historyTab, errorMessage: null };
+        const { groups, targetGroupId } = placeTabInHistoryTarget(state.editorGroups, historyTab);
+        return { editorGroups: groups, activeGroupId: targetGroupId, activeFile: historyTab, errorMessage: null };
       });
     } catch (error) {
       set({
@@ -782,19 +805,8 @@ export const useFileStore = create<FileState>()((set, get) => ({
       };
 
       set((state) => {
-        const targetGroupId = state.activeGroupId;
-        const groups = state.editorGroups.map((group) =>
-          group.id === targetGroupId
-            ? {
-                ...group,
-                tabs: group.tabs.some((tab) => tab.path === tabPath)
-                  ? group.tabs.map((tab) => (tab.path === tabPath ? historyTab : tab))
-                  : [...group.tabs, historyTab],
-                activeTabPath: tabPath,
-              }
-            : group
-        );
-        return { editorGroups: groups, activeFile: historyTab, errorMessage: null };
+        const { groups, targetGroupId } = placeTabInHistoryTarget(state.editorGroups, historyTab);
+        return { editorGroups: groups, activeGroupId: targetGroupId, activeFile: historyTab, errorMessage: null };
       });
     } catch (error) {
       set({
@@ -1566,7 +1578,7 @@ export const useFileStore = create<FileState>()((set, get) => ({
     const { editorGroups, activeFile } = get();
     if (editorGroups.length >= MAX_EDITOR_GROUPS) return;
 
-    const newGroupId = `group-${Date.now()}`;
+    const newGroupId = createEditorGroupId();
     const newGroup = createEditorGroup(newGroupId);
 
     if (activeFile) {
@@ -1587,7 +1599,7 @@ export const useFileStore = create<FileState>()((set, get) => ({
       return;
     }
 
-    const newGroupId = `group-${Date.now()}`;
+    const newGroupId = createEditorGroupId();
     const newGroup = createEditorGroup(newGroupId);
     set((state) => ({
       editorGroups: [...state.editorGroups, newGroup],
@@ -1623,13 +1635,24 @@ export const useFileStore = create<FileState>()((set, get) => ({
     });
   },
   moveTabToGroup: (tabPath, targetGroupId) => {
-    const { editorGroups, activeGroupId } = get();
+    const { editorGroups } = get();
     const sourceGroup = editorGroups.find((g) => g.tabs.some((t) => t.path === tabPath));
     const targetGroup = editorGroups.find((g) => g.id === targetGroupId);
-    if (!sourceGroup || !targetGroup || sourceGroup.id === targetGroupId) return;
+    if (!sourceGroup || !targetGroup) return;
 
     const tab = sourceGroup.tabs.find((t) => t.path === tabPath);
     if (!tab) return;
+
+    if (sourceGroup.id === targetGroupId) {
+      set({
+        activeGroupId: targetGroupId,
+        activeFile: tab,
+        editorGroups: editorGroups.map((g) =>
+          g.id === targetGroupId ? { ...g, activeTabPath: tabPath } : g
+        ),
+      });
+      return;
+    }
 
     const updatedGroups = editorGroups.map((g) => {
       if (g.id === sourceGroup.id) {
@@ -1643,19 +1666,58 @@ export const useFileStore = create<FileState>()((set, get) => ({
         };
       }
       if (g.id === targetGroupId) {
+        const tabs = g.tabs.filter((t) => t.path !== tabPath);
         return {
           ...g,
-          tabs: [...g.tabs, tab],
+          tabs: [...tabs, tab],
           activeTabPath: tab.path,
         };
       }
       return g;
     });
 
-    const activeGroup = updatedGroups.find((g) => g.id === activeGroupId);
     set({
       editorGroups: updatedGroups,
-      activeFile: activeGroup?.tabs.find((t) => t.path === activeGroup.activeTabPath) ?? null,
+      activeGroupId: targetGroupId,
+      activeFile: tab,
+    });
+  },
+  moveTabToNewGroup: (tabPath) => {
+    const { editorGroups } = get();
+    const sourceGroup = editorGroups.find((g) => g.tabs.some((t) => t.path === tabPath));
+    const tab = sourceGroup?.tabs.find((t) => t.path === tabPath);
+    if (!sourceGroup || !tab) return;
+
+    if (editorGroups.length >= MAX_EDITOR_GROUPS) {
+      const fallbackGroupId = editorGroups[MAX_EDITOR_GROUPS - 1].id;
+      get().moveTabToGroup(tabPath, fallbackGroupId);
+      return;
+    }
+
+    const newGroupId = createEditorGroupId();
+    const newGroup = {
+      ...createEditorGroup(newGroupId),
+      tabs: [tab],
+      activeTabPath: tab.path,
+    };
+
+    const updatedGroups = editorGroups.map((group) => {
+      if (group.id !== sourceGroup.id) return group;
+      const remainingTabs = group.tabs.filter((item) => item.path !== tabPath);
+      return {
+        ...group,
+        tabs: remainingTabs,
+        activeTabPath: group.activeTabPath === tabPath
+          ? (remainingTabs[0]?.path ?? null)
+          : group.activeTabPath,
+      };
+    });
+
+    set({
+      editorGroups: [...updatedGroups, newGroup],
+      activeGroupId: newGroupId,
+      activeFile: tab,
+      errorMessage: null,
     });
   },
 }));

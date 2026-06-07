@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { GitBranch, Plus, Trash2 } from "lucide-react";
+import { GitBranch, LoaderCircle, Plus, Trash2 } from "lucide-react";
 import { useBlueprintStore } from "../stores/blueprintStore";
 import { useFileStore } from "../stores/fileStore";
 import { useTranslation } from "../hooks/useTranslation";
@@ -10,6 +10,7 @@ export default function BlueprintPanel() {
   const { blueprints, isLoading, errorMessage, loadBlueprints, createBlueprint, deleteBlueprint, renameBlueprint } = useBlueprintStore();
   const { rootPath, openBlueprintTab, closeBlueprintTabs, renameBlueprintTabs } = useFileStore();
   const [newName, setNewName] = useState("");
+  const [selectedBlueprintId, setSelectedBlueprintId] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
 
@@ -50,21 +51,27 @@ export default function BlueprintPanel() {
           value={newName}
           onChange={(event) => setNewName(event.target.value)}
           placeholder={t("blueprint.namePlaceholder")}
-          disabled={!rootPath}
+          disabled={!rootPath || isLoading}
           onKeyDown={(event) => { if (event.key === "Enter") void handleCreate(); }}
         />
-        <button type="button" onClick={() => void handleCreate()} disabled={!rootPath} title={t("blueprint.create")}>
+        <button type="button" onClick={() => void handleCreate()} disabled={!rootPath || isLoading} title={t("blueprint.create")}>
           <Plus size={15} />
         </button>
       </div>
-      {isLoading && <div className="blueprint-empty">{t("blueprint.loading")}</div>}
+      {isLoading && (
+        <div className="blueprint-loading" role="status" aria-live="polite">
+          <LoaderCircle size={20} />
+          <span>{t("blueprint.loading")}</span>
+        </div>
+      )}
       {!isLoading && blueprints.length === 0 && (
         <div className="blueprint-empty">{t("blueprint.empty")}</div>
       )}
       {errorMessage && <div className="blueprint-error">{errorMessage}</div>}
-      <div className="blueprint-list">
-        {blueprints.map((blueprint) => (
-          <article key={blueprint.id} className="blueprint-list-item">
+      {!isLoading && (
+        <div className="blueprint-list">
+          {blueprints.map((blueprint) => (
+          <article key={blueprint.id} className={`blueprint-list-item ${selectedBlueprintId === blueprint.id ? "selected" : ""}`}>
             {renamingId === blueprint.id ? (
               <input
                 value={renameValue}
@@ -78,7 +85,13 @@ export default function BlueprintPanel() {
                 autoFocus
               />
             ) : (
-              <button type="button" className="blueprint-open-button" onClick={() => openBlueprintTab(blueprint.id, blueprint.name)}>
+              <button
+                type="button"
+                className="blueprint-open-button"
+                onClick={() => setSelectedBlueprintId(blueprint.id)}
+                onDoubleClick={() => openBlueprintTab(blueprint.id, blueprint.name)}
+                title={t("blueprint.doubleClickOpen")}
+              >
                 <GitBranch size={15} />
                 <span>{blueprint.name}</span>
                 <small>{blueprint.nodes.length} {t("blueprint.nodes")}</small>
@@ -88,19 +101,21 @@ export default function BlueprintPanel() {
               <button
                 type="button"
                 onClick={() => {
+                  setSelectedBlueprintId(blueprint.id);
                   setRenamingId(blueprint.id);
                   setRenameValue(blueprint.name);
                 }}
               >
                 {t("blueprint.rename")}
               </button>
-              <button type="button" onClick={() => void handleDelete(blueprint.id)} title={t("blueprint.delete")}>
+              <button type="button" onClick={() => { setSelectedBlueprintId(blueprint.id); void handleDelete(blueprint.id); }} title={t("blueprint.delete")}>
                 <Trash2 size={14} />
               </button>
             </div>
           </article>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
