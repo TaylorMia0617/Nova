@@ -1,4 +1,6 @@
 import { useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
+import { getFloatingPosition } from "../utils/floatingPosition";
 import "./ContextMenu.css";
 
 export interface ContextMenuItem {
@@ -18,6 +20,19 @@ interface ContextMenuProps {
 
 export const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }) => {
   const menuRef = useRef<HTMLDivElement>(null);
+  const estimatedHeight = items.reduce((total, item) => total + (item.separator ? 9 : 36), 8);
+  const position = getFloatingPosition(
+    { x, y },
+    {
+      width: 220,
+      height: estimatedHeight,
+      offset: 0,
+      padding: 12,
+      minHeight: 88,
+      preferVertical: "bottom",
+      preferHorizontal: "right",
+    }
+  );
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -38,11 +53,11 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }
     };
   }, [onClose]);
 
-  return (
+  return createPortal(
     <div
       ref={menuRef}
-      className="context-menu"
-      style={{ left: x, top: y }}
+      className={`context-menu placement-${position.placementY}`}
+      style={{ left: position.left, top: position.top, maxHeight: position.maxHeight }}
     >
       {items.map((item, index) =>
         item.separator ? (
@@ -62,6 +77,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }
           </button>
         )
       )}
-    </div>
+    </div>,
+    document.body
   );
 };

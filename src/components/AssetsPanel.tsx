@@ -737,21 +737,21 @@ const AssetsPanel: React.FC = () => {
         </div>
       )}
       {referenceDialogOpen && (
-        <div className="dialog-backdrop settings-backdrop" onClick={closeReferenceDialog}>
-          <div className="settings-modal" onClick={(event) => event.stopPropagation()}>
-            <div className="settings-header">
-              <div className="settings-header-left">
+        <div className="dialog-backdrop reference-dialog-backdrop" onClick={closeReferenceDialog}>
+          <div className="reference-dialog-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="reference-dialog-header">
+              <div className="reference-dialog-title">
                 <h2>{t("reference.title")}</h2>
               </div>
               <button className="icon-button" onClick={closeReferenceDialog} aria-label="Close">
                 <X size={18} />
               </button>
             </div>
-            <div className="settings-layout">
-              <aside className="settings-sidebar">
-                <div className="settings-sidebar-header">
+            <div className="reference-dialog-layout">
+              <aside className="reference-dialog-sidebar">
+                <div className="reference-dialog-sidebar-header">
                   <h3>{t("reference.lists")}</h3>
-                  <div className="settings-sidebar-actions">
+                  <div className="reference-dialog-sidebar-actions">
                     <button onClick={handleNewList} className="workspace-button compact-button" type="button">
                       <Plus size={14} />
                     </button>
@@ -780,12 +780,12 @@ const AssetsPanel: React.FC = () => {
                     )}
                   </div>
                 </div>
-                <div className="settings-profile-list">
+                <div className="reference-dialog-list">
                   {filteredReferenceLists.map((list) => (
                     <button
                       key={list.id}
                       type="button"
-                      className={`settings-profile-item ${selectedListId === list.id ? "active" : ""}`}
+                      className={`reference-dialog-list-item ${selectedListId === list.id ? "active" : ""}`}
                       onClick={() => handleSelectList(list.id)}
                     >
                       <strong>{list.name}</strong>
@@ -793,14 +793,14 @@ const AssetsPanel: React.FC = () => {
                     </button>
                   ))}
                   {filteredReferenceLists.length === 0 && (
-                    <div className="settings-empty">{t("reference.noLists")}</div>
+                    <div className="reference-dialog-empty">{t("reference.noLists")}</div>
                   )}
                 </div>
               </aside>
-              <div className="settings-content">
+              <div className="reference-dialog-content">
                 {referenceListDraft ? (
                   <>
-                    <div className="settings-section">
+                    <div className="reference-dialog-section">
                       <label>
                         <span>{t("reference.listName")}</span>
                         <input
@@ -811,7 +811,7 @@ const AssetsPanel: React.FC = () => {
                         />
                       </label>
                     </div>
-                    <div className="settings-section">
+                    <div className="reference-dialog-section reference-dialog-table-section">
                       <div className="reference-table-header">
                         <span className="reference-table-key">{t("reference.key")}</span>
                         <span className="reference-table-value">{t("reference.value")}</span>
@@ -847,7 +847,7 @@ const AssetsPanel: React.FC = () => {
                         <span>{t("reference.addRow")}</span>
                       </button>
                     </div>
-                    <div className="settings-actions">
+                    <div className="reference-dialog-actions">
                       <button className="workspace-button" onClick={() => void handleCreateConfigFile()} type="button">
                         <Save size={14} />
                         <span>{t("reference.save")}</span>
@@ -865,11 +865,11 @@ const AssetsPanel: React.FC = () => {
                         <span>{t("reference.deleteList")}</span>
                       </button>
                     </div>
-                    {referenceSaveStatus && <div className="settings-status">{referenceSaveStatus}</div>}
-                    {referenceError && <div className="settings-status error">{referenceError}</div>}
+                    {referenceSaveStatus && <div className="reference-dialog-status">{referenceSaveStatus}</div>}
+                    {referenceError && <div className="reference-dialog-status error">{referenceError}</div>}
                   </>
                 ) : (
-                  <div className="settings-empty">{t("reference.createList")}</div>
+                  <div className="reference-dialog-empty">{t("reference.createList")}</div>
                 )}
               </div>
             </div>

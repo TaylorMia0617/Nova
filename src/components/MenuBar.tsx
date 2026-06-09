@@ -1,7 +1,9 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { Minus, Square, X, FilePlus, FolderOpen, SaveAll, FileDown, LogOut, Undo2, Redo2, Scissors, Copy, ClipboardPaste, TextSelect, Search, Replace, LayoutGrid, Terminal as TerminalIcon, Trash2, Plus } from "lucide-react";
+import { createPortal } from "react-dom";
+import { Minus, Square, X, FilePlus, FolderOpen, SaveAll, FileDown, LogOut, Undo2, Redo2, Scissors, Copy, ClipboardPaste, TextSelect, Search, Replace, LayoutGrid, Plus } from "lucide-react";
 import { useTranslation } from "../hooks/useTranslation";
 import { useFileStore } from "../stores/fileStore";
+import { getFloatingPosition, type FloatingPositionResult } from "../utils/floatingPosition";
 import icon from "../assets/icon.png";
 import "./MenuBar.css";
 
@@ -19,7 +21,9 @@ const MenuBar: React.FC = () => {
   const { t } = useTranslation();
   const { openWorkspace, saveAllFiles, getOpenTabs } = useFileStore();
   const [activeMenu, setActiveMenu] = useState<string | null>(null);
+  const [menuPosition, setMenuPosition] = useState<Pick<FloatingPositionResult, "left" | "top" | "maxHeight"> | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
   const dirtyCount = getOpenTabs().filter((tab) => tab.isDirty).length;
 
@@ -29,11 +33,17 @@ const MenuBar: React.FC = () => {
 
   const closeMenu = useCallback(() => {
     setActiveMenu(null);
+    setMenuPosition(null);
   }, []);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (
+        menuRef.current &&
+        !menuRef.current.contains(target) &&
+        !dropdownRef.current?.contains(target)
+      ) {
         closeMenu();
       }
     };
@@ -42,8 +52,36 @@ const MenuBar: React.FC = () => {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [closeMenu]);
 
-  const handleMenuClick = (menuId: string) => {
-    setActiveMenu((prev) => (prev === menuId ? null : menuId));
+  const setMenuAnchor = (target: HTMLElement) => {
+    const rect = target.getBoundingClientRect();
+    setMenuPosition(getFloatingPosition(
+      { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom },
+      {
+        width: 260,
+        height: 360,
+        offset: 2,
+        padding: 8,
+        minHeight: 120,
+        preferVertical: "bottom",
+        preferHorizontal: "right",
+      }
+    ));
+  };
+
+  const handleMenuClick = (menuId: string, event: React.MouseEvent<HTMLElement>) => {
+    if (activeMenu === menuId) {
+      closeMenu();
+      return;
+    }
+
+    setMenuAnchor(event.currentTarget);
+    setActiveMenu(menuId);
+  };
+
+  const handleMenuHover = (menuId: string, event: React.MouseEvent<HTMLElement>) => {
+    if (!activeMenu) return;
+    setMenuAnchor(event.currentTarget);
+    setActiveMenu(menuId);
   };
 
   const handleItemClick = (action?: () => void) => {
@@ -201,14 +239,6 @@ const MenuBar: React.FC = () => {
         // TODO: 切换到资源管理器面板
       },
     },
-    {
-      id: "terminal",
-      label: t("menubar.window.terminal"),
-      icon: <TerminalIcon size={14} />,
-      action: () => {
-        // TODO: 切换到终端面板
-      },
-    },
     { id: "sep1", label: "", separator: true },
     {
       id: "closePanel",
@@ -221,58 +251,37 @@ const MenuBar: React.FC = () => {
     },
   ];
 
-  const terminalMenuItems: MenuItem[] = [
-    {
-      id: "newTerminal",
-      label: t("menubar.terminal.newTerminal"),
-      shortcut: "Ctrl+`",
-      icon: <Plus size={14} />,
-      action: () => {
-        // TODO: 新建终端
-      },
-    },
-    { id: "sep1", label: "", separator: true },
-    {
-      id: "clearTerminal",
-      label: t("menubar.terminal.clearTerminal"),
-      shortcut: "Ctrl+K",
-      icon: <Trash2 size={14} />,
-      action: () => {
-        // TODO: 清除终端
-      },
-    },
-    {
-      id: "closeTerminal",
-      label: t("menubar.terminal.closeTerminal"),
-      icon: <X size={14} />,
-      action: () => {
-        // TODO: 关闭终端
-      },
-    },
-  ];
+  const renderDropdown = (items: MenuItem[]) => {
+    if (!menuPosition) return null;
 
-  const renderDropdown = (items: MenuItem[]) => (
-    <div className="dropdown-menu">
-      {items.map((item) =>
-        item.separator ? (
-          <div key={item.id} className="dropdown-separator" />
-        ) : (
-          <button
-            key={item.id}
-            className="dropdown-item"
-            onClick={() => handleItemClick(item.action)}
-            disabled={item.disabled}
-          >
-            <span style={{ display: "flex", alignItems: "center" }}>
-              {item.icon && <span className="item-icon">{item.icon}</span>}
-              {item.label}
-            </span>
-            {item.shortcut && <span className="shortcut">{item.shortcut}</span>}
-          </button>
-        )
-      )}
-    </div>
-  );
+    return createPortal(
+      <div
+        ref={dropdownRef}
+        className="dropdown-menu menubar-dropdown-portal"
+        style={{ left: menuPosition.left, top: menuPosition.top, maxHeight: menuPosition.maxHeight }}
+      >
+        {items.map((item) =>
+          item.separator ? (
+            <div key={item.id} className="dropdown-separator" />
+          ) : (
+            <button
+              key={item.id}
+              className="dropdown-item"
+              onClick={() => handleItemClick(item.action)}
+              disabled={item.disabled}
+            >
+              <span style={{ display: "flex", alignItems: "center" }}>
+                {item.icon && <span className="item-icon">{item.icon}</span>}
+                {item.label}
+              </span>
+              {item.shortcut && <span className="shortcut">{item.shortcut}</span>}
+            </button>
+          )
+        )}
+      </div>,
+      document.body
+    );
+  };
 
   return (
     <div className="menubar" ref={menuRef}>
@@ -282,8 +291,8 @@ const MenuBar: React.FC = () => {
         </div>
         <div
           className={`menubar-item ${activeMenu === "file" ? "active" : ""}`}
-          onClick={() => handleMenuClick("file")}
-          onMouseEnter={() => activeMenu && setActiveMenu("file")}
+          onClick={(event) => handleMenuClick("file", event)}
+          onMouseEnter={(event) => handleMenuHover("file", event)}
         >
           {t("menubar.file.title")}
           {activeMenu === "file" && renderDropdown(fileMenuItems)}
@@ -291,8 +300,8 @@ const MenuBar: React.FC = () => {
 
         <div
           className={`menubar-item ${activeMenu === "edit" ? "active" : ""}`}
-          onClick={() => handleMenuClick("edit")}
-          onMouseEnter={() => activeMenu && setActiveMenu("edit")}
+          onClick={(event) => handleMenuClick("edit", event)}
+          onMouseEnter={(event) => handleMenuHover("edit", event)}
         >
           {t("menubar.edit.title")}
           {activeMenu === "edit" && renderDropdown(editMenuItems)}
@@ -300,20 +309,11 @@ const MenuBar: React.FC = () => {
 
         <div
           className={`menubar-item ${activeMenu === "window" ? "active" : ""}`}
-          onClick={() => handleMenuClick("window")}
-          onMouseEnter={() => activeMenu && setActiveMenu("window")}
+          onClick={(event) => handleMenuClick("window", event)}
+          onMouseEnter={(event) => handleMenuHover("window", event)}
         >
           {t("menubar.window.title")}
           {activeMenu === "window" && renderDropdown(windowMenuItems)}
-        </div>
-
-        <div
-          className={`menubar-item ${activeMenu === "terminal" ? "active" : ""}`}
-          onClick={() => handleMenuClick("terminal")}
-          onMouseEnter={() => activeMenu && setActiveMenu("terminal")}
-        >
-          {t("menubar.terminal.title")}
-          {activeMenu === "terminal" && renderDropdown(terminalMenuItems)}
         </div>
       </div>
 

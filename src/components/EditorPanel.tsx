@@ -20,7 +20,7 @@ import { exportDocument, getExportTemplates } from "../services/documentExportSe
 import type { ExportFormat, ExportTemplateId } from "../types/export";
 import { useEditorUIStore } from "../stores/editorUIStore";
 import { DEFAULT_ACTIVE_FORMATS, useEditorStatusStore } from "../stores/editorStatusStore";
-import { onWorkspaceChanged, unwatchWorkspace, watchWorkspace } from "../services/terminalService";
+import { onWorkspaceChanged, unwatchWorkspace, watchWorkspace } from "../services/workspaceWatchService";
 import { compareNodeNames } from "../../shared/workspaceSort.js";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { TipTapEditor } from "./TipTapEditor";
@@ -28,7 +28,7 @@ import type { TipTapContentFormat, TipTapEditorHandle } from "./TipTapEditor";
 import { FindReplacePanel } from "./TipTapEditor/FindReplacePanel";
 import { OutlinePanel } from "./TipTapEditor/OutlinePanel";
 import type { OutlineBlueprintMatch } from "./TipTapEditor/OutlinePanel";
-import type { BlueprintNode } from "../types/blueprint";
+import type { BlueprintMountLink, BlueprintNode } from "../types/blueprint";
 import { EditorToolbar } from "./EditorToolbar";
 import BlueprintEditor from "./BlueprintEditor";
 import { useTranslation } from "../hooks/useTranslation";
@@ -166,6 +166,7 @@ const EditorPanel: React.FC = () => {
   const [selectionPopup, setSelectionPopup] = useState<SelectionPopupState | null>(null);
   const [selectionPreview, setSelectionPreview] = useState<SelectionPreviewState | null>(null);
   const [selectionLoading, setSelectionLoading] = useState(false);
+  const [selectionLockedPath, setSelectionLockedPath] = useState<string | null>(null);
   const [selectionError, setSelectionError] = useState("");
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tabPath: string } | null>(null);
   const [isEditorDragActive, setIsEditorDragActive] = useState(false);
@@ -187,6 +188,16 @@ const EditorPanel: React.FC = () => {
     openExportDialog, closeExportDialog,
     setExportFormat, setExportTemplateId,
   } = useEditorUIStore();
+  const selectionEditLocked = Boolean(selectionLockedPath && (selectionLoading || selectionPreview));
+  const selectionLockedMessage = t("editor.selection.locked");
+  const isSelectionLockedForPath = useCallback((path: string | null | undefined) => (
+    Boolean(path && selectionEditLocked && selectionLockedPath === path)
+  ), [selectionEditLocked, selectionLockedPath]);
+  const releaseSelectionLock = useCallback(() => {
+    setSelectionPreview(null);
+    setSelectionError("");
+    setSelectionLockedPath(null);
+  }, []);
 
   const {
     cursorPosition, selectionLength, wordWrap,
@@ -248,6 +259,7 @@ const EditorPanel: React.FC = () => {
     const selectedText = handle.getSelectionText().trim();
     if (!selectedText) return;
 
+    setSelectionLockedPath(activeFile?.path ?? null);
     setSelectionLoading(true);
     setSelectionError("");
     try {
@@ -266,6 +278,7 @@ const EditorPanel: React.FC = () => {
       setSelectionPopup(null);
     } catch (error) {
       setSelectionError(error instanceof Error ? error.message : "AI request failed.");
+      setSelectionLockedPath(null);
     } finally {
       setSelectionLoading(false);
     }
@@ -565,7 +578,10 @@ const EditorPanel: React.FC = () => {
 
   const getBlueprintNodeSummaryLines = useCallback((node: BlueprintNode) => {
     const lines: string[] = [];
-    if (node.kind === "story") {
+    if (node.nodeType === "chapter") {
+      const summary = String(node.typedData?.summary ?? node.summary ?? "").trim();
+      if (summary) lines.push(`${t("blueprint.summary")}: ${summary}`);
+    } else if (node.kind === "story") {
       if (node.summary) lines.push(node.summary);
       if (node.linkedChapters?.length) lines.push(`${t("blueprint.linkedChapter")}: ${node.linkedChapters.slice(0, 2).join(" / ")}`);
       for (const event of node.storyEvents ?? []) {
@@ -593,6 +609,36 @@ const EditorPanel: React.FC = () => {
     return (lines.length ? lines : [t("blueprint.emptyNode")]).slice(0, 4);
   }, [t]);
 
+  const getMountedBlueprintChildren = useCallback((node: BlueprintNode): OutlineBlueprintMatch[] | undefined => {
+    if (node.nodeType !== "chapter") return undefined;
+    const mountLinks = Array.isArray(node.typedData?.mountLinks)
+      ? node.typedData.mountLinks as BlueprintMountLink[]
+      : [];
+    if (!mountLinks.length) return undefined;
+
+    const children: OutlineBlueprintMatch[] = [];
+    const seen = new Set<string>();
+    for (const link of mountLinks) {
+      const mountedBlueprint = blueprints.find((item) => item.id === link.blueprintId);
+      if (!mountedBlueprint) continue;
+      for (const childNode of mountedBlueprint.nodes) {
+        const childKey = `${mountedBlueprint.id}-${childNode.id}`;
+        if (seen.has(childKey)) continue;
+        seen.add(childKey);
+        children.push({
+          blueprintId: mountedBlueprint.id,
+          nodeId: childNode.id,
+          blueprintName: mountedBlueprint.name,
+          nodeTitle: childNode.title || childNode.characterName || t("blueprint.untitledNode"),
+          nodeKind: childNode.kind,
+          nodeKindLabel: getBlueprintNodeKindLabel(childNode),
+          summaryLines: getBlueprintNodeSummaryLines(childNode),
+        });
+      }
+    }
+    return children.length ? children : undefined;
+  }, [blueprints, getBlueprintNodeKindLabel, getBlueprintNodeSummaryLines, t]);
+
   const getBlueprintMatchesForHeading = useCallback((headingText: string): OutlineBlueprintMatch[] => {
     if (!activeFile || isBlueprintTab(activeFile)) return [];
     const fileName = activeFile.name.toLowerCase();
@@ -604,6 +650,7 @@ const EditorPanel: React.FC = () => {
       for (const node of blueprint.nodes) {
         const terms = [
           node.title,
+          typeof node.typedData?.chapterTitle === "string" ? node.typedData.chapterTitle : undefined,
           ...(node.linkedChapters ?? []),
           ...(node.storyEvents ?? []).flatMap((event) => [event.content, event.foreshadowing]),
           node.characterName,
@@ -624,12 +671,13 @@ const EditorPanel: React.FC = () => {
             nodeKind: node.kind,
             nodeKindLabel: getBlueprintNodeKindLabel(node),
             summaryLines: getBlueprintNodeSummaryLines(node),
+            children: getMountedBlueprintChildren(node),
           });
         }
       }
     }
     return matches;
-  }, [activeFile, blueprints, getBlueprintNodeKindLabel, getBlueprintNodeSummaryLines, t]);
+  }, [activeFile, blueprints, getBlueprintNodeKindLabel, getBlueprintNodeSummaryLines, getMountedBlueprintChildren, t]);
 
   const handleOutlineBlueprintClick = useCallback((match: OutlineBlueprintMatch) => {
     focusBlueprintNode(match.blueprintId, match.nodeId);
@@ -987,7 +1035,9 @@ const EditorPanel: React.FC = () => {
                       contentFormat={getEditorContentFormat(groupActiveTab.fileMode)}
                       pageViewMode={isPageViewMode}
                       referenceEntries={referenceEntries}
-                      editable={!groupActiveTab.isReadOnly}
+                      editable={!groupActiveTab.isReadOnly && !isSelectionLockedForPath(groupActiveTab.path)}
+                      locked={isSelectionLockedForPath(groupActiveTab.path)}
+                      lockedMessage={selectionLockedMessage}
                     />
                   );
                 })()}
@@ -1133,7 +1183,9 @@ const EditorPanel: React.FC = () => {
                   contentFormat={getEditorContentFormat(activeFile.fileMode)}
                   pageViewMode={isPageViewMode}
                   referenceEntries={referenceEntries}
-                  editable={!activeFile.isReadOnly}
+                  editable={!activeFile.isReadOnly && !isSelectionLockedForPath(activeFile.path)}
+                  locked={isSelectionLockedForPath(activeFile.path)}
+                  lockedMessage={selectionLockedMessage}
                 />
               ) : rootPath ? (
                 <div className="empty-state">
@@ -1191,7 +1243,7 @@ const EditorPanel: React.FC = () => {
         </div>
       )}
       {selectionPreview && (
-        <div className="selection-preview-backdrop" onClick={() => setSelectionPreview(null)}>
+        <div className="selection-preview-backdrop" onClick={releaseSelectionLock}>
           <div className="selection-preview-card" onClick={(event) => event.stopPropagation()}>
             <h3>{t("editor.selection.previewTitle")}</h3>
             <div className="selection-preview-grid">
@@ -1199,9 +1251,9 @@ const EditorPanel: React.FC = () => {
               <div><h4>{t("editor.selection.result")}</h4><pre>{selectionPreview.result}</pre></div>
             </div>
             <div className="selection-preview-actions">
-              <button className="secondary" onClick={() => { setSelectionPreview(null); setSelectionError(""); }}>{t("editor.common.cancel")}</button>
-              <button className="secondary" onClick={() => { applySelectionPreview("insertAfterSelection", selectionPreview.result); setSelectionPreview(null); }}>{t("editor.selection.insertAfter")}</button>
-              <button onClick={() => { applySelectionPreview("replaceSelection", selectionPreview.result); setSelectionPreview(null); }}>{t("editor.selection.replaceOriginal")}</button>
+              <button className="secondary" onClick={releaseSelectionLock}>{t("editor.common.cancel")}</button>
+              <button className="secondary" onClick={() => { applySelectionPreview("insertAfterSelection", selectionPreview.result); releaseSelectionLock(); }}>{t("editor.selection.insertAfter")}</button>
+              <button onClick={() => { applySelectionPreview("replaceSelection", selectionPreview.result); releaseSelectionLock(); }}>{t("editor.selection.replaceOriginal")}</button>
             </div>
           </div>
         </div>

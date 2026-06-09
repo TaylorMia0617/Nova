@@ -28,14 +28,7 @@ const zhCN: TranslationDict = {
       editor: "编辑器",
       copilot: "AI 助手",
       assets: "资源管理器",
-      terminal: "终端",
       closePanel: "关闭面板",
-    },
-    terminal: {
-      title: "终端",
-      newTerminal: "新建终端",
-      clearTerminal: "清除终端",
-      closeTerminal: "关闭终端",
     },
   },
   header: {
@@ -207,6 +200,7 @@ const zhCN: TranslationDict = {
       result: "结果",
       insertAfter: "插入到后面",
       replaceOriginal: "替换原文",
+      locked: "正在处理选区，暂时锁定编辑。",
     },
     export: {
       title: "保存为",
@@ -347,9 +341,6 @@ const zhCN: TranslationDict = {
       exportFailed: "导出文档失败。",
     },
   },
-  terminal: {
-    loading: "加载终端...",
-  },
   history: {
     title: "历史版本",
     subtitle: "最近 48 小时",
@@ -396,6 +387,16 @@ const zhCN: TranslationDict = {
     doubleClickOpen: "双击打开",
     nodePalette: "节点选择区",
     placeNodeHint: "选择后点击蓝图放置",
+    inputGuide: {
+      ready: "就绪",
+      panning: "正在平移",
+      selecting: "正在框选",
+      draggingNode: "正在移动节点",
+      connecting: "正在连接",
+      pan: "左键拖动：平移",
+      marquee: "Shift + 左键拖动：框选",
+      menu: "右键 1 秒内松开：菜单",
+    },
     newTemplate: "新建模板",
     useTemplate: "使用",
     saveTemplate: "保存模板",

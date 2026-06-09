@@ -9,6 +9,9 @@ interface OutlineItem {
   pos: number;
 }
 
+const MIN_OUTLINE_WIDTH = 220;
+const MAX_OUTLINE_WIDTH = 520;
+
 export interface OutlineBlueprintMatch {
   blueprintId: string;
   nodeId: string;
@@ -17,6 +20,7 @@ export interface OutlineBlueprintMatch {
   nodeKind: string;
   nodeKindLabel: string;
   summaryLines: string[];
+  children?: OutlineBlueprintMatch[];
 }
 
 export interface OutlinePanelProps {
@@ -30,6 +34,9 @@ export function OutlinePanel({ editor, visible, getBlueprintMatches, onBlueprint
   const { t } = useTranslation();
   const [items, setItems] = useState<OutlineItem[]>([]);
   const [expandedBlueprintItems, setExpandedBlueprintItems] = useState<Set<string>>(() => new Set());
+  const [expandedChildItems, setExpandedChildItems] = useState<Set<string>>(() => new Set());
+  const [outlineWidth, setOutlineWidth] = useState(260);
+  const [isResizing, setIsResizing] = useState(false);
 
   const extractHeadings = useCallback(() => {
     if (!editor) {
@@ -83,10 +90,42 @@ export function OutlinePanel({ editor, visible, getBlueprintMatches, onBlueprint
     });
   };
 
+  const toggleChildItem = (key: string) => {
+    setExpandedChildItems((current) => {
+      const next = new Set(current);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  };
+
+  const startResize = (event: React.PointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = outlineWidth;
+    setIsResizing(true);
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      const nextWidth = Math.min(MAX_OUTLINE_WIDTH, Math.max(MIN_OUTLINE_WIDTH, startWidth + moveEvent.clientX - startX));
+      setOutlineWidth(nextWidth);
+    };
+    const stopResize = () => {
+      setIsResizing(false);
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", stopResize);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", stopResize, { once: true });
+  };
+
   if (!visible) return null;
 
   return (
-    <div className="outline-panel">
+    <div className={`outline-panel ${isResizing ? "is-resizing" : ""}`} style={{ width: outlineWidth, flexBasis: outlineWidth }}>
       <div className="outline-header">{t("editor.outline.title")}</div>
       <div className="outline-list">
         {items.length === 0 ? (
@@ -135,6 +174,44 @@ export function OutlinePanel({ editor, visible, getBlueprintMatches, onBlueprint
                           {match.summaryLines.map((line, lineIndex) => (
                             <p key={`${matchKey}-line-${lineIndex}`}>{line}</p>
                           ))}
+                          {match.children && match.children.length > 0 && (
+                            <div className="outline-blueprint-children">
+                              {match.children.map((child) => {
+                                const childKey = `${matchKey}-${child.blueprintId}-${child.nodeId}`;
+                                const isChildExpanded = expandedChildItems.has(childKey);
+                                return (
+                                  <div key={childKey} className={`outline-blueprint-child-card ${isChildExpanded ? "expanded" : ""}`}>
+                                    <div className="outline-blueprint-child-row">
+                                      <button
+                                        type="button"
+                                        className="outline-blueprint-child-toggle"
+                                        onClick={() => toggleChildItem(childKey)}
+                                        title={isChildExpanded ? t("editor.outline.collapseBlueprint") : t("editor.outline.expandBlueprint")}
+                                      >
+                                        {isChildExpanded ? "-" : "+"}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="outline-blueprint-child"
+                                        onClick={() => onBlueprintMatchClick?.(child)}
+                                        title={`${child.blueprintName} · ${child.nodeKindLabel}`}
+                                      >
+                                        <span>{child.nodeTitle}</span>
+                                        <small>{child.blueprintName}</small>
+                                      </button>
+                                    </div>
+                                    {isChildExpanded && (
+                                      <div className="outline-blueprint-child-summary">
+                                        {child.summaryLines.map((line, lineIndex) => (
+                                          <p key={`${childKey}-summary-${lineIndex}`}>{line}</p>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -145,6 +222,12 @@ export function OutlinePanel({ editor, visible, getBlueprintMatches, onBlueprint
           })
         )}
       </div>
+      <button
+        type="button"
+        className="outline-resize-handle"
+        onPointerDown={startResize}
+        aria-label="Resize outline"
+      />
     </div>
   );
 }

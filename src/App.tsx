@@ -1,39 +1,36 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import type { CSSProperties } from "react";
-import { Bot, FolderTree, GitBranch, History, Settings, TerminalSquare, X } from "lucide-react";
+import { Bot, FolderTree, GitBranch, History, Settings, X } from "lucide-react";
 import AssetsPanel from "./components/AssetsPanel";
-import BlueprintPanel from "./components/BlueprintPanel";
 import Header from "./components/Header";
 import MenuBar from "./components/MenuBar";
-import SettingsModal from "./components/SettingsModal";
 import { useTranslation } from "./hooks/useTranslation";
 import { useAppUIStore } from "./stores/appUIStore";
 import { useSettingsStore } from "./stores/settingsStore";
 
 const EditorPanel = lazy(() => import("./components/EditorPanel"));
+const BlueprintPanel = lazy(() => import("./components/BlueprintPanel"));
 const CopilotPanel = lazy(() => import("./components/CopilotPanel"));
-const TerminalPanel = lazy(() => import("./components/TerminalPanel"));
+const SettingsModal = lazy(() => import("./components/SettingsModal"));
 const VersionHistoryPanel = lazy(() => import("./components/VersionHistoryPanel"));
 
-type DragTarget = "left" | "right" | "terminal" | null;
+type DragTarget = "left" | "right" | "bottom" | null;
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 const MIN_EDITOR_HEIGHT = 120;
-const MIN_TERMINAL_HEIGHT = 120;
+const MIN_BOTTOM_PANEL_HEIGHT = 120;
 
 function BottomPanelTabs() {
   const {
-    bottomPanelTab,
     isBottomPanelOpen,
     closeBottomPanel,
-    setBottomPanelTab,
     openBottomPanel,
   } = useAppUIStore();
-  const selectTab = (tab: "terminal" | "history") => {
+  const toggleHistory = () => {
     if (isBottomPanelOpen) {
-      setBottomPanelTab(tab);
+      closeBottomPanel();
     } else {
-      openBottomPanel(tab);
+      openBottomPanel();
     }
   };
 
@@ -42,16 +39,8 @@ function BottomPanelTabs() {
       <div className="bottom-panel-tab-list">
         <button
           type="button"
-          className={`bottom-panel-tab ${bottomPanelTab === "terminal" && isBottomPanelOpen ? "active" : ""}`}
-          onClick={() => selectTab("terminal")}
-        >
-          <TerminalSquare size={14} />
-          <span>Terminal</span>
-        </button>
-        <button
-          type="button"
-          className={`bottom-panel-tab ${bottomPanelTab === "history" && isBottomPanelOpen ? "active" : ""}`}
-          onClick={() => selectTab("history")}
+          className={`bottom-panel-tab ${isBottomPanelOpen ? "active" : ""}`}
+          onClick={toggleHistory}
         >
           <History size={14} />
           <span>History</span>
@@ -69,7 +58,7 @@ function BottomPanelTabs() {
 function App() {
   const [leftWidth, setLeftWidth] = useState(280);
   const [rightWidth, setRightWidth] = useState(350);
-  const [terminalHeight, setTerminalHeight] = useState(220);
+  const [bottomPanelHeight, setBottomPanelHeight] = useState(220);
   const [dragTarget, setDragTarget] = useState<DragTarget>(null);
   const { t } = useTranslation();
   const {
@@ -78,7 +67,6 @@ function App() {
     isCopilotOpen,
     isSettingsOpen,
     isBottomPanelOpen,
-    bottomPanelTab,
     toggleExplorer,
     toggleBlueprint,
     toggleCopilot,
@@ -103,15 +91,15 @@ function App() {
         setRightWidth(clamp(window.innerWidth - event.clientX, 260, 620));
       }
 
-      if (dragTarget === "terminal") {
+      if (dragTarget === "bottom") {
         const headerElement = document.querySelector(".header");
         const headerHeight = headerElement instanceof HTMLElement ? headerElement.offsetHeight : 0;
-        const maxTerminalHeight = Math.max(
-          MIN_TERMINAL_HEIGHT,
+        const maxBottomPanelHeight = Math.max(
+          MIN_BOTTOM_PANEL_HEIGHT,
           window.innerHeight - headerHeight - MIN_EDITOR_HEIGHT
         );
 
-        setTerminalHeight(clamp(window.innerHeight - event.clientY, MIN_TERMINAL_HEIGHT, maxTerminalHeight));
+        setBottomPanelHeight(clamp(window.innerHeight - event.clientY, MIN_BOTTOM_PANEL_HEIGHT, maxBottomPanelHeight));
       }
     };
 
@@ -190,7 +178,13 @@ function App() {
         {(isExplorerOpen || isBlueprintOpen) && (
           <>
             <div className="resizable-pane left-pane" style={{ width: leftWidth }}>
-              {isBlueprintOpen ? <BlueprintPanel /> : <AssetsPanel />}
+              {isBlueprintOpen ? (
+                <Suspense fallback={<div className="panel-loading">蓝图加载中...</div>}>
+                  <BlueprintPanel />
+                </Suspense>
+              ) : (
+                <AssetsPanel />
+              )}
             </div>
             <div
               className="resize-handle vertical"
@@ -210,21 +204,16 @@ function App() {
               className="resize-handle horizontal"
               onPointerDown={(event) => {
                 event.preventDefault();
-                setDragTarget("terminal");
+                setDragTarget("bottom");
               }}
             />
           )}
           {isBottomPanelOpen ? (
-            <div className="bottom-panel" style={{ height: terminalHeight }}>
+            <div className="bottom-panel" style={{ height: bottomPanelHeight }}>
               <BottomPanelTabs />
               <div className="bottom-panel-content">
-                <div className={`bottom-panel-view ${bottomPanelTab === "terminal" ? "active" : ""}`}>
-                  <Suspense fallback={<div className="panel-loading terminal-loading">{t("terminal.loading")}</div>}>
-                    <TerminalPanel />
-                  </Suspense>
-                </div>
-                <div className={`bottom-panel-view ${bottomPanelTab === "history" ? "active" : ""}`}>
-                  <Suspense fallback={<div className="panel-loading terminal-loading">Loading history...</div>}>
+                <div className="bottom-panel-view active">
+                  <Suspense fallback={<div className="panel-loading">Loading history...</div>}>
                     <VersionHistoryPanel />
                   </Suspense>
                 </div>
@@ -251,7 +240,11 @@ function App() {
           </>
         )}
       </div>
-      <SettingsModal isOpen={isSettingsOpen} onClose={closeSettings} />
+      {isSettingsOpen && (
+        <Suspense fallback={<div className="panel-loading">{t("header.settings")}</div>}>
+          <SettingsModal isOpen={isSettingsOpen} onClose={closeSettings} />
+        </Suspense>
+      )}
     </div>
   );
 }

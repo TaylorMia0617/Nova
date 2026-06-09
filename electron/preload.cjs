@@ -49,29 +49,12 @@ contextBridge.exposeInMainWorld("novelHost", {
   readAttachmentText: (filePath) => ipcRenderer.invoke("ai:readAttachmentText", filePath),
   watchWorkspace: (rootPath) => ipcRenderer.invoke("workspace:watch", rootPath),
   unwatchWorkspace: (rootPath) => ipcRenderer.invoke("workspace:unwatch", rootPath),
-  startTerminal: (options) => ipcRenderer.invoke("terminal:start", options),
-  getTerminalShellInfo: () => ipcRenderer.invoke("terminal:getShellInfo"),
-  openExternalTerminal: (options) => ipcRenderer.invoke("terminal:openExternal", options),
-  diagnoseTerminal: (options) => ipcRenderer.invoke("terminal:diagnose", options),
-  writeTerminal: (terminalId, data) => ipcRenderer.invoke("terminal:write", terminalId, data),
-  resizeTerminal: (terminalId, cols, rows) => ipcRenderer.invoke("terminal:resize", terminalId, cols, rows),
-  disposeTerminal: (terminalId) => ipcRenderer.invoke("terminal:dispose", terminalId),
   printToPDF: (html) => ipcRenderer.invoke("export:printToPDF", html),
   // 参考列表管理
   getReferenceLists: () => ipcRenderer.invoke("reference:getLists"),
   getReferenceList: (listId) => ipcRenderer.invoke("reference:getList", listId),
   saveReferenceList: (list) => ipcRenderer.invoke("reference:saveList", list),
   deleteReferenceList: (listId) => ipcRenderer.invoke("reference:deleteList", listId),
-  onTerminalData: (callback) => {
-    const listener = (_event, payload) => callback(payload);
-    ipcRenderer.on("terminal:data", listener);
-    return () => ipcRenderer.removeListener("terminal:data", listener);
-  },
-  onTerminalExit: (callback) => {
-    const listener = (_event, payload) => callback(payload);
-    ipcRenderer.on("terminal:exit", listener);
-    return () => ipcRenderer.removeListener("terminal:exit", listener);
-  },
   onWorkspaceChanged: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on("workspace:changed", listener);

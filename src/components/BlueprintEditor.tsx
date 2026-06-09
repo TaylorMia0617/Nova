@@ -2,8 +2,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { GitBranch, LayoutTemplate, Minus, Plus, RotateCcw, Save, Settings2, Trash2, UserRound } from "lucide-react";
 import { useBlueprintStore } from "../stores/blueprintStore";
 import { useFileStore } from "../stores/fileStore";
-import type { BlueprintDocument, BlueprintFieldBindingKey, BlueprintFieldInputMode, BlueprintNode, BlueprintNodeKind, BlueprintNodeTemplate } from "../types/blueprint";
+import type { WorkspaceNode } from "../services/fileSystemService";
+import type { BlueprintDocument, BlueprintEdge, BlueprintFieldBindingKey, BlueprintFieldInputMode, BlueprintLogicCompareOperator, BlueprintLogicTree, BlueprintMountLink, BlueprintNode, BlueprintNodeKind, BlueprintNodeLayer, BlueprintNodeTemplate, BlueprintPresetType, BlueprintTypedData, BlueprintTypedNodeType } from "../types/blueprint";
 import { useTranslation } from "../hooks/useTranslation";
+import { getFloatingPosition, type FloatingPositionResult } from "../utils/floatingPosition";
 import "./BlueprintEditor.css";
 
 interface Props {
@@ -12,24 +14,49 @@ interface Props {
 
 const NODE_WIDTH = 220;
 const NODE_HEIGHT = 126;
+const PORT_ANCHOR_OFFSET = 3;
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 2.5;
 const MINIMAP_WIDTH = 180;
 const MINIMAP_HEIGHT = 128;
 const MINIMAP_PADDING = 80;
 const ZOOM_SAVE_DELAY_MS = 280;
+const FLOATING_EDGE_PADDING = 12;
+const CREATE_MENU_WIDTH = 360;
+const CREATE_MENU_HEIGHT = 360;
+const CONTEXT_MENU_WIDTH = 230;
+const CONTEXT_MENU_HEIGHT = 178;
+const CONTEXT_SUBMENU_ROW_TOP = 114;
+const CONTEXT_MENU_SHORT_PRESS_MS = 1000;
+const NODE_COLLISION_GAP = 32;
+const EDGE_INSERT_THRESHOLD = 34;
+const EDGE_SAMPLE_STEPS = 28;
 
-type PanState = { startX: number; startY: number; originX: number; originY: number } | null;
-type NodeDragState = { nodeId: string; offsetX: number; offsetY: number } | null;
-type ConnectionDragState = { from: string; x: number; y: number } | null;
+type PanState = { mode: "panning"; startX: number; startY: number; originX: number; originY: number };
+type NodeDragState = { mode: "draggingNode"; nodeId: string; offsetX: number; offsetY: number; startX: number; startY: number; isDragging: boolean };
+type ConnectionDragState = { mode: "connecting"; from: string; x: number; y: number };
+type MarqueeSelectState = { mode: "marqueeSelecting"; startClientX: number; startClientY: number; currentClientX: number; currentClientY: number };
+type InputManagerState =
+  | { mode: "idle" }
+  | PanState
+  | NodeDragState
+  | ConnectionDragState
+  | MarqueeSelectState;
 type MinimapDragState = { bounds: MinimapBounds } | null;
 type SaveState = "idle" | "saving" | "saved" | "error";
 type BlueprintClipboard = Pick<BlueprintDocument, "nodes" | "edges">;
 type BlueprintPaletteItem =
   | { id: string; type: "base"; kind: BlueprintNodeKind; label: string }
+  | { id: string; type: "preset"; kind: "custom"; presetType?: BlueprintPresetType; layer: BlueprintNodeLayer; nodeType: BlueprintTypedNodeType; label: string; summary: string }
   | { id: string; type: "template"; kind: BlueprintNodeKind; templateId: string; label: string };
-type BlueprintContextMenuState = { x: number; y: number; canvasX: number; canvasY: number } | null;
+type FloatingPosition = Pick<FloatingPositionResult, "left" | "top" | "maxHeight" | "placementY" | "placementX">;
+type BlueprintContextMenuState = (FloatingPosition & { canvasX: number; canvasY: number; submenuSide: "left" | "right"; submenuMaxHeight: number; submenuTop: number }) | null;
 type MinimapBounds = { minX: number; minY: number; width: number; height: number; scale: number };
+type ContextMenuPressState = { startedAt: number; clientX: number; clientY: number; canvasX: number; canvasY: number };
+type BlueprintSuggestionKind = "reference" | "chapterTitleFile";
+type ActiveBlueprintSuggestionInput = { id: string; kind: BlueprintSuggestionKind } | null;
+type EdgeInsertCandidate = { edgeId: string; x: number; y: number; distance: number } | null;
+type PendingConnectionCreate = { fromNodeId: string; canvasX: number; canvasY: number } | null;
 
 const newLocalId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const ensureFieldValues = (values: string[] | undefined, fallback = "") => (values?.length ? values : [fallback]);
@@ -44,6 +71,48 @@ const newTemplateField = () => ({
   bindingKey: "custom" as BlueprintFieldBindingKey,
   showInCard: true,
 });
+const BUILTIN_NODE_GROUPS: Array<{ layer: BlueprintNodeLayer; label: string; items: Array<{ nodeType: BlueprintTypedNodeType; presetType?: BlueprintPresetType; label: string; summary: string }> }> = [
+  { layer: "story", label: "剧情层", items: [
+    { nodeType: "hook", presetType: "hook", label: "Hook", summary: "吸引读者继续阅读，制造悬念、问题或冲突" },
+    { nodeType: "linearPlot", presetType: "linearPlot", label: "线性剧情", summary: "A → B → C → D 的顺序剧情" },
+    { nodeType: "nonlinearPlot", presetType: "nonlinearPlot", label: "非线性剧情", summary: "过去、现在、未来、回忆、梦境或平行时间线" },
+    { nodeType: "trickPerspective", presetType: "trickPerspective", label: "诡叙（视角）", summary: "第一人称、第三人称、不可靠叙述者或反派视角" },
+    { nodeType: "trickTime", presetType: "trickTime", label: "诡叙（时间）", summary: "倒叙、插叙、循环或未来片段" },
+    { nodeType: "branchPlot", presetType: "branchPlot", label: "支线", summary: "可独立发展并回收到主线的故事" },
+    { nodeType: "hiddenLine", presetType: "hiddenLine", label: "暗线", summary: "读者暂时看不到的伏笔、幕后组织或真相" },
+  ] },
+  { layer: "structure", label: "结构层", items: [
+    { nodeType: "chapter", presetType: "chapter", label: "章节", summary: "章节梗概与挂载容器" },
+    { nodeType: "chapterGroup", label: "章节组", summary: "管理一组连续章节" },
+    { nodeType: "volume", label: "卷", summary: "管理长篇结构中的一卷" },
+    { nodeType: "act", label: "幕", summary: "管理三幕式、起承转合等结构段落" },
+    { nodeType: "mount", presetType: "mount", label: "挂载器", summary: "章节下的世界观、人物线、伏笔等容器" },
+  ] },
+  { layer: "logic", label: "逻辑层", items: [
+    { nodeType: "because", presetType: "logicBlock", label: "因为", summary: "因为条件，所以结果，因此可选" },
+    { nodeType: "and", label: "AND", summary: "多个条件同时成立" },
+    { nodeType: "or", label: "OR", summary: "多个条件任一成立" },
+    { nodeType: "compare", label: "比较", summary: "等于、不等于、大于、小于" },
+    { nodeType: "condition", label: "条件", summary: "独立逻辑条件" },
+  ] },
+  { layer: "control", label: "控制流层", items: [
+    { nodeType: "loop", presetType: "loop", label: "循环", summary: "次数循环、条件循环或无限循环" },
+    { nodeType: "branch", label: "分支", summary: "剧情分叉" },
+    { nodeType: "merge", label: "汇合", summary: "多条剧情线汇聚" },
+  ] },
+  { layer: "narrative", label: "叙事层", items: [
+    { nodeType: "conflict", label: "冲突", summary: "目标 VS 阻碍" },
+    { nodeType: "foreshadow", label: "伏笔", summary: "埋设、隐藏、回收" },
+    { nodeType: "reveal", label: "揭露", summary: "揭示此前隐藏的信息" },
+    { nodeType: "twist", label: "反转", summary: "改变读者对事件的理解" },
+  ] },
+];
+const BUILTIN_PRESETS = BUILTIN_NODE_GROUPS.flatMap((group) => group.items.map((item) => ({ ...item, layer: group.layer })))
+  .filter((item) => !["chapterGroup", "volume", "act", "mount", "loop", "branch", "merge", "and", "or", "compare", "condition"].includes(item.nodeType))
+  .map((item) => item.nodeType === "because"
+    ? { ...item, nodeType: "logicBlueprint" as const, label: "逻辑蓝图", summary: "用子蓝图整理因为、条件、比较与结果" }
+    : item
+  );
 
 const createBlankTemplate = (): BlueprintNodeTemplate => {
   const now = new Date().toISOString();
@@ -63,6 +132,31 @@ const isEditableEventTarget = (target: EventTarget | null) => {
   return Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
 };
 
+const isPrimaryMouseDown = (event: Pick<MouseEvent | PointerEvent | React.PointerEvent, "buttons">) => (event.buttons & 1) === 1;
+
+const isBlueprintBlankTarget = (target: EventTarget | null, canvas: HTMLDivElement) => {
+  if (!(target instanceof Element)) return false;
+  if (target === canvas) return true;
+  if (target.closest(".blueprint-node, .node-port, .blueprint-minimap, .blueprint-edge-hitbox")) return false;
+  return Boolean(target.closest(".blueprint-world, .blueprint-edges"));
+};
+
+const isChapterSuggestionFile = (name: string) => /\.(docx|md|markdown|txt)$/i.test(name);
+
+const collectWorkspaceDocumentNames = (nodes: WorkspaceNode[]) => {
+  const names: string[] = [];
+  const visit = (items: WorkspaceNode[]) => {
+    for (const item of items) {
+      if (item.type === "file" && isChapterSuggestionFile(item.name)) {
+        names.push(item.name);
+      }
+      if (item.children?.length) visit(item.children);
+    }
+  };
+  visit(nodes);
+  return names;
+};
+
 const clientToCanvas = (clientX: number, clientY: number, canvas: HTMLDivElement, blueprint: BlueprintDocument) => {
   const rect = canvas.getBoundingClientRect();
   return {
@@ -73,6 +167,43 @@ const clientToCanvas = (clientX: number, clientY: number, canvas: HTMLDivElement
 
 const screenToCanvas = (event: React.PointerEvent, canvas: HTMLDivElement, blueprint: BlueprintDocument) =>
   clientToCanvas(event.clientX, event.clientY, canvas, blueprint);
+
+const getContextMenuPosition = (clientX: number, clientY: number) => {
+  const mainPosition = getFloatingPosition(
+    { x: clientX, y: clientY },
+    {
+      width: CONTEXT_MENU_WIDTH,
+      height: CONTEXT_MENU_HEIGHT,
+      offset: 0,
+      padding: FLOATING_EDGE_PADDING,
+      minHeight: 120,
+      preferVertical: "bottom",
+      preferHorizontal: "right",
+    }
+  );
+  const rightSpace = window.innerWidth - (mainPosition.left + CONTEXT_MENU_WIDTH) - FLOATING_EDGE_PADDING;
+  const leftSpace = mainPosition.left - FLOATING_EDGE_PADDING;
+  const submenuSide: "left" | "right" = rightSpace >= CREATE_MENU_WIDTH || rightSpace >= leftSpace ? "right" : "left";
+  const submenuHeight = Math.min(CREATE_MENU_HEIGHT, window.innerHeight - FLOATING_EDGE_PADDING * 2);
+  const submenuAnchorTop = mainPosition.top + CONTEXT_SUBMENU_ROW_TOP;
+  const desiredSubmenuTop = mainPosition.placementY === "top"
+    ? clientY - submenuHeight
+    : submenuAnchorTop;
+  const submenuAbsoluteTop = Math.min(
+    window.innerHeight - submenuHeight - FLOATING_EDGE_PADDING,
+    Math.max(FLOATING_EDGE_PADDING, desiredSubmenuTop)
+  );
+  return {
+    left: mainPosition.left,
+    top: mainPosition.top,
+    maxHeight: Math.min(CONTEXT_MENU_HEIGHT, mainPosition.maxHeight),
+    placementY: mainPosition.placementY,
+    placementX: mainPosition.placementX,
+    submenuSide,
+    submenuTop: submenuAbsoluteTop - submenuAnchorTop,
+    submenuMaxHeight: submenuHeight,
+  };
+};
 
 export default function BlueprintEditor({ blueprintId }: Props) {
   const { t } = useTranslation();
@@ -86,7 +217,9 @@ export default function BlueprintEditor({ blueprintId }: Props) {
     saveBlueprint,
     saveTemplate,
     deleteTemplate,
+    createBlueprint,
     replaceBlueprint,
+    updateViewport: updateBlueprintViewport,
     pushUndo,
     undoBlueprint,
     addNode,
@@ -97,24 +230,32 @@ export default function BlueprintEditor({ blueprintId }: Props) {
     deleteEdge,
     focusNode,
   } = useBlueprintStore();
-  const { referenceEntries } = useFileStore();
+  const { activeFile, editorGroups, files, referenceEntries, openBlueprintTab } = useFileStore();
   const blueprint = blueprints.find((item) => item.id === blueprintId) ?? null;
   const focusedNodeId = focusedNodeByBlueprintId[blueprintId] ?? null;
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>(focusedNodeId ? [focusedNodeId] : []);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
-  const [nodeDrag, setNodeDrag] = useState<NodeDragState>(null);
-  const [panState, setPanState] = useState<PanState>(null);
-  const [connectionDrag, setConnectionDrag] = useState<ConnectionDragState>(null);
+  const [inputManager, setInputManager] = useState<InputManagerState>({ mode: "idle" });
   const [connectionHoverNodeId, setConnectionHoverNodeId] = useState<string | null>(null);
   const [minimapDrag, setMinimapDrag] = useState<MinimapDragState>(null);
   const [connectMode, setConnectMode] = useState(false);
   const [contextMenu, setContextMenu] = useState<BlueprintContextMenuState>(null);
   const [isCreateMenuOpen, setIsCreateMenuOpen] = useState(false);
+  const [createMenuPosition, setCreateMenuPosition] = useState<FloatingPosition | null>(null);
+  const [createLayer, setCreateLayer] = useState<BlueprintNodeLayer>("story");
+  const [createSearch, setCreateSearch] = useState("");
+  const [activeCreateItemId, setActiveCreateItemId] = useState<string | null>(null);
+  const [edgeInsertCandidate, setEdgeInsertCandidate] = useState<EdgeInsertCandidate>(null);
+  const [pendingConnectionCreate, setPendingConnectionCreate] = useState<PendingConnectionCreate>(null);
   const [inspectorWidth, setInspectorWidth] = useState(360);
   const [isResizingInspector, setIsResizingInspector] = useState(false);
   const [isTemplateModalOpen, setIsTemplateModalOpen] = useState(false);
   const [templateDraft, setTemplateDraft] = useState<BlueprintNodeTemplate>(() => createBlankTemplate());
-  const [activeTemplateKeyInput, setActiveTemplateKeyInput] = useState<{ fieldId: string; index: number } | null>(null);
+  const [activeSuggestionInput, setActiveSuggestionInput] = useState<ActiveBlueprintSuggestionInput>(null);
+  const [suggestionPlacement, setSuggestionPlacement] = useState<"top" | "bottom">("bottom");
+  const [mountBlueprintSearch, setMountBlueprintSearch] = useState("");
+  const [newMountBlueprintName, setNewMountBlueprintName] = useState("");
+  const [activeChildNodeId, setActiveChildNodeId] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [saveMessage, setSaveMessage] = useState("");
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -125,6 +266,92 @@ export default function BlueprintEditor({ blueprintId }: Props) {
   const saveTimerRef = useRef<number | null>(null);
   const zoomSaveTimerRef = useRef<number | null>(null);
   const clipboardRef = useRef<BlueprintClipboard | null>(null);
+  const contextMenuPressRef = useRef<ContextMenuPressState | null>(null);
+  const inputManagerRef = useRef<InputManagerState>({ mode: "idle" });
+  const connectionHoverNodeIdRef = useRef<string | null>(null);
+  const edgeInsertCandidateRef = useRef<EdgeInsertCandidate>(null);
+  const nodeDrag = inputManager.mode === "draggingNode" ? inputManager : null;
+  const panState = inputManager.mode === "panning" ? inputManager : null;
+  const connectionDrag = inputManager.mode === "connecting" ? inputManager : null;
+  const marqueeSelect = inputManager.mode === "marqueeSelecting" ? inputManager : null;
+
+  useEffect(() => {
+    inputManagerRef.current = inputManager;
+  }, [inputManager]);
+
+  useEffect(() => {
+    connectionHoverNodeIdRef.current = connectionHoverNodeId;
+  }, [connectionHoverNodeId]);
+
+  const updateEdgeInsertCandidate = (candidate: EdgeInsertCandidate) => {
+    edgeInsertCandidateRef.current = candidate;
+    setEdgeInsertCandidate(candidate);
+  };
+
+  const getConnectionTargetAtPoint = (clientX: number, clientY: number, fromNodeId: string) => {
+    const elements = document.elementsFromPoint(clientX, clientY);
+    for (const element of elements) {
+      const nodeElement = element.closest?.<HTMLElement>("[data-blueprint-node-id]");
+      const nodeId = nodeElement?.dataset.blueprintNodeId;
+      if (nodeId && nodeId !== fromNodeId) return nodeId;
+    }
+    return null;
+  };
+
+  const clearConnectionDrag = () => {
+    inputManagerRef.current = { mode: "idle" };
+    setInputManager({ mode: "idle" });
+    connectionHoverNodeIdRef.current = null;
+    setConnectionHoverNodeId(null);
+  };
+
+  const openContextMenuAt = (press: ContextMenuPressState) => {
+    setIsCreateMenuOpen(false);
+    const menuPosition = getContextMenuPosition(press.clientX, press.clientY);
+    setContextMenu({ ...menuPosition, canvasX: press.canvasX, canvasY: press.canvasY });
+  };
+
+  const finishConnectionDrag = (clientX?: number, clientY?: number, explicitTargetId?: string | null) => {
+    const current = inputManagerRef.current;
+    if (current.mode !== "connecting") {
+      clearConnectionDrag();
+      return;
+    }
+    const targetNodeId = explicitTargetId
+      ?? (clientX !== undefined && clientY !== undefined ? getConnectionTargetAtPoint(clientX, clientY, current.from) : null)
+      ?? connectionHoverNodeIdRef.current;
+    if (targetNodeId && targetNodeId !== current.from) {
+      addEdge(blueprintId, current.from, targetNodeId);
+      setPendingConnectionCreate(null);
+      clearConnectionDrag();
+      return;
+    }
+    if (blueprint && canvasRef.current) {
+      const point = clientX !== undefined && clientY !== undefined
+        ? clientToCanvas(clientX, clientY, canvasRef.current, blueprint)
+        : { x: current.x, y: current.y };
+      setPendingConnectionCreate({ fromNodeId: current.from, canvasX: point.x, canvasY: point.y });
+      const screenPoint = clientX !== undefined && clientY !== undefined
+        ? { x: clientX, y: clientY }
+        : {
+            x: point.x * blueprint.viewport.zoom + blueprint.viewport.x + canvasRef.current.getBoundingClientRect().left,
+            y: point.y * blueprint.viewport.zoom + blueprint.viewport.y + canvasRef.current.getBoundingClientRect().top,
+          };
+      setCreateMenuPosition(getFloatingPosition(
+        { x: screenPoint.x, y: screenPoint.y },
+        {
+          width: CREATE_MENU_WIDTH,
+          height: CREATE_MENU_HEIGHT,
+          padding: FLOATING_EDGE_PADDING,
+          preferVertical: "bottom",
+          preferHorizontal: "right",
+        }
+      ));
+      setContextMenu(null);
+      setIsCreateMenuOpen(true);
+    }
+    clearConnectionDrag();
+  };
 
   useEffect(() => {
     if (!blueprint) void loadBlueprints();
@@ -135,7 +362,9 @@ export default function BlueprintEditor({ blueprintId }: Props) {
   }, [loadTemplates]);
 
   useEffect(() => {
-    if (focusedNodeId) setSelectedNodeIds([focusedNodeId]);
+    if (focusedNodeId) {
+      setSelectedNodeIds((current) => current.includes(focusedNodeId) ? current : [focusedNodeId]);
+    }
   }, [focusedNodeId]);
 
   useEffect(() => () => {
@@ -149,14 +378,35 @@ export default function BlueprintEditor({ blueprintId }: Props) {
       const target = event.target as Node | null;
       if (createMenuRef.current?.contains(target) || createButtonRef.current?.contains(target)) return;
       setIsCreateMenuOpen(false);
+      setPendingConnectionCreate(null);
     };
     window.addEventListener("pointerdown", handlePointerDown);
     return () => window.removeEventListener("pointerdown", handlePointerDown);
   }, [isCreateMenuOpen]);
 
   const selectedNode = blueprint?.nodes.find((node) => node.id === selectedNodeIds[selectedNodeIds.length - 1]) ?? null;
+  const activeChildNode = blueprint?.nodes.find((node) => node.id === activeChildNodeId) ?? null;
+  const activeChildBlueprint = activeChildNode?.typedData?.childBlueprint;
+  const inputGuideStatus = inputManager.mode === "panning"
+    ? t("blueprint.inputGuide.panning")
+    : inputManager.mode === "marqueeSelecting"
+      ? t("blueprint.inputGuide.selecting")
+      : inputManager.mode === "draggingNode"
+        ? t("blueprint.inputGuide.draggingNode")
+        : inputManager.mode === "connecting"
+          ? t("blueprint.inputGuide.connecting")
+          : t("blueprint.inputGuide.ready");
   const paletteItems = useMemo<BlueprintPaletteItem[]>(() => [
-    { id: "story-base", type: "base", kind: "story", label: t("blueprint.addStory") },
+    ...BUILTIN_PRESETS.map((preset) => ({
+      id: `preset-${preset.nodeType}`,
+      type: "preset" as const,
+      kind: "custom" as const,
+      presetType: preset.presetType,
+      layer: preset.layer,
+      nodeType: preset.nodeType,
+      label: preset.label,
+      summary: preset.summary,
+    })),
     { id: "character-base", type: "base", kind: "character", label: t("blueprint.addCharacter") },
     { id: "custom-base", type: "base", kind: "custom", label: t("blueprint.customNode") },
     ...templates.map((template) => ({
@@ -225,6 +475,134 @@ export default function BlueprintEditor({ blueprintId }: Props) {
     };
   }, [blueprint, minimapDrag]);
 
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !blueprint) return;
+
+    const handleWheel = (event: WheelEvent) => {
+      if (!canvasRef.current) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const rect = canvasRef.current.getBoundingClientRect();
+      const mouseX = event.clientX - rect.left;
+      const mouseY = event.clientY - rect.top;
+      const currentZoom = blueprint.viewport.zoom;
+      const nextZoom = clamp(currentZoom * Math.exp(-event.deltaY * 0.0012), MIN_ZOOM, MAX_ZOOM);
+      if (Math.abs(nextZoom - currentZoom) < 0.001) return;
+
+      const canvasX = (mouseX - blueprint.viewport.x) / currentZoom;
+      const canvasY = (mouseY - blueprint.viewport.y) / currentZoom;
+      updateViewport({
+        zoom: nextZoom,
+        x: mouseX - canvasX * nextZoom,
+        y: mouseY - canvasY * nextZoom,
+      });
+      scheduleViewportSave();
+    };
+
+    canvas.addEventListener("wheel", handleWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", handleWheel);
+  }, [blueprint?.id, blueprint?.viewport.x, blueprint?.viewport.y, blueprint?.viewport.zoom]);
+
+  useEffect(() => {
+    if (!connectionDrag || !blueprint || !canvasRef.current) return;
+
+    const cancelConnectionDrag = (event?: Event) => {
+      event?.preventDefault();
+      event?.stopPropagation();
+      clearConnectionDrag();
+    };
+
+    const handleConnectionPointerDown = (event: PointerEvent) => {
+      if (event.button === 2) cancelConnectionDrag(event);
+    };
+
+    const handleConnectionPointerMove = (event: PointerEvent) => {
+      const canvas = canvasRef.current;
+      const latestBlueprint = useBlueprintStore.getState().blueprints.find((item) => item.id === blueprintId) ?? blueprint;
+      if (!canvas || !latestBlueprint) return;
+      const point = clientToCanvas(event.clientX, event.clientY, canvas, latestBlueprint);
+      setInputManager((current) => {
+        if (current.mode !== "connecting") return current;
+        const targetNodeId = getConnectionTargetAtPoint(event.clientX, event.clientY, current.from);
+        connectionHoverNodeIdRef.current = targetNodeId;
+        setConnectionHoverNodeId(targetNodeId);
+        return { ...current, x: point.x, y: point.y };
+      });
+    };
+
+    const handleConnectionPointerUp = (event: PointerEvent) => {
+      if (event.button === 2) {
+        cancelConnectionDrag(event);
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      finishConnectionDrag(event.clientX, event.clientY);
+    };
+
+    const handleConnectionContextMenu = (event: MouseEvent) => {
+      cancelConnectionDrag(event);
+    };
+
+    window.addEventListener("pointerdown", handleConnectionPointerDown);
+    window.addEventListener("pointermove", handleConnectionPointerMove);
+    window.addEventListener("pointerup", handleConnectionPointerUp);
+    window.addEventListener("contextmenu", handleConnectionContextMenu);
+    return () => {
+      window.removeEventListener("pointerdown", handleConnectionPointerDown);
+      window.removeEventListener("pointermove", handleConnectionPointerMove);
+      window.removeEventListener("pointerup", handleConnectionPointerUp);
+      window.removeEventListener("contextmenu", handleConnectionContextMenu);
+    };
+  }, [addEdge, blueprint, blueprintId, connectionDrag?.from]);
+
+  useEffect(() => {
+    if (!blueprint || !canvasRef.current || inputManager.mode === "connecting") return;
+
+    const handleInputPointerMove = (event: PointerEvent) => {
+      if (!canvasRef.current) return;
+      if (inputManager.mode === "panning") {
+        if (!isPrimaryMouseDown(event)) {
+          handlePointerUp();
+          return;
+        }
+        updateViewport({
+          x: inputManager.originX + event.clientX - inputManager.startX,
+          y: inputManager.originY + event.clientY - inputManager.startY,
+        });
+        return;
+      }
+      if (inputManager.mode === "draggingNode") {
+      const point = clientToCanvas(event.clientX, event.clientY, canvasRef.current, blueprint);
+      if (!inputManager.isDragging && Math.hypot(event.clientX - inputManager.startX, event.clientY - inputManager.startY) < 4) return;
+      if (!inputManager.isDragging) {
+        pushUndo(blueprintId);
+        setInputManager({ ...inputManager, isDragging: true });
+      }
+        updateNode(blueprintId, inputManager.nodeId, {
+          x: point.x - inputManager.offsetX,
+          y: point.y - inputManager.offsetY,
+        }, { skipUndo: true, skipPersist: true });
+        return;
+      }
+      if (inputManager.mode === "marqueeSelecting") {
+        setInputManager({ ...inputManager, currentClientX: event.clientX, currentClientY: event.clientY });
+      }
+    };
+
+    const handleInputPointerUp = () => {
+      if (inputManager.mode !== "idle") handlePointerUp();
+    };
+
+    window.addEventListener("pointermove", handleInputPointerMove);
+    window.addEventListener("pointerup", handleInputPointerUp);
+    return () => {
+      window.removeEventListener("pointermove", handleInputPointerMove);
+      window.removeEventListener("pointerup", handleInputPointerUp);
+    };
+  }, [blueprint, blueprintId, inputManager, updateNode]);
+
   const nodeById = useMemo(() => {
     const map = new Map<string, BlueprintNode>();
     blueprint?.nodes.forEach((node) => map.set(node.id, node));
@@ -236,8 +614,7 @@ export default function BlueprintEditor({ blueprintId }: Props) {
   };
 
   const updateViewport = (patch: Partial<BlueprintDocument["viewport"]>) => {
-    if (!blueprint) return;
-    commitBlueprint({ ...blueprint, viewport: { ...blueprint.viewport, ...patch } }, { skipUndo: true, skipPersist: true });
+    updateBlueprintViewport(blueprintId, patch);
   };
 
   const scheduleViewportSave = () => {
@@ -324,15 +701,173 @@ export default function BlueprintEditor({ blueprintId }: Props) {
     };
   };
 
-  const placePaletteItem = (item: BlueprintPaletteItem, x: number, y: number) => {
-    if (item.type === "template") {
-      createCustomNodeFromTemplate(blueprintId, item.templateId, x, y);
-    } else {
-      addNode(blueprintId, item.kind, x, y);
+  const createChildBlueprint = (name: string): BlueprintDocument => ({
+    id: newLocalId("child-blueprint"),
+    name,
+    updatedAt: new Date().toISOString(),
+    viewport: { x: 0, y: 0, zoom: 1 },
+    nodes: [
+      {
+        id: newLocalId("child-start"),
+        kind: "custom",
+        layer: "control",
+        nodeType: "custom",
+        x: 80,
+        y: 140,
+        title: "开始",
+        linkedChapters: [],
+        templateName: "开始",
+        inputCount: 1,
+        customFields: [],
+        typedData: { summary: "子蓝图开始" },
+      },
+      {
+        id: newLocalId("child-end"),
+        kind: "custom",
+        layer: "control",
+        nodeType: "custom",
+        x: 460,
+        y: 140,
+        title: "结束",
+        linkedChapters: [],
+        templateName: "结束",
+        inputCount: 1,
+        customFields: [],
+        typedData: { summary: "子蓝图结束" },
+      },
+    ],
+    edges: [],
+  });
+
+  const createDefaultLogicTree = (nodeType: BlueprintTypedNodeType): BlueprintLogicTree => {
+    if (nodeType === "compare") {
+      return { id: newLocalId("logic-compare"), type: "compare", left: "", operator: "equals", right: "" };
     }
+    if (nodeType === "and" || nodeType === "or") {
+      return {
+        id: newLocalId("logic-group"),
+        type: "group",
+        operator: nodeType,
+        children: [
+          { id: newLocalId("logic-condition"), type: "condition", text: "" },
+          { id: newLocalId("logic-condition"), type: "condition", text: "" },
+        ],
+      };
+    }
+    return {
+      id: newLocalId("logic-group"),
+      type: "group",
+      operator: "and",
+      children: [{ id: newLocalId("logic-condition"), type: "condition", text: "" }],
+    };
+  };
+
+  const createTypedDataForPreset = (layer: BlueprintNodeLayer, nodeType: BlueprintTypedNodeType, summary: string): BlueprintTypedData => {
+    if (layer === "logic") {
+      return { summary, childBlueprint: createChildBlueprint("逻辑蓝图"), logicTree: createDefaultLogicTree(nodeType), result: "", therefore: "" };
+    }
+    if (nodeType === "hook") return { summary, curiosity: "", relatedCharacters: [] };
+    if (nodeType === "linearPlot" || nodeType === "nonlinearPlot") return { summary, timelineItems: [{ id: newLocalId("timeline"), time: "", event: "" }], relatedCharacters: [] };
+    if (layer === "story" || layer === "narrative") return { summary, relatedCharacters: [] };
+    if (nodeType === "chapter") return { summary, chapterTitle: "", mountLinks: [] };
+    if (nodeType === "chapterGroup" || nodeType === "volume" || nodeType === "act") return { summary, parentStructureId: "" };
+    if (nodeType === "mount") return { summary, mountKind: "", childBlueprint: createChildBlueprint("挂载器") };
+    if (nodeType === "loop") return { summary, loopSteps: ["", ""], relatedCharacters: [] };
+    if (nodeType === "conflict") return { summary, conflictPoint: "", protagonists: [""], antagonists: [""], relatedCharacters: [] };
+    if (nodeType === "foreshadow") return { summary, setup: "", payoff: "" };
+    if (nodeType === "reveal") return { summary, revealContent: "" };
+    if (nodeType === "twist") return { summary, twistBefore: "", twistAfter: "" };
+    return { summary };
+  };
+
+  const createPresetNode = (item: Extract<BlueprintPaletteItem, { type: "preset" }>, x: number, y: number): BlueprintNode => {
+    const baseField = (key: string, value = "") => ({
+      id: newLocalId("field"),
+      key,
+      value,
+      values: [value],
+      inputMode: "fixed" as BlueprintFieldInputMode,
+      bindingKey: "custom" as BlueprintFieldBindingKey,
+      showInCard: true,
+    });
+    const node: BlueprintNode = {
+      id: newLocalId("node"),
+      kind: "custom",
+      layer: item.layer,
+      nodeType: item.nodeType,
+      typedData: createTypedDataForPreset(item.layer, item.nodeType, item.summary),
+      presetType: item.presetType,
+      x,
+      y,
+      title: item.label,
+      linkedChapters: [],
+      templateName: item.label,
+      inputCount: 1,
+      customFields: [],
+    };
+
+    if (item.nodeType === "chapter") {
+      return {
+        ...node,
+        customFields: [baseField("所属章节或标题"), baseField("梗概", item.summary)],
+      };
+    }
+    if (item.nodeType === "mount") {
+      return {
+        ...node,
+        customFields: [baseField("内容"), baseField("备注")],
+      };
+    }
+    if (item.nodeType === "loop") {
+      return {
+        ...node,
+        customFields: [baseField("循环名称"), baseField("循环模式"), baseField("循环说明", item.summary)],
+      };
+    }
+    if (item.layer === "logic") {
+      return {
+        ...node,
+        logicBlock: {
+          conditions: [
+            { id: newLocalId("logic-condition"), value: "", operator: "and" },
+            { id: newLocalId("logic-condition"), value: "", operator: "and" },
+          ],
+          result: "",
+          therefore: "",
+        },
+      };
+    }
+    return {
+      ...node,
+      customFields: [baseField("梗概", item.summary)],
+    };
+  };
+
+  const placePaletteItem = (item: BlueprintPaletteItem, x: number, y: number) => {
+    const position = findAvailableNodePosition(x, y);
+    let createdNode: BlueprintNode | null = null;
+    if (item.type === "template") {
+      createdNode = createCustomNodeFromTemplate(blueprintId, item.templateId, position.x, position.y);
+    } else if (item.type === "preset") {
+      if (!blueprint) return;
+      const node = createPresetNode(item, position.x, position.y);
+      commitBlueprint({ ...blueprint, nodes: [...blueprint.nodes, node] });
+      createdNode = node;
+      setSelectedNodeIds([node.id]);
+      focusNode(blueprintId, node.id);
+    } else {
+      createdNode = addNode(blueprintId, item.kind, position.x, position.y);
+    }
+    if (pendingConnectionCreate && createdNode) {
+      addEdge(blueprintId, pendingConnectionCreate.fromNodeId, createdNode.id);
+      setSelectedNodeIds([createdNode.id]);
+      focusNode(blueprintId, createdNode.id);
+    }
+    setPendingConnectionCreate(null);
     setSelectedEdgeId(null);
     setContextMenu(null);
     setIsCreateMenuOpen(false);
+    setCreateSearch("");
   };
 
   const getViewportCenterPoint = () => {
@@ -427,26 +962,58 @@ export default function BlueprintEditor({ blueprintId }: Props) {
   });
 
   const handleCanvasPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (!blueprint || (event.target !== event.currentTarget && !(event.target as HTMLElement).classList.contains("blueprint-world"))) return;
+    if (!blueprint || !canvasRef.current) return;
+    if (event.button === 2) {
+      event.preventDefault();
+      setPendingConnectionCreate(null);
+      const point = clientToCanvas(event.clientX, event.clientY, canvasRef.current, blueprint);
+      contextMenuPressRef.current = {
+        startedAt: Date.now(),
+        clientX: event.clientX,
+        clientY: event.clientY,
+        canvasX: point.x,
+        canvasY: point.y,
+      };
+      setContextMenu(null);
+      setIsCreateMenuOpen(false);
+      return;
+    }
+    if (!isBlueprintBlankTarget(event.target, event.currentTarget)) return;
+    if (event.button !== 0) return;
     event.preventDefault();
     setContextMenu(null);
     setIsCreateMenuOpen(false);
+    setPendingConnectionCreate(null);
+    if (event.shiftKey) {
+      setSelectedEdgeId(null);
+      setInputManager({
+        mode: "marqueeSelecting",
+        startClientX: event.clientX,
+        startClientY: event.clientY,
+        currentClientX: event.clientX,
+        currentClientY: event.clientY,
+      });
+      return;
+    }
     setSelectedNodeIds([]);
     setSelectedEdgeId(null);
     focusNode(blueprintId, null);
-    if (event.button === 0 || event.button === 1) {
-      setPanState({
-        startX: event.clientX,
-        startY: event.clientY,
-        originX: blueprint.viewport.x,
-        originY: blueprint.viewport.y,
-      });
-    }
+    setInputManager({
+      mode: "panning",
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: blueprint.viewport.x,
+      originY: blueprint.viewport.y,
+    });
   };
 
   const handleCanvasPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!blueprint || !canvasRef.current) return;
     if (panState) {
+      if (!isPrimaryMouseDown(event)) {
+        handlePointerUp();
+        return;
+      }
       updateViewport({
         x: panState.originX + event.clientX - panState.startX,
         y: panState.originY + event.clientY - panState.startY,
@@ -455,37 +1022,26 @@ export default function BlueprintEditor({ blueprintId }: Props) {
     }
     if (nodeDrag) {
       const point = screenToCanvas(event, canvasRef.current, blueprint);
+      if (!nodeDrag.isDragging && Math.hypot(event.clientX - nodeDrag.startX, event.clientY - nodeDrag.startY) < 4) return;
+      if (!nodeDrag.isDragging) {
+        pushUndo(blueprintId);
+        setInputManager({ ...nodeDrag, isDragging: true });
+      }
       updateNode(blueprintId, nodeDrag.nodeId, {
         x: point.x - nodeDrag.offsetX,
         y: point.y - nodeDrag.offsetY,
       }, { skipUndo: true, skipPersist: true });
+      updateEdgeInsertCandidate(findEdgeInsertCandidate(nodeDrag.nodeId, point.x - nodeDrag.offsetX + NODE_WIDTH / 2, point.y - nodeDrag.offsetY + NODE_HEIGHT / 2));
       return;
     }
     if (connectionDrag) {
       const point = screenToCanvas(event, canvasRef.current, blueprint);
-      setConnectionDrag({ ...connectionDrag, x: point.x, y: point.y });
+      setInputManager({ ...connectionDrag, x: point.x, y: point.y });
+      return;
     }
-  };
-
-  const handleCanvasWheel = (event: React.WheelEvent<HTMLDivElement>) => {
-    if (!blueprint || !canvasRef.current) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const rect = canvasRef.current.getBoundingClientRect();
-    const mouseX = event.clientX - rect.left;
-    const mouseY = event.clientY - rect.top;
-    const currentZoom = blueprint.viewport.zoom;
-    const nextZoom = clamp(currentZoom * Math.exp(-event.deltaY * 0.0012), MIN_ZOOM, MAX_ZOOM);
-    if (Math.abs(nextZoom - currentZoom) < 0.001) return;
-
-    const canvasX = (mouseX - blueprint.viewport.x) / currentZoom;
-    const canvasY = (mouseY - blueprint.viewport.y) / currentZoom;
-    updateViewport({
-      zoom: nextZoom,
-      x: mouseX - canvasX * nextZoom,
-      y: mouseY - canvasY * nextZoom,
-    });
-    scheduleViewportSave();
+    if (marqueeSelect) {
+      setInputManager({ ...marqueeSelect, currentClientX: event.clientX, currentClientY: event.clientY });
+    }
   };
 
   const handleNodePointerDown = (event: React.PointerEvent, node: BlueprintNode) => {
@@ -493,36 +1049,59 @@ export default function BlueprintEditor({ blueprintId }: Props) {
     event.preventDefault();
     event.stopPropagation();
     setContextMenu(null);
-    pushUndo(blueprintId);
+    setPendingConnectionCreate(null);
+    updateEdgeInsertCandidate(null);
     const point = screenToCanvas(event, canvasRef.current, blueprint);
-    setNodeDrag({ nodeId: node.id, offsetX: point.x - node.x, offsetY: point.y - node.y });
     setSelectedEdgeId(null);
-    setSelectedNodeIds((current) => {
-      if (event.shiftKey) {
-        return current.includes(node.id) ? current.filter((id) => id !== node.id) : [...current, node.id];
-      }
-      return [node.id];
+    if (event.shiftKey) {
+      setInputManager({ mode: "idle" });
+      setSelectedNodeIds((current) => current.includes(node.id) ? current.filter((id) => id !== node.id) : [...current, node.id]);
+      focusNode(blueprintId, node.id);
+      return;
+    }
+    setInputManager({
+      mode: "draggingNode",
+      nodeId: node.id,
+      offsetX: point.x - node.x,
+      offsetY: point.y - node.y,
+      startX: event.clientX,
+      startY: event.clientY,
+      isDragging: false,
     });
+    setSelectedNodeIds([node.id]);
     focusNode(blueprintId, node.id);
   };
 
   const handleConnectionStart = (event: React.PointerEvent, nodeId: string) => {
-    if (!blueprint || !canvasRef.current) return;
+    if (!blueprint || !canvasRef.current || event.button !== 0) return;
     event.preventDefault();
     event.stopPropagation();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
     const point = screenToCanvas(event, canvasRef.current, blueprint);
-    setConnectionDrag({ from: nodeId, x: point.x, y: point.y });
+    const nextState: ConnectionDragState = { mode: "connecting", from: nodeId, x: point.x, y: point.y };
+    setPendingConnectionCreate(null);
+    inputManagerRef.current = nextState;
+    setInputManager(nextState);
+    connectionHoverNodeIdRef.current = null;
     setConnectionHoverNodeId(null);
   };
 
   const handleConnectionEnd = (event: React.PointerEvent, nodeId: string) => {
     event.preventDefault();
     event.stopPropagation();
-    if (connectionDrag && connectionDrag.from !== nodeId) {
-      addEdge(blueprintId, connectionDrag.from, nodeId);
-    }
-    setConnectionDrag(null);
-    setConnectionHoverNodeId(null);
+    finishConnectionDrag(event.clientX, event.clientY, nodeId);
+  };
+
+  const handleConnectionPointerMove = (event: React.PointerEvent) => {
+    const current = inputManagerRef.current;
+    if (!blueprint || !canvasRef.current || current.mode !== "connecting") return;
+    event.preventDefault();
+    event.stopPropagation();
+    const point = screenToCanvas(event, canvasRef.current, blueprint);
+    const targetNodeId = getConnectionTargetAtPoint(event.clientX, event.clientY, current.from);
+    connectionHoverNodeIdRef.current = targetNodeId;
+    setConnectionHoverNodeId(targetNodeId);
+    setInputManager((current) => current.mode === "connecting" ? { ...current, x: point.x, y: point.y } : current);
   };
 
   const handleNodePointerEnter = (nodeId: string) => {
@@ -534,17 +1113,88 @@ export default function BlueprintEditor({ blueprintId }: Props) {
     setConnectionHoverNodeId((current) => (current === nodeId ? null : current));
   };
 
-  const handlePointerUp = () => {
-    if (connectionDrag && connectionHoverNodeId && connectionDrag.from !== connectionHoverNodeId) {
-      addEdge(blueprintId, connectionDrag.from, connectionHoverNodeId);
+  const getMarqueeCanvasRect = (state: MarqueeSelectState) => {
+    if (!blueprint || !canvasRef.current) return null;
+    const start = clientToCanvas(state.startClientX, state.startClientY, canvasRef.current, blueprint);
+    const current = clientToCanvas(state.currentClientX, state.currentClientY, canvasRef.current, blueprint);
+    return {
+      left: Math.min(start.x, current.x),
+      top: Math.min(start.y, current.y),
+      right: Math.max(start.x, current.x),
+      bottom: Math.max(start.y, current.y),
+    };
+  };
+
+  const getMarqueeScreenRect = (state: MarqueeSelectState) => {
+    if (!canvasRef.current) return null;
+    const rect = canvasRef.current.getBoundingClientRect();
+    const left = Math.min(state.startClientX, state.currentClientX) - rect.left;
+    const top = Math.min(state.startClientY, state.currentClientY) - rect.top;
+    return {
+      left,
+      top,
+      width: Math.abs(state.currentClientX - state.startClientX),
+      height: Math.abs(state.currentClientY - state.startClientY),
+    };
+  };
+
+  const selectNodesInMarquee = (state: MarqueeSelectState) => {
+    if (!blueprint) return;
+    const rect = getMarqueeCanvasRect(state);
+    if (!rect) return;
+    const ids = blueprint.nodes
+      .filter((node) => {
+        const nodeLeft = node.x;
+        const nodeTop = node.y;
+        const nodeRight = node.x + NODE_WIDTH;
+        const nodeBottom = node.y + NODE_HEIGHT;
+        return nodeRight >= rect.left && nodeLeft <= rect.right && nodeBottom >= rect.top && nodeTop <= rect.bottom;
+      })
+      .map((node) => node.id);
+    setSelectedNodeIds(ids);
+    setSelectedEdgeId(null);
+    focusNode(blueprintId, ids[ids.length - 1] ?? null);
+  };
+
+  const handlePointerUp = (event?: React.PointerEvent<HTMLDivElement>) => {
+    if (event?.button === 2) {
+      const contextPress = contextMenuPressRef.current;
+      contextMenuPressRef.current = null;
+      if (contextPress && inputManagerRef.current.mode === "idle" && Date.now() - contextPress.startedAt <= CONTEXT_MENU_SHORT_PRESS_MS) {
+        event.preventDefault();
+        event.stopPropagation();
+        openContextMenuAt(contextPress);
+      }
+      return;
+    }
+    contextMenuPressRef.current = null;
+    if (marqueeSelect) {
+      selectNodesInMarquee(marqueeSelect);
+    }
+    const currentInput = inputManagerRef.current;
+    if (currentInput.mode === "connecting") {
+      finishConnectionDrag(event?.clientX, event?.clientY, connectionHoverNodeIdRef.current);
+      return;
+    }
+    const insertCandidate = edgeInsertCandidateRef.current;
+    if (nodeDrag && nodeDrag.isDragging && insertCandidate) {
+      const position = findAvailableNodePosition(insertCandidate.x, insertCandidate.y, nodeDrag.nodeId);
+      splitEdgeWithNode(insertCandidate.edgeId, nodeDrag.nodeId, position.x, position.y);
+      updateEdgeInsertCandidate(null);
+      inputManagerRef.current = { mode: "idle" };
+      setInputManager({ mode: "idle" });
+      connectionHoverNodeIdRef.current = null;
+      setConnectionHoverNodeId(null);
+      return;
     }
     if (nodeDrag || panState) {
       const latestBlueprint = useBlueprintStore.getState().blueprints.find((item) => item.id === blueprintId);
       if (latestBlueprint) void saveBlueprint(latestBlueprint);
     }
-    setNodeDrag(null);
-    setPanState(null);
-    setConnectionDrag(null);
+    updateEdgeInsertCandidate(null);
+    inputManagerRef.current = { mode: "idle" };
+    setInputManager({ mode: "idle" });
+    connectionHoverNodeIdRef.current = null;
     setConnectionHoverNodeId(null);
   };
 
@@ -630,6 +1280,205 @@ export default function BlueprintEditor({ blueprintId }: Props) {
         return { ...field, values: nextValues, value: nextValues[0] ?? "" };
       }),
     });
+  };
+
+  const updateLogicBlock = (patch: Partial<NonNullable<BlueprintNode["logicBlock"]>>) => {
+    if (!selectedNode) return;
+    updateSelected({
+      logicBlock: {
+        conditions: selectedNode.logicBlock?.conditions?.length
+          ? selectedNode.logicBlock.conditions
+          : [{ id: newLocalId("logic-condition"), value: "", operator: "and" }],
+        result: selectedNode.logicBlock?.result ?? "",
+        therefore: selectedNode.logicBlock?.therefore ?? "",
+        ...patch,
+      },
+    });
+  };
+
+  const updateLogicCondition = (conditionId: string, patch: Partial<NonNullable<BlueprintNode["logicBlock"]>["conditions"][number]>) => {
+    const conditions = selectedNode?.logicBlock?.conditions?.length
+      ? selectedNode.logicBlock.conditions
+      : [{ id: newLocalId("logic-condition"), value: "", operator: "and" as const }];
+    updateLogicBlock({
+      conditions: conditions.map((condition) => condition.id === conditionId ? { ...condition, ...patch } : condition),
+    });
+  };
+
+  const addLogicCondition = () => {
+    const conditions = selectedNode?.logicBlock?.conditions?.length ? selectedNode.logicBlock.conditions : [];
+    updateLogicBlock({
+      conditions: [...conditions, { id: newLocalId("logic-condition"), value: "", operator: "and" }],
+    });
+  };
+
+  const removeLogicCondition = (conditionId: string) => {
+    const conditions = selectedNode?.logicBlock?.conditions ?? [];
+    updateLogicBlock({
+      conditions: conditions.length <= 1
+        ? [{ id: newLocalId("logic-condition"), value: "", operator: "and" }]
+        : conditions.filter((condition) => condition.id !== conditionId),
+    });
+  };
+
+  const updateTypedData = (patch: BlueprintTypedData) => {
+    if (!selectedNode) return;
+    updateSelected({ typedData: { ...(selectedNode.typedData ?? {}), ...patch } });
+  };
+
+  const getMountLinks = () => (
+    Array.isArray(selectedNode?.typedData?.mountLinks) ? selectedNode.typedData.mountLinks as BlueprintMountLink[] : []
+  );
+
+  const updateMountLinks = (links: BlueprintMountLink[]) => updateTypedData({ mountLinks: links });
+
+  const addMountLink = (target: BlueprintDocument) => {
+    const links = getMountLinks();
+    if (target.id === blueprintId || links.some((link) => link.blueprintId === target.id)) return;
+    updateMountLinks([
+      ...links,
+      {
+        id: newLocalId("mount-link"),
+        label: target.name,
+        blueprintId: target.id,
+        blueprintName: target.name,
+        kind: "mount",
+      },
+    ]);
+    setMountBlueprintSearch("");
+  };
+
+  const createAndMountBlueprint = async () => {
+    const name = newMountBlueprintName.trim();
+    if (!name) return;
+    const created = await createBlueprint(name);
+    updateMountLinks([
+      ...getMountLinks(),
+      {
+        id: newLocalId("mount-link"),
+        label: created.name,
+        blueprintId: created.id,
+        blueprintName: created.name,
+        kind: "mount",
+      },
+    ]);
+    setNewMountBlueprintName("");
+    openBlueprintTab(created.id, created.name);
+  };
+
+  const getStringList = (key: keyof BlueprintTypedData) => (
+    Array.isArray(selectedNode?.typedData?.[key]) ? selectedNode.typedData?.[key] as string[] : [""]
+  );
+
+  const updateStringList = (key: keyof BlueprintTypedData, values: string[]) => updateTypedData({ [key]: values.length ? values : [""] });
+
+  const renderStringListEditor = (key: keyof BlueprintTypedData, label: string, placeholder = label) => {
+    const values = getStringList(key);
+    return (
+      <div className="blueprint-key-block">
+        <div className="blueprint-key-block-header">
+          <span>{label}</span>
+          <button type="button" onClick={() => updateStringList(key, [...values, ""])}>
+            <Plus size={13} /> {t("blueprint.add")}
+          </button>
+        </div>
+        {values.map((value, index) => (
+          <div key={index} className="blueprint-key-list-row">
+            <span>{index + 1}</span>
+            {renderSuggestionInput(
+              `typed-list-${String(key)}-${index}`,
+              "reference",
+              value,
+              (nextValue) => updateStringList(key, values.map((item, itemIndex) => itemIndex === index ? nextValue : item)),
+              placeholder
+            )}
+            <button type="button" disabled={index === 0} onClick={() => {
+              const next = [...values];
+              [next[index - 1], next[index]] = [next[index], next[index - 1]];
+              updateStringList(key, next);
+            }}>↑</button>
+            <button type="button" disabled={index === values.length - 1} onClick={() => {
+              const next = [...values];
+              [next[index + 1], next[index]] = [next[index], next[index + 1]];
+              updateStringList(key, next);
+            }}>↓</button>
+            <button type="button" onClick={() => updateStringList(key, values.length <= 1 ? [""] : values.filter((_, itemIndex) => itemIndex !== index))}>
+              <Trash2 size={13} />
+            </button>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  const getTimelineItems = () => (
+    Array.isArray(selectedNode?.typedData?.timelineItems)
+      ? selectedNode.typedData.timelineItems
+      : [{ id: newLocalId("timeline"), time: "", event: "" }]
+  );
+
+  const updateTimelineItems = (timelineItems: NonNullable<BlueprintTypedData["timelineItems"]>) => updateTypedData({ timelineItems });
+
+  const renderTimelineEditor = () => {
+    const items = getTimelineItems();
+    return (
+      <div className="blueprint-key-block">
+        <div className="blueprint-key-block-header">
+          <span>时间线</span>
+          <button type="button" onClick={() => updateTimelineItems([...items, { id: newLocalId("timeline"), time: "", event: "" }])}>
+            <Plus size={13} /> {t("blueprint.add")}
+          </button>
+        </div>
+        {items.map((item, index) => (
+          <div key={item.id} className="blueprint-timeline-row">
+            <span>{index + 1}</span>
+            <input value={item.time} placeholder="时间" onChange={(event) => updateTimelineItems(items.map((entry) => entry.id === item.id ? { ...entry, time: event.target.value } : entry))} />
+            <input value={item.event} placeholder="事件" onChange={(event) => updateTimelineItems(items.map((entry) => entry.id === item.id ? { ...entry, event: event.target.value } : entry))} />
+            <button type="button" disabled={index === 0} onClick={() => {
+              const next = [...items];
+              [next[index - 1], next[index]] = [next[index], next[index - 1]];
+              updateTimelineItems(next);
+            }}>↑</button>
+            <button type="button" disabled={index === items.length - 1} onClick={() => {
+              const next = [...items];
+              [next[index + 1], next[index]] = [next[index], next[index + 1]];
+              updateTimelineItems(next);
+            }}>↓</button>
+            <button type="button" onClick={() => updateTimelineItems(items.length <= 1 ? [{ id: newLocalId("timeline"), time: "", event: "" }] : items.filter((entry) => entry.id !== item.id))}>
+              <Trash2 size={13} />
+            </button>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  const updateLogicTree = (logicTree: BlueprintLogicTree) => updateTypedData({ logicTree });
+
+  const updateLogicTreeNode = (tree: BlueprintLogicTree, targetId: string, updater: (node: BlueprintLogicTree) => BlueprintLogicTree): BlueprintLogicTree => {
+    if (tree.id === targetId) return updater(tree);
+    if (tree.type !== "group") return tree;
+    return { ...tree, children: tree.children.map((child) => updateLogicTreeNode(child, targetId, updater)) };
+  };
+
+  const addLogicTreeChild = (targetId: string, childType: "condition" | "group" | "compare") => {
+    const root = selectedNode?.typedData?.logicTree ?? createDefaultLogicTree(selectedNode?.nodeType ?? "because");
+    const nextChild: BlueprintLogicTree = childType === "group"
+      ? { id: newLocalId("logic-group"), type: "group", operator: "and", children: [{ id: newLocalId("logic-condition"), type: "condition", text: "" }] }
+      : childType === "compare"
+        ? { id: newLocalId("logic-compare"), type: "compare", left: "", operator: "equals", right: "" }
+        : { id: newLocalId("logic-condition"), type: "condition", text: "" };
+    updateLogicTree(updateLogicTreeNode(root, targetId, (node) => (
+      node.type === "group" ? { ...node, children: [...node.children, nextChild] } : node
+    )));
+  };
+
+  const removeLogicTreeNode = (tree: BlueprintLogicTree, targetId: string): BlueprintLogicTree => {
+    if (tree.type !== "group") return tree;
+    const children = tree.children
+      .filter((child) => child.id !== targetId)
+      .map((child) => removeLogicTreeNode(child, targetId));
+    return { ...tree, children: children.length ? children : [{ id: newLocalId("logic-condition"), type: "condition", text: "" }] };
   };
 
   const updateTemplateFieldInput = (fieldId: string, index: number, value: string) => {
@@ -831,21 +1680,160 @@ export default function BlueprintEditor({ blueprintId }: Props) {
   }
 
   const drawEdge = (from: BlueprintNode, toX: number, toY: number) => {
-    const x1 = from.x + NODE_WIDTH;
+    const x1 = from.x + NODE_WIDTH - PORT_ANCHOR_OFFSET;
     const y1 = from.y + NODE_HEIGHT / 2;
     const mid = Math.max(40, Math.abs(toX - x1) / 2);
     return `M ${x1} ${y1} C ${x1 + mid} ${y1}, ${toX - mid} ${toY}, ${toX} ${toY}`;
   };
 
+  const getEdgeControlPoints = (from: BlueprintNode, to: BlueprintNode) => {
+    const x1 = from.x + NODE_WIDTH - PORT_ANCHOR_OFFSET;
+    const y1 = from.y + NODE_HEIGHT / 2;
+    const x2 = to.x + PORT_ANCHOR_OFFSET;
+    const y2 = to.y + NODE_HEIGHT / 2;
+    const mid = Math.max(40, Math.abs(x2 - x1) / 2);
+    return {
+      p0: { x: x1, y: y1 },
+      p1: { x: x1 + mid, y: y1 },
+      p2: { x: x2 - mid, y: y2 },
+      p3: { x: x2, y: y2 },
+    };
+  };
+
+  const sampleCubic = (points: ReturnType<typeof getEdgeControlPoints>, tValue: number) => {
+    const inv = 1 - tValue;
+    const x = inv ** 3 * points.p0.x + 3 * inv ** 2 * tValue * points.p1.x + 3 * inv * tValue ** 2 * points.p2.x + tValue ** 3 * points.p3.x;
+    const y = inv ** 3 * points.p0.y + 3 * inv ** 2 * tValue * points.p1.y + 3 * inv * tValue ** 2 * points.p2.y + tValue ** 3 * points.p3.y;
+    return { x, y };
+  };
+
+  const findAvailableNodePosition = (x: number, y: number, excludeNodeId?: string | null) => {
+    if (!blueprint) return { x, y };
+    const stepX = NODE_WIDTH + NODE_COLLISION_GAP;
+    const stepY = NODE_HEIGHT + NODE_COLLISION_GAP;
+    const overlaps = (left: number, top: number) => blueprint.nodes.some((node) => {
+      if (node.id === excludeNodeId) return false;
+      return left < node.x + NODE_WIDTH + NODE_COLLISION_GAP &&
+        left + NODE_WIDTH + NODE_COLLISION_GAP > node.x &&
+        top < node.y + NODE_HEIGHT + NODE_COLLISION_GAP &&
+        top + NODE_HEIGHT + NODE_COLLISION_GAP > node.y;
+    });
+    for (let radius = 0; radius <= 6; radius += 1) {
+      for (let row = 0; row <= radius; row += 1) {
+        for (let col = 0; col <= radius; col += 1) {
+          const candidates = [
+            { x: x + col * stepX, y: y + row * stepY },
+            { x: x - col * stepX, y: y + row * stepY },
+          ];
+          for (const candidate of candidates) {
+            if (!overlaps(candidate.x, candidate.y)) return candidate;
+          }
+        }
+      }
+    }
+    return { x, y };
+  };
+
+  const findEdgeInsertCandidate = (nodeId: string, centerX: number, centerY: number): EdgeInsertCandidate => {
+    if (!blueprint) return null;
+    let best: EdgeInsertCandidate = null;
+    for (const edge of blueprint.edges) {
+      if (edge.from === nodeId || edge.to === nodeId) continue;
+      const from = nodeById.get(edge.from);
+      const to = nodeById.get(edge.to);
+      if (!from || !to) continue;
+      const points = getEdgeControlPoints(from, to);
+      for (let step = 1; step < EDGE_SAMPLE_STEPS; step += 1) {
+        const point = sampleCubic(points, step / EDGE_SAMPLE_STEPS);
+        const distance = Math.hypot(centerX - point.x, centerY - point.y);
+        if (distance <= EDGE_INSERT_THRESHOLD && (!best || distance < best.distance)) {
+          best = { edgeId: edge.id, x: point.x - NODE_WIDTH / 2, y: point.y - NODE_HEIGHT / 2, distance };
+        }
+      }
+    }
+    return best;
+  };
+
+  const splitEdgeWithNode = (edgeId: string, nodeId: string, x: number, y: number) => {
+    const latestBlueprint = useBlueprintStore.getState().blueprints.find((item) => item.id === blueprintId);
+    if (!latestBlueprint) return;
+    const edge = latestBlueprint.edges.find((item) => item.id === edgeId);
+    if (!edge || edge.from === nodeId || edge.to === nodeId) return;
+    const existing = new Set(latestBlueprint.edges.map((item) => `${item.from}->${item.to}`));
+    const nextEdges: BlueprintEdge[] = latestBlueprint.edges
+      .filter((item) => item.id !== edgeId)
+      .concat(
+        existing.has(`${edge.from}->${nodeId}`) ? [] : [{ id: newLocalId("edge"), from: edge.from, to: nodeId, role: edge.role }],
+        existing.has(`${nodeId}->${edge.to}`) ? [] : [{ id: newLocalId("edge"), from: nodeId, to: edge.to, role: edge.role }]
+      );
+    replaceBlueprint({
+      ...latestBlueprint,
+      nodes: latestBlueprint.nodes.map((node) => node.id === nodeId ? { ...node, x, y } : node),
+      edges: nextEdges,
+    });
+  };
+
   const getNodeSummary = (node: BlueprintNode) => {
+    const linkedSummary = (node.linkedChapters ?? []).filter(Boolean).slice(0, 2).join(" / ");
+    const withLinked = (summary: string) => (
+      [linkedSummary ? `${t("blueprint.linkedChapter")}: ${linkedSummary}` : "", summary].filter(Boolean).join(" · ") || t("blueprint.emptyNode")
+    );
+    const typedData = node.typedData ?? {};
+    if (node.nodeType === "chapter") {
+      const mounts = Array.isArray(typedData.mountLinks) ? typedData.mountLinks as BlueprintMountLink[] : [];
+      const mountSummary = mounts.length > 0
+        ? `挂载 ${mounts.length} 个蓝图：${mounts.map((link) => link.blueprintName || link.label).filter(Boolean).slice(0, 2).join(" / ")}`
+        : "";
+      return withLinked([typedData.summary ? String(typedData.summary) : "", mountSummary].filter(Boolean).join(" · "));
+    }
+    if (node.nodeType === "linearPlot" || node.nodeType === "nonlinearPlot") {
+      const timeline = Array.isArray(typedData.timelineItems) ? typedData.timelineItems.filter((item) => item.time || item.event).slice(0, 2).map((item) => `${item.time} ${item.event}`.trim()).join(" / ") : "";
+      const people = Array.isArray(typedData.relatedCharacters) ? typedData.relatedCharacters.filter(Boolean).slice(0, 2).join(" / ") : "";
+      return withLinked([typedData.summary ? `梗概 ${typedData.summary}` : "", timeline ? `时间线 ${timeline}` : "", people ? `关联人物 ${people}` : ""].filter(Boolean).join(" · "));
+    }
+    if (node.nodeType === "loop") {
+      const steps = Array.isArray(typedData.loopSteps) ? typedData.loopSteps.filter(Boolean).slice(0, 3).join(" → ") : "";
+      return withLinked([typedData.summary ? `梗概 ${typedData.summary}` : "", steps ? `循环 ${steps}` : ""].filter(Boolean).join(" · "));
+    }
+    if (node.nodeType === "conflict") {
+      const pros = Array.isArray(typedData.protagonists) ? typedData.protagonists.filter(Boolean).slice(0, 2).join(" / ") : "";
+      const ants = Array.isArray(typedData.antagonists) ? typedData.antagonists.filter(Boolean).slice(0, 2).join(" / ") : "";
+      return withLinked([typedData.conflictPoint ? `冲突点 ${typedData.conflictPoint}` : "", pros ? `正派 ${pros}` : "", ants ? `反派 ${ants}` : ""].filter(Boolean).join(" · ") || String(typedData.summary ?? ""));
+    }
+    if (node.nodeType === "foreshadow") return withLinked([typedData.setup ? `埋设 ${typedData.setup}` : "", typedData.payoff ? `回收 ${typedData.payoff}` : ""].filter(Boolean).join(" · ") || String(typedData.summary ?? ""));
+    if (node.nodeType === "reveal") return withLinked(String(typedData.revealContent ?? typedData.summary ?? ""));
+    if (node.nodeType === "twist") return withLinked([typedData.twistBefore, typedData.twistAfter].filter(Boolean).join(" → ") || String(typedData.summary ?? ""));
+    if (node.layer === "logic" && typedData.logicTree) {
+      return withLinked(`${String(typedData.result ?? "") || "所以…"}`);
+    }
+    if (typedData.summary) return withLinked(String(typedData.summary));
+    if (node.presetType === "logicBlock" && node.logicBlock) {
+      const because = node.logicBlock.conditions.map((condition) => condition.value).filter(Boolean).slice(0, 3).join(" / ");
+      const result = node.logicBlock.result ? `所以 ${node.logicBlock.result}` : "";
+      return withLinked([because ? `因为 ${because}` : "", result, node.logicBlock.therefore ? `因此 ${node.logicBlock.therefore}` : ""].filter(Boolean).join(" · "));
+    }
     if (node.kind === "story") {
       const firstEvent = node.storyEvents?.find((item) => item.content || item.foreshadowing);
-      return node.summary || firstEvent?.content || firstEvent?.foreshadowing || t("blueprint.emptyNode");
+      return withLinked(node.summary || firstEvent?.content || firstEvent?.foreshadowing || "");
+    }
+    if (node.kind === "character" && linkedSummary) {
+      const relationshipCount = node.relationships?.length ?? 0;
+      const eventCount = node.characterEvents?.length ?? 0;
+      return withLinked([node.characterName, node.identity, relationshipCount ? `${relationshipCount} ${t("blueprint.relationships")}` : "", eventCount ? `${eventCount} ${t("blueprint.characterStories")}` : ""].filter(Boolean).join(" / "));
     }
     if (node.kind === "character") {
       const relationshipCount = node.relationships?.length ?? 0;
       const eventCount = node.characterEvents?.length ?? 0;
       return [node.characterName, node.identity, relationshipCount ? `${relationshipCount} ${t("blueprint.relationships")}` : "", eventCount ? `${eventCount} ${t("blueprint.characterStories")}` : ""].filter(Boolean).join(" · ") || t("blueprint.emptyNode");
+    }
+    if (linkedSummary) {
+      const customSummary = (node.customFields ?? [])
+        .filter((field) => field.showInCard !== false)
+        .map((field) => (field.values?.length ? field.values : [field.value]).filter(Boolean).join(" / ") || field.key)
+        .filter(Boolean)
+        .slice(0, 3)
+        .join(" / ");
+      return withLinked(customSummary);
     }
     return (node.customFields ?? [])
       .filter((field) => field.showInCard !== false)
@@ -856,6 +1844,7 @@ export default function BlueprintEditor({ blueprintId }: Props) {
   };
 
   const getNodeLabel = (node: BlueprintNode) => {
+    if (node.presetType) return BUILTIN_PRESETS.find((preset) => preset.presetType === node.presetType)?.label ?? t("blueprint.customNode");
     if (node.kind === "story") return t("blueprint.story");
     if (node.kind === "character") return t("blueprint.character");
     return t("blueprint.customNode");
@@ -876,6 +1865,68 @@ export default function BlueprintEditor({ blueprintId }: Props) {
     { key: "linkedChapters", label: t("blueprint.linkedChapter") },
   ];
 
+  const collectTextFromTipTapNode = (node: unknown): string => {
+    if (!node || typeof node !== "object") return "";
+    const item = node as { text?: unknown; content?: unknown[] };
+    const ownText = typeof item.text === "string" ? item.text : "";
+    const childText = Array.isArray(item.content) ? item.content.map(collectTextFromTipTapNode).join("") : "";
+    return ownText + childText;
+  };
+
+  const extractHeadingTitles = (content: string) => {
+    const titles: string[] = [];
+    try {
+      const parsed = JSON.parse(content) as { content?: unknown[] };
+      const visit = (node: unknown) => {
+        if (!node || typeof node !== "object") return;
+        const item = node as { type?: unknown; attrs?: { level?: unknown }; content?: unknown[] };
+        if (item.type === "heading" && [1, 2, 3].includes(Number(item.attrs?.level))) {
+          const text = collectTextFromTipTapNode(item).trim();
+          if (text) titles.push(text);
+        }
+        if (Array.isArray(item.content)) item.content.forEach(visit);
+      };
+      if (Array.isArray(parsed.content)) parsed.content.forEach(visit);
+    } catch {
+      // Non-JSON editor content is handled below.
+    }
+
+    for (const match of content.matchAll(/<h[1-3][^>]*>(.*?)<\/h[1-3]>/gis)) {
+      const text = match[1]?.replace(/<[^>]+>/g, "").trim();
+      if (text) titles.push(text);
+    }
+    for (const match of content.matchAll(/^#{1,3}\s+(.+)$/gm)) {
+      const text = match[1]?.trim();
+      if (text) titles.push(text);
+    }
+    return titles;
+  };
+
+  const getChapterTitleFileSuggestions = (value: string) => {
+    const query = value.trim().toLowerCase();
+    const unique = new Map<string, string>();
+    const addSuggestion = (name: string | undefined, label: string) => {
+      const trimmed = name?.trim();
+      if (!trimmed || unique.has(trimmed)) return;
+      if (!query || trimmed.toLowerCase().includes(query)) unique.set(trimmed, label);
+    };
+    const openTabs = editorGroups.flatMap((group) => group.tabs);
+    const documentTabs = openTabs.filter((tab) => ["txt", "markdown", "docx"].includes(tab.fileMode));
+    const activeDocumentFile = activeFile && ["txt", "markdown", "docx"].includes(activeFile.fileMode) ? activeFile : null;
+    const contents = [
+      activeDocumentFile?.content,
+      ...documentTabs.map((tab) => tab.content),
+    ].filter((content): content is string => Boolean(content));
+
+    addSuggestion(activeDocumentFile?.name, "文件");
+    for (const name of collectWorkspaceDocumentNames(files)) addSuggestion(name, "文件");
+    for (const tab of documentTabs) addSuggestion(tab.name, "文件");
+    for (const content of contents) {
+      for (const title of extractHeadingTitles(content)) addSuggestion(title, "标题");
+    }
+    return [...unique.entries()].slice(0, 8);
+  };
+
   const getReferenceKeySuggestions = (value: string) => {
     const query = value.trim().toLowerCase();
     const unique = new Map<string, string>();
@@ -892,10 +1943,208 @@ export default function BlueprintEditor({ blueprintId }: Props) {
       .slice(0, 8);
   };
 
+  const updateSuggestionPlacement = (target: HTMLElement) => {
+    const rect = target.getBoundingClientRect();
+    const desiredHeight = 210;
+    const spaceBelow = window.innerHeight - rect.bottom - FLOATING_EDGE_PADDING;
+    const spaceAbove = rect.top - FLOATING_EDGE_PADDING;
+    setSuggestionPlacement(spaceBelow < desiredHeight && spaceAbove > spaceBelow ? "top" : "bottom");
+  };
+
+  const renderSuggestionInput = (
+    id: string,
+    kind: BlueprintSuggestionKind,
+    value: string,
+    onChange: (value: string) => void,
+    placeholder = t("blueprint.templateInputPlaceholder"),
+    multiline = false
+  ) => {
+    const suggestions = kind === "reference"
+      ? getReferenceKeySuggestions(value)
+      : getChapterTitleFileSuggestions(value);
+    const isActive = activeSuggestionInput?.id === id && activeSuggestionInput.kind === kind;
+    const field = multiline ? (
+      <textarea
+        value={value}
+        placeholder={placeholder}
+        onFocus={(event) => {
+          updateSuggestionPlacement(event.currentTarget);
+          setActiveSuggestionInput({ id, kind });
+        }}
+        onBlur={() => window.setTimeout(() => setActiveSuggestionInput(null), 120)}
+        onChange={(event) => {
+          onChange(event.target.value);
+          updateSuggestionPlacement(event.currentTarget);
+          setActiveSuggestionInput({ id, kind });
+        }}
+      />
+    ) : (
+      <input
+        value={value}
+        placeholder={placeholder}
+        onFocus={(event) => {
+          updateSuggestionPlacement(event.currentTarget);
+          setActiveSuggestionInput({ id, kind });
+        }}
+        onBlur={() => window.setTimeout(() => setActiveSuggestionInput(null), 120)}
+        onChange={(event) => {
+          onChange(event.target.value);
+          updateSuggestionPlacement(event.currentTarget);
+          setActiveSuggestionInput({ id, kind });
+        }}
+      />
+    );
+    return (
+      <div className="blueprint-template-key-input-cell">
+        {field}
+        {isActive && suggestions.length > 0 && (
+          <div className={`blueprint-template-key-suggestions ${suggestionPlacement}`}>
+            {suggestions.map(([name, description]) => (
+              <button
+                key={`${id}-${name}`}
+                type="button"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  onChange(name);
+                  setActiveSuggestionInput(null);
+                }}
+              >
+                <strong>{name}</strong>
+                {description && <span>{description}</span>}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderChapterSuggestionInput = (
+    scope: string,
+    index: number,
+    value: string,
+    onChange: (value: string) => void,
+    placeholder = t("blueprint.templateInputPlaceholder")
+  ) => renderSuggestionInput(`${scope}-${index}`, "chapterTitleFile", value, onChange, placeholder);
+
+  const renderReferenceTextarea = (
+    id: string,
+    label: string,
+    value: string,
+    onChange: (value: string) => void,
+    placeholder = label
+  ) => (
+    <label>
+      <span>{label}</span>
+      {renderSuggestionInput(id, "reference", value, onChange, placeholder, true)}
+    </label>
+  );
+
   const renderPaletteIcon = (kind: BlueprintNodeKind) => {
     if (kind === "story") return <GitBranch size={15} />;
     if (kind === "character") return <UserRound size={15} />;
     return <Settings2 size={15} />;
+  };
+
+  const renderCreateItemButtonLegacy = (item: BlueprintPaletteItem, onSelect: (item: BlueprintPaletteItem) => void) => (
+    <button key={item.id} type="button" onClick={() => onSelect(item)}>
+      {renderPaletteIcon(item.kind)}
+      <span>{item.label}</span>
+    </button>
+  );
+
+  const renderCreateItemsLegacy = (onSelect: (item: BlueprintPaletteItem) => void) => {
+    const templateItems = paletteItems.filter((item) => item.type === "template");
+    return (
+      <>
+        {BUILTIN_NODE_GROUPS.map((group) => {
+          const groupItems = paletteItems.filter((item) => item.type === "preset" && item.layer === group.layer);
+          return (
+            <div key={group.layer} className="blueprint-create-group">
+              <span>{group.label}</span>
+              {groupItems.map((item) => renderCreateItemButtonLegacy(item, onSelect))}
+            </div>
+          );
+        })}
+        <div className="blueprint-create-group">
+          <span>基础节点</span>
+          {paletteItems.filter((item) => item.type === "base").map((item) => renderCreateItemButtonLegacy(item, onSelect))}
+        </div>
+        {templateItems.length > 0 && (
+          <div className="blueprint-create-group">
+            <span>{t("blueprint.templates")}</span>
+            {templateItems.map((item) => renderCreateItemButtonLegacy(item, onSelect))}
+          </div>
+        )}
+      </>
+    );
+  };
+
+  void renderCreateItemsLegacy;
+
+  const renderCreateItems = (onSelect: (item: BlueprintPaletteItem) => void) => {
+    const query = createSearch.trim().toLowerCase();
+    const searchableItems = paletteItems.filter((item): item is Extract<BlueprintPaletteItem, { type: "preset" }> => (
+      item.type === "preset" &&
+      item.layer === createLayer &&
+      (!query || item.label.toLowerCase().includes(query) || item.summary.toLowerCase().includes(query))
+    ));
+    return (
+      <div className="blueprint-create-picker">
+        <div className="blueprint-create-search">
+          <input value={createSearch} placeholder="搜索节点" onChange={(event) => setCreateSearch(event.target.value)} />
+        </div>
+        <div className="blueprint-create-layers">
+          {BUILTIN_NODE_GROUPS
+            .filter((group) => paletteItems.some((item) => item.type === "preset" && item.layer === group.layer))
+            .map((group) => (
+              <button
+                key={group.layer}
+                type="button"
+                className={createLayer === group.layer ? "active" : ""}
+                onClick={() => {
+                  setCreateLayer(group.layer);
+                  setActiveCreateItemId(null);
+                }}
+              >
+                {group.label}
+              </button>
+            ))}
+        </div>
+        <div className="blueprint-create-items">
+          {searchableItems.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={activeCreateItemId === item.id ? "active" : ""}
+              onMouseEnter={() => setActiveCreateItemId(item.id)}
+              onFocus={() => setActiveCreateItemId(item.id)}
+              onClick={() => onSelect(item)}
+              title={item.summary}
+            >
+              {renderPaletteIcon(item.kind)}
+              <span>
+                <strong>{item.label}</strong>
+                <small>{item.summary}</small>
+              </span>
+            </button>
+          ))}
+        </div>
+        <div className="blueprint-create-detail" hidden>
+          {false ? (
+            <>
+              <strong />
+              <p />
+              <button type="button" onClick={() => undefined}>
+                <Plus size={14} /> 创建节点
+              </button>
+            </>
+          ) : (
+            <p>没有匹配的节点</p>
+          )}
+        </div>
+      </div>
+    );
   };
 
   const renderCustomFieldsSection = () => {
@@ -914,7 +2163,13 @@ export default function BlueprintEditor({ blueprintId }: Props) {
           return (
             <div key={field.id} className="blueprint-detail-card custom-field">
               <div className="blueprint-detail-card-header custom-field-header">
-                <input value={field.key} placeholder={t("blueprint.fieldKey")} onChange={(event) => updateCustomField(field.id, { key: event.target.value })} />
+                {renderSuggestionInput(
+                  `node-field-key-${field.id}`,
+                  "reference",
+                  field.key,
+                  (value) => updateCustomField(field.id, { key: value }),
+                  t("blueprint.fieldKey")
+                )}
                 <button type="button" onClick={() => updateSelected({ customFields: (selectedNode.customFields ?? []).filter((item) => item.id !== field.id) })}>
                   <Trash2 size={13} />
                 </button>
@@ -922,7 +2177,13 @@ export default function BlueprintEditor({ blueprintId }: Props) {
               <div className="blueprint-field-inputs">
                 {values.map((value, index) => (
                   <div key={index} className={`blueprint-field-input-row ${isFixed ? "fixed" : ""}`}>
-                    <input value={value} placeholder={`${t("blueprint.input")} ${index + 1}`} onChange={(event) => updateCustomFieldInput(field.id, index, event.target.value)} />
+                    {renderSuggestionInput(
+                      `node-field-value-${field.id}-${index}`,
+                      "reference",
+                      value,
+                      (nextValue) => updateCustomFieldInput(field.id, index, nextValue),
+                      `${t("blueprint.input")} ${index + 1}`
+                    )}
                     {!isFixed && (
                       <>
                         <button type="button" onClick={() => removeCustomFieldInput(field.id, index)} title={t("blueprint.removeInput")}>
@@ -945,6 +2206,365 @@ export default function BlueprintEditor({ blueprintId }: Props) {
     );
   };
 
+  const renderNodeLinkedChaptersSection = () => {
+    if (!selectedNode) return null;
+    const linkedChapters = selectedNode.linkedChapters?.length ? selectedNode.linkedChapters : [""];
+    return (
+      <div className="blueprint-field-group">
+        <div className="blueprint-field-header">
+          <span>{t("blueprint.linkedChapter")}</span>
+          <button type="button" onClick={() => updateSelected({ linkedChapters: [...linkedChapters, ""] })}>
+            <Plus size={13} /> {t("blueprint.add")}
+          </button>
+        </div>
+        {linkedChapters.map((chapter, index) => (
+          <div key={index} className="blueprint-inline-row single">
+            {renderChapterSuggestionInput("node", index, chapter, (value) => updateChapter(index, value), t("blueprint.linkedChapter"))}
+            <button type="button" onClick={() => updateSelected({ linkedChapters: linkedChapters.filter((_, itemIndex) => itemIndex !== index) })}>
+              <Trash2 size={13} />
+            </button>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  const renderLogicBlockSection = () => {
+    if (!selectedNode || selectedNode.presetType !== "logicBlock") return null;
+    const logicBlock = selectedNode.logicBlock ?? {
+      conditions: [{ id: newLocalId("logic-condition"), value: "", operator: "and" as const }],
+      result: "",
+      therefore: "",
+    };
+    return (
+      <div className="blueprint-field-group">
+        <div className="blueprint-field-header">
+          <span>因为</span>
+          <button type="button" onClick={addLogicCondition}>
+            <Plus size={13} /> {t("blueprint.add")}
+          </button>
+        </div>
+        {logicBlock.conditions.map((condition, index) => (
+          <div key={condition.id} className="blueprint-logic-condition-row">
+            <input value={condition.value} placeholder={`${t("blueprint.input")} ${index + 1}`} onChange={(event) => updateLogicCondition(condition.id, { value: event.target.value })} />
+            <select value={condition.operator ?? "and"} onChange={(event) => updateLogicCondition(condition.id, { operator: event.target.value as NonNullable<typeof condition.operator> })}>
+              <option value="and">且</option>
+              <option value="or">或</option>
+              <option value="equals">等于</option>
+              <option value="notEquals">不等于</option>
+            </select>
+            <button type="button" onClick={() => removeLogicCondition(condition.id)}>
+              <Trash2 size={13} />
+            </button>
+          </div>
+        ))}
+        <label>
+          <span>所以</span>
+          <textarea value={logicBlock.result} onChange={(event) => updateLogicBlock({ result: event.target.value })} />
+        </label>
+        <label>
+          <span>因此（可选）</span>
+          <textarea value={logicBlock.therefore ?? ""} onChange={(event) => updateLogicBlock({ therefore: event.target.value })} />
+        </label>
+      </div>
+    );
+  };
+
+  const renderParentChapterSection = () => {
+    if (!selectedNode || false) return null;
+    const chapters = blueprint.nodes.filter((node) => node.presetType === "chapter");
+    return (
+      <label>
+        <span>所属章节</span>
+        <select value={selectedNode.parentChapterId ?? ""} onChange={(event) => updateSelected({ parentChapterId: event.target.value || undefined })}>
+          <option value="">未绑定</option>
+          {chapters.map((chapter) => (
+            <option key={chapter.id} value={chapter.id}>
+              {chapter.title || chapter.templateName || "章节"}
+            </option>
+          ))}
+        </select>
+      </label>
+    );
+  };
+
+  const renderLogicTreeEditor = (tree: BlueprintLogicTree, isRoot = false): React.ReactNode => (
+    <div className={`blueprint-logic-tree-node ${tree.type}`}>
+      {tree.type === "condition" && (
+        <div className="blueprint-logic-condition-row">
+          <input value={tree.text} placeholder="条件" onChange={(event) => updateLogicTree(updateLogicTreeNode(selectedNode?.typedData?.logicTree ?? createDefaultLogicTree(selectedNode?.nodeType ?? "because"), tree.id, (node) => node.type === "condition" ? { ...node, text: event.target.value } : node))} />
+          <span>条件</span>
+          {!isRoot && <button type="button" onClick={() => updateLogicTree(removeLogicTreeNode(selectedNode?.typedData?.logicTree ?? createDefaultLogicTree(selectedNode?.nodeType ?? "because"), tree.id))}><Trash2 size={13} /></button>}
+        </div>
+      )}
+      {tree.type === "compare" && (
+        <div className="blueprint-logic-compare-row">
+          <input value={tree.left} placeholder="1" onChange={(event) => updateLogicTree(updateLogicTreeNode(selectedNode?.typedData?.logicTree ?? createDefaultLogicTree(selectedNode?.nodeType ?? "because"), tree.id, (node) => node.type === "compare" ? { ...node, left: event.target.value } : node))} />
+          <select value={tree.operator} onChange={(event) => updateLogicTree(updateLogicTreeNode(selectedNode?.typedData?.logicTree ?? createDefaultLogicTree(selectedNode?.nodeType ?? "because"), tree.id, (node) => node.type === "compare" ? { ...node, operator: event.target.value as BlueprintLogicCompareOperator } : node))}>
+            <option value="equals">=</option>
+            <option value="notEquals">≠</option>
+            <option value="greaterThan">&gt;</option>
+            <option value="lessThan">&lt;</option>
+          </select>
+          <input value={tree.right} placeholder="2" onChange={(event) => updateLogicTree(updateLogicTreeNode(selectedNode?.typedData?.logicTree ?? createDefaultLogicTree(selectedNode?.nodeType ?? "because"), tree.id, (node) => node.type === "compare" ? { ...node, right: event.target.value } : node))} />
+          {!isRoot && <button type="button" onClick={() => updateLogicTree(removeLogicTreeNode(selectedNode?.typedData?.logicTree ?? createDefaultLogicTree(selectedNode?.nodeType ?? "because"), tree.id))}><Trash2 size={13} /></button>}
+        </div>
+      )}
+      {tree.type === "group" && (
+        <>
+          <div className="blueprint-logic-group-header">
+            <select value={tree.operator} onChange={(event) => updateLogicTree(updateLogicTreeNode(selectedNode?.typedData?.logicTree ?? createDefaultLogicTree(selectedNode?.nodeType ?? "because"), tree.id, (node) => node.type === "group" ? { ...node, operator: event.target.value as "and" | "or" } : node))}>
+              <option value="and">AND</option>
+              <option value="or">OR</option>
+            </select>
+            <button type="button" onClick={() => addLogicTreeChild(tree.id, "condition")}>条件</button>
+            <button type="button" onClick={() => addLogicTreeChild(tree.id, "group")}>组</button>
+            <button type="button" onClick={() => addLogicTreeChild(tree.id, "compare")}>比较</button>
+            {!isRoot && <button type="button" onClick={() => updateLogicTree(removeLogicTreeNode(selectedNode?.typedData?.logicTree ?? createDefaultLogicTree(selectedNode?.nodeType ?? "because"), tree.id))}><Trash2 size={13} /></button>}
+          </div>
+          <div className="blueprint-logic-tree-children">
+            {tree.children.map((child) => <div key={child.id}>{renderLogicTreeEditor(child)}</div>)}
+          </div>
+        </>
+      )}
+    </div>
+  );
+
+  const renderTypedDataSectionLegacy = () => {
+    if (!selectedNode?.layer || !selectedNode.nodeType) return null;
+    const data = selectedNode.typedData ?? {};
+    return (
+      <div className="blueprint-field-group">
+        <div className="blueprint-field-header">
+          <span>{selectedNode.layer} · {selectedNode.nodeType}</span>
+        </div>
+        <label>
+          <span>{t("blueprint.summary")}</span>
+          {renderSuggestionInput(
+            `typed-summary-${selectedNode.id}`,
+            "reference",
+            String(data.summary ?? ""),
+            (value) => updateTypedData({ summary: value }),
+            t("blueprint.summary"),
+            true
+          )}
+        </label>
+        {(selectedNode.layer === "story" || selectedNode.layer === "narrative") && renderStringListEditor("relatedCharacters", "关联人物", "人物 / 角色")}
+        {(selectedNode.nodeType === "linearPlot" || selectedNode.nodeType === "nonlinearPlot") && renderTimelineEditor()}
+        {false && (
+          <>
+            <label><span>循环名称</span><input value={String(data.loopName ?? "")} onChange={(event) => updateTypedData({ loopName: event.target.value })} /></label>
+            {renderStringListEditor("loopSteps", "循环节点/步骤", "剧情步骤")}
+            {renderStringListEditor("relatedCharacters", "关联人物", "人物 / 角色")}
+          </>
+        )}
+        {selectedNode.nodeType === "conflict" && (
+          <>
+            <label><span>冲突点</span><textarea value={String(data.conflictPoint ?? "")} onChange={(event) => updateTypedData({ conflictPoint: event.target.value })} /></label>
+            {renderStringListEditor("protagonists", "正派", "正派角色")}
+            <div className="blueprint-vs-divider">VS</div>
+            {renderStringListEditor("antagonists", "反派", "反派角色")}
+          </>
+        )}
+        {selectedNode.nodeType === "hook" && (
+          <label><span>读者好奇心</span><textarea value={String(data.curiosity ?? "")} onChange={(event) => updateTypedData({ curiosity: event.target.value })} /></label>
+        )}
+        {false && (
+          <>
+            <label><span>循环类型</span><select value={String(data.loopMode ?? "condition")} onChange={(event) => updateTypedData({ loopMode: event.target.value as BlueprintTypedData["loopMode"] })}><option value="count">次数循环</option><option value="condition">条件循环</option><option value="infinite">无限循环</option></select></label>
+            <label><span>次数</span><input type="number" min={1} value={Number(data.loopCount ?? 3)} onChange={(event) => updateTypedData({ loopCount: Math.max(1, Number(event.target.value) || 1) })} /></label>
+            <label><span>直到</span><input value={String(data.loopUntil ?? "")} onChange={(event) => updateTypedData({ loopUntil: event.target.value })} /></label>
+          </>
+        )}
+        {false && (
+          <>
+            <label><span>目标</span><textarea value={String(data.conflictGoal ?? "")} onChange={(event) => updateTypedData({ conflictGoal: event.target.value })} /></label>
+            <label><span>阻碍</span><textarea value={String(data.conflictObstacle ?? "")} onChange={(event) => updateTypedData({ conflictObstacle: event.target.value })} /></label>
+          </>
+        )}
+        {selectedNode.nodeType === "foreshadow" && (
+          <>
+            <label><span>埋设</span><textarea value={String(data.setup ?? "")} onChange={(event) => updateTypedData({ setup: event.target.value })} /></label>
+            <label><span>回收</span><textarea value={String(data.payoff ?? "")} onChange={(event) => updateTypedData({ payoff: event.target.value })} /></label>
+          </>
+        )}
+        {selectedNode.nodeType === "reveal" && (
+          <label><span>揭露内容</span><textarea value={String(data.revealContent ?? "")} onChange={(event) => updateTypedData({ revealContent: event.target.value })} /></label>
+        )}
+        {selectedNode.nodeType === "twist" && (
+          <>
+            <label><span>反转前</span><textarea value={String(data.twistBefore ?? "")} onChange={(event) => updateTypedData({ twistBefore: event.target.value })} /></label>
+            <label><span>反转后</span><textarea value={String(data.twistAfter ?? "")} onChange={(event) => updateTypedData({ twistAfter: event.target.value })} /></label>
+          </>
+        )}
+        {selectedNode.layer === "logic" && (
+          <>
+            {renderLogicTreeEditor(data.logicTree ?? createDefaultLogicTree(selectedNode.nodeType), true)}
+            <label><span>所以</span><textarea value={String(data.result ?? "")} onChange={(event) => updateTypedData({ result: event.target.value })} /></label>
+            <label><span>因此（可选）</span><textarea value={String(data.therefore ?? "")} onChange={(event) => updateTypedData({ therefore: event.target.value })} /></label>
+          </>
+        )}
+      </div>
+    );
+  };
+
+  void renderTypedDataSectionLegacy;
+
+  const renderTypedDataSection = () => {
+    if (!selectedNode?.layer || !selectedNode.nodeType) return null;
+    const data = selectedNode.typedData ?? {};
+    return (
+      <div className="blueprint-field-group">
+        <div className="blueprint-field-header">
+          <span>{selectedNode.layer} · {selectedNode.nodeType}</span>
+        </div>
+        {renderReferenceTextarea(
+          `typed-summary-${selectedNode.id}`,
+          t("blueprint.summary"),
+          String(data.summary ?? ""),
+          (value) => updateTypedData({ summary: value })
+        )}
+        {(selectedNode.layer === "story" || selectedNode.layer === "narrative") && renderStringListEditor("relatedCharacters", "关联人物", "人物 / 角色")}
+        {(selectedNode.nodeType === "linearPlot" || selectedNode.nodeType === "nonlinearPlot") && renderTimelineEditor()}
+        {selectedNode.nodeType === "conflict" && (
+          <>
+            {renderReferenceTextarea(`typed-conflict-point-${selectedNode.id}`, "冲突点", String(data.conflictPoint ?? ""), (value) => updateTypedData({ conflictPoint: value }))}
+            {renderStringListEditor("protagonists", "正派", "正派角色")}
+            <div className="blueprint-vs-divider">VS</div>
+            {renderStringListEditor("antagonists", "反派", "反派角色")}
+          </>
+        )}
+        {selectedNode.nodeType === "hook" && (
+          renderReferenceTextarea(`typed-curiosity-${selectedNode.id}`, "读者好奇心", String(data.curiosity ?? ""), (value) => updateTypedData({ curiosity: value }))
+        )}
+        {selectedNode.nodeType === "foreshadow" && (
+          <>
+            {renderReferenceTextarea(`typed-setup-${selectedNode.id}`, "埋设", String(data.setup ?? ""), (value) => updateTypedData({ setup: value }))}
+            {renderReferenceTextarea(`typed-payoff-${selectedNode.id}`, "回收", String(data.payoff ?? ""), (value) => updateTypedData({ payoff: value }))}
+          </>
+        )}
+        {selectedNode.nodeType === "reveal" && (
+          renderReferenceTextarea(`typed-reveal-${selectedNode.id}`, "揭露内容", String(data.revealContent ?? ""), (value) => updateTypedData({ revealContent: value }))
+        )}
+        {selectedNode.nodeType === "twist" && (
+          <>
+            {renderReferenceTextarea(`typed-twist-before-${selectedNode.id}`, "反转前", String(data.twistBefore ?? ""), (value) => updateTypedData({ twistBefore: value }))}
+            {renderReferenceTextarea(`typed-twist-after-${selectedNode.id}`, "反转后", String(data.twistAfter ?? ""), (value) => updateTypedData({ twistAfter: value }))}
+          </>
+        )}
+        {selectedNode.layer === "logic" && (
+          <>
+            {renderLogicTreeEditor(data.logicTree ?? createDefaultLogicTree(selectedNode.nodeType), true)}
+            {renderReferenceTextarea(`typed-result-${selectedNode.id}`, "所以", String(data.result ?? ""), (value) => updateTypedData({ result: value }))}
+            {renderReferenceTextarea(`typed-therefore-${selectedNode.id}`, "因此（可选）", String(data.therefore ?? ""), (value) => updateTypedData({ therefore: value }))}
+          </>
+        )}
+      </div>
+    );
+  };
+
+  const renderMountLinksSection = () => {
+    if (!selectedNode || selectedNode.nodeType !== "chapter") return null;
+    const links = getMountLinks();
+    const query = mountBlueprintSearch.trim().toLowerCase();
+    const linkedIds = new Set(links.map((link) => link.blueprintId));
+    const candidates = blueprints.filter((item) => (
+      item.id !== blueprintId &&
+      !linkedIds.has(item.id) &&
+      (!query || item.name.toLowerCase().includes(query))
+    )).slice(0, 8);
+    return (
+      <div className="blueprint-field-group blueprint-mount-links">
+        <div className="blueprint-field-header">
+          <span>挂载蓝图</span>
+        </div>
+        <div className="blueprint-mount-link-create">
+          <input
+            value={mountBlueprintSearch}
+            placeholder="搜索已有蓝图"
+            onChange={(event) => setMountBlueprintSearch(event.target.value)}
+          />
+          <div className="blueprint-mount-candidates">
+            {candidates.map((candidate) => (
+              <button key={candidate.id} type="button" onClick={() => addMountLink(candidate)}>
+                <GitBranch size={13} />
+                <span>{candidate.name}</span>
+              </button>
+            ))}
+            {mountBlueprintSearch.trim() && candidates.length === 0 && <span>没有匹配的蓝图</span>}
+          </div>
+        </div>
+        <div className="blueprint-mount-link-create new">
+          <input
+            value={newMountBlueprintName}
+            placeholder="新建蓝图名称"
+            onChange={(event) => setNewMountBlueprintName(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void createAndMountBlueprint();
+            }}
+          />
+          <button type="button" onClick={() => void createAndMountBlueprint()} disabled={!newMountBlueprintName.trim()}>
+            <Plus size={13} /> 新建并挂载
+          </button>
+        </div>
+        <div className="blueprint-mount-link-list">
+          {links.length === 0 && <span className="blueprint-mount-empty">暂无挂载蓝图</span>}
+          {links.map((link) => {
+            const target = blueprints.find((item) => item.id === link.blueprintId);
+            const title = target?.name ?? link.blueprintName ?? link.label;
+            return (
+              <article key={link.id} className={`blueprint-mount-link-card ${target ? "" : "missing"}`}>
+                <button
+                  type="button"
+                  className="blueprint-mount-link-main"
+                  disabled={!target}
+                  onClick={() => target && openBlueprintTab(target.id, target.name)}
+                >
+                  <GitBranch size={14} />
+                  <span>{target ? title : `${title || "蓝图"} 不存在`}</span>
+                  <small>{link.kind === "loop" ? "循环蓝图" : "挂载蓝图"}</small>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => updateMountLinks(links.filter((item) => item.id !== link.id))}
+                  title="移除绑定"
+                >
+                  <Trash2 size={13} />
+                </button>
+              </article>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  const renderChildBlueprintSection = () => {
+    if (!selectedNode || selectedNode.nodeType !== "logicBlueprint") return null;
+    const childBlueprint = selectedNode.typedData?.childBlueprint ?? createChildBlueprint(selectedNode.title || "子蓝图");
+    return (
+      <div className="blueprint-field-group">
+        <div className="blueprint-field-header">
+          <span>子蓝图</span>
+          <button type="button" onClick={() => {
+            if (!selectedNode.typedData?.childBlueprint) updateTypedData({ childBlueprint });
+            setActiveChildNodeId(selectedNode.id);
+          }}>
+            进入子蓝图
+          </button>
+        </div>
+        <div className="blueprint-child-strip">
+          <span>输入/输出</span>
+          <strong>开始</strong>
+          <span>子蓝图内容</span>
+          <strong>结束</strong>
+        </div>
+      </div>
+    );
+  };
+
+  void renderCustomFieldsSection;
+
   const renderTemplateFieldsSection = () => (
     <div className="blueprint-field-group">
       <div className="blueprint-field-header">
@@ -958,6 +2578,12 @@ export default function BlueprintEditor({ blueprintId }: Props) {
         const isFixed = field.inputMode === "fixed";
         const bindingOptions = getBindingOptions();
         const isKeyLocked = isTemplateFieldKeyLocked(field.id);
+        const fieldBindingKey = field.bindingKey ?? "custom";
+        const fieldSuggestionKind: BlueprintSuggestionKind | null = fieldBindingKey === "custom"
+          ? "reference"
+          : fieldBindingKey === "title" || fieldBindingKey === "linkedChapters"
+            ? "chapterTitleFile"
+            : null;
         return (
           <div key={field.id} className="blueprint-detail-card custom-field template-field">
             <div className="blueprint-template-field-row top">
@@ -985,39 +2611,21 @@ export default function BlueprintEditor({ blueprintId }: Props) {
               {values.map((value, index) => (
                 <div key={index} className={`blueprint-template-field-row input ${isFixed ? "fixed" : ""}`}>
                   <div className="blueprint-template-key-input-cell">
-                    <input
-                      value={value}
-                      placeholder={t("blueprint.templateInputPlaceholder")}
-                      onFocus={() => {
-                        if ((field.bindingKey ?? "custom") === "custom") setActiveTemplateKeyInput({ fieldId: field.id, index });
-                      }}
-                      onBlur={() => window.setTimeout(() => setActiveTemplateKeyInput(null), 120)}
-                      onChange={(event) => {
-                        updateTemplateFieldInput(field.id, index, event.target.value);
-                        if ((field.bindingKey ?? "custom") === "custom") setActiveTemplateKeyInput({ fieldId: field.id, index });
-                      }}
-                    />
-                    {(field.bindingKey ?? "custom") === "custom" &&
-                      activeTemplateKeyInput?.fieldId === field.id &&
-                      activeTemplateKeyInput.index === index &&
-                      getReferenceKeySuggestions(value).length > 0 && (
-                        <div className="blueprint-template-key-suggestions">
-                          {getReferenceKeySuggestions(value).map(([name, description]) => (
-                            <button
-                              key={name}
-                              type="button"
-                              onMouseDown={(event) => event.preventDefault()}
-                              onClick={() => {
-                                updateTemplateFieldInput(field.id, index, name);
-                                setActiveTemplateKeyInput(null);
-                              }}
-                            >
-                              <strong>{name}</strong>
-                              {description && <span>{description}</span>}
-                            </button>
-                          ))}
-                        </div>
-                      )}
+                    {fieldSuggestionKind
+                      ? renderSuggestionInput(
+                          `template-field-value-${field.id}-${index}`,
+                          fieldSuggestionKind,
+                          value,
+                          (nextValue) => updateTemplateFieldInput(field.id, index, nextValue),
+                          t("blueprint.templateInputPlaceholder")
+                        )
+                      : (
+                          <input
+                            value={value}
+                            placeholder={t("blueprint.templateInputPlaceholder")}
+                            onChange={(event) => updateTemplateFieldInput(field.id, index, event.target.value)}
+                          />
+                        )}
                   </div>
                   {!isFixed && (
                     <>
@@ -1065,7 +2673,13 @@ export default function BlueprintEditor({ blueprintId }: Props) {
       <div className="blueprint-template-builtins">
         <label>
           <span>{t("blueprint.nodeTitle")}</span>
-          <input value={getTemplateBindingValue("title")} placeholder={t("blueprint.nodeTitle")} onChange={(event) => setTemplateBindingValue("title", t("blueprint.nodeTitle"), event.target.value)} />
+          {renderSuggestionInput(
+            "template-story-title",
+            "chapterTitleFile",
+            getTemplateBindingValue("title"),
+            (value) => setTemplateBindingValue("title", t("blueprint.nodeTitle"), value),
+            t("blueprint.nodeTitle")
+          )}
         </label>
         <label>
           <span>{t("blueprint.storyType.label")}</span>
@@ -1088,7 +2702,13 @@ export default function BlueprintEditor({ blueprintId }: Props) {
           </div>
           {linkedChapters.map((chapter, index) => (
             <div key={index} className="blueprint-template-inline-row">
-              <input value={chapter} placeholder={t("blueprint.templateInputPlaceholder")} onChange={(event) => updateTemplateBindingInput("linkedChapters", t("blueprint.linkedChapter"), index, event.target.value)} />
+              {renderChapterSuggestionInput(
+                "template",
+                index,
+                chapter,
+                (value) => updateTemplateBindingInput("linkedChapters", t("blueprint.linkedChapter"), index, value),
+                t("blueprint.linkedChapter")
+              )}
               <button type="button" onClick={() => removeTemplateBindingInput("linkedChapters", t("blueprint.linkedChapter"), index)}>
                 <Trash2 size={13} />
               </button>
@@ -1131,7 +2751,13 @@ export default function BlueprintEditor({ blueprintId }: Props) {
       <div className="blueprint-template-builtins">
         <label>
           <span>{t("blueprint.nodeTitle")}</span>
-          <input value={getTemplateBindingValue("title")} placeholder={t("blueprint.nodeTitle")} onChange={(event) => setTemplateBindingValue("title", t("blueprint.nodeTitle"), event.target.value)} />
+          {renderSuggestionInput(
+            "template-character-title",
+            "chapterTitleFile",
+            getTemplateBindingValue("title"),
+            (value) => setTemplateBindingValue("title", t("blueprint.nodeTitle"), value),
+            t("blueprint.nodeTitle")
+          )}
         </label>
         <label>
           <span>{t("blueprint.characterName")}</span>
@@ -1196,9 +2822,10 @@ export default function BlueprintEditor({ blueprintId }: Props) {
       onContextMenu={(event) => {
         if (!blueprint || !canvasRef.current || !(event.target as HTMLElement).closest(".blueprint-canvas")) return;
         event.preventDefault();
-        const point = clientToCanvas(event.clientX, event.clientY, canvasRef.current, blueprint);
-        setIsCreateMenuOpen(false);
-        setContextMenu({ x: event.clientX, y: event.clientY, canvasX: point.x, canvasY: point.y });
+        event.stopPropagation();
+        if (connectionDrag) {
+          clearConnectionDrag();
+        }
       }}
     >
       <div
@@ -1209,14 +2836,22 @@ export default function BlueprintEditor({ blueprintId }: Props) {
         }}
       >
         <div
-          className="blueprint-canvas"
+          className={`blueprint-canvas ${panState ? "is-panning" : ""}`}
           ref={canvasRef}
           onPointerDown={handleCanvasPointerDown}
           onPointerMove={handleCanvasPointerMove}
           onPointerUp={handlePointerUp}
-          onPointerLeave={handlePointerUp}
-          onWheel={handleCanvasWheel}
+          onPointerLeave={() => {
+            if (inputManagerRef.current.mode !== "connecting") handlePointerUp();
+          }}
         >
+          {activeChildNode && activeChildBlueprint && (
+            <div className="blueprint-child-nav">
+              <button type="button" onClick={() => setActiveChildNodeId(null)}>返回父蓝图</button>
+              <strong>{activeChildNode.title}</strong>
+              <span>{activeChildBlueprint.nodes.length} 个子节点</span>
+            </div>
+          )}
           <div
             className="blueprint-world"
             style={{
@@ -1228,17 +2863,26 @@ export default function BlueprintEditor({ blueprintId }: Props) {
                 const from = nodeById.get(edge.from);
                 const to = nodeById.get(edge.to);
                 if (!from || !to) return null;
+                const path = drawEdge(from, to.x + PORT_ANCHOR_OFFSET, to.y + NODE_HEIGHT / 2);
+                const isSelected = selectedEdgeId === edge.id;
+                const isInsertTarget = edgeInsertCandidate?.edgeId === edge.id;
                 return (
-                  <path
-                    key={edge.id}
-                    className={selectedEdgeId === edge.id ? "selected" : ""}
-                    d={drawEdge(from, to.x, to.y + NODE_HEIGHT / 2)}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setSelectedNodeIds([]);
-                      setSelectedEdgeId(edge.id);
-                    }}
-                  />
+                  <g key={edge.id} className={`blueprint-edge ${isSelected ? "selected" : ""} ${isInsertTarget ? "insert-target" : ""} role-${edge.role ?? "flow"}`}>
+                    <path
+                      className="blueprint-edge-hitbox"
+                      d={path}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setSelectedNodeIds([]);
+                        setSelectedEdgeId(edge.id);
+                      }}
+                    />
+                    <path
+                      className="blueprint-edge-line"
+                      d={path}
+                      aria-hidden="true"
+                    />
+                  </g>
                 );
               })}
               {connectionDrag && nodeById.get(connectionDrag.from) && (
@@ -1247,13 +2891,20 @@ export default function BlueprintEditor({ blueprintId }: Props) {
                   d={drawEdge(nodeById.get(connectionDrag.from)!, connectionDrag.x, connectionDrag.y)}
                 />
               )}
+              {pendingConnectionCreate && nodeById.get(pendingConnectionCreate.fromNodeId) && (
+                <path
+                  className="draft pending"
+                  d={drawEdge(nodeById.get(pendingConnectionCreate.fromNodeId)!, pendingConnectionCreate.canvasX, pendingConnectionCreate.canvasY)}
+                />
+              )}
             </svg>
             {blueprint.nodes.map((node) => {
               const inputCount = node.kind === "custom" ? Math.max(1, Number(node.inputCount) || 1) : 1;
               return (
                 <div
                   key={node.id}
-                  className={`blueprint-node ${node.kind} ${selectedNodeIds.includes(node.id) ? "selected" : ""} ${connectMode ? "connect-mode" : ""} ${connectionDrag?.from === node.id ? "connecting" : ""} ${connectionHoverNodeId === node.id ? "connection-target" : ""}`}
+                  className={`blueprint-node ${node.kind} layer-${node.layer ?? "story"} node-type-${node.nodeType ?? "custom"} ${selectedNodeIds.includes(node.id) ? "selected" : ""} ${connectMode ? "connect-mode" : ""} ${connectionDrag?.from === node.id ? "connecting" : ""} ${connectionHoverNodeId === node.id ? "connection-target" : ""}`}
+                  data-blueprint-node-id={node.id}
                   style={{ left: node.x, top: node.y }}
                   onPointerDown={(event) => handleNodePointerDown(event, node)}
                   onPointerEnter={() => handleNodePointerEnter(node.id)}
@@ -1272,16 +2923,35 @@ export default function BlueprintEditor({ blueprintId }: Props) {
                     className="node-port output"
                     title={t("blueprint.connectHint")}
                     onPointerDown={(event) => handleConnectionStart(event, node.id)}
+                    onPointerMove={handleConnectionPointerMove}
                   />
+                  {false && (
+                    <>
+                      <span className="node-port structure-parent" title="父级结构" />
+                      <span className="node-port mount" title="挂载内容" />
+                    </>
+                  )}
                   <div className="blueprint-node-header">
                     <span>{getNodeLabel(node)}</span>
-                    <small>{node.kind === "story" ? t(`blueprint.storyType.${node.storyType ?? "custom"}`) : node.kind === "custom" ? node.templateName : node.identity}</small>
+                    <small>{node.layer ?? (node.kind === "story" ? t(`blueprint.storyType.${node.storyType ?? "custom"}`) : node.kind === "custom" ? node.templateName : node.identity)}</small>
                   </div>
                   <strong>{node.title || node.characterName || node.templateName || t("blueprint.untitledNode")}</strong>
                   <p>{getNodeSummary(node)}</p>
                 </div>
               );
             })}
+          </div>
+          {marqueeSelect && getMarqueeScreenRect(marqueeSelect) && (
+            <div
+              className="blueprint-marquee"
+              style={getMarqueeScreenRect(marqueeSelect) ?? undefined}
+            />
+          )}
+          <div className="blueprint-input-guide" aria-live="polite">
+            <strong>{inputGuideStatus}</strong>
+            <span>{t("blueprint.inputGuide.pan")}</span>
+            <span>{t("blueprint.inputGuide.marquee")}</span>
+            <span>{t("blueprint.inputGuide.menu")}</span>
           </div>
           <div
             ref={minimapRef}
@@ -1337,6 +3007,16 @@ export default function BlueprintEditor({ blueprintId }: Props) {
               />
             </div>
           </div>
+          {activeChildNode && activeChildBlueprint && (
+            <div className="blueprint-child-canvas-preview">
+              {activeChildBlueprint.nodes.map((node) => (
+                <div key={node.id} className="blueprint-child-preview-node">
+                  <span>{node.title}</span>
+                  <small>{getNodeSummary(node)}</small>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
         {selectedNode && (
           <>
@@ -1372,6 +3052,12 @@ export default function BlueprintEditor({ blueprintId }: Props) {
                 <span>{t("blueprint.nodeTitle")}</span>
                 <input value={selectedNode.title} onChange={(event) => updateSelected({ title: event.target.value })} />
               </label>
+              {renderNodeLinkedChaptersSection()}
+              {renderParentChapterSection()}
+              {renderMountLinksSection()}
+              {renderChildBlueprintSection()}
+              {renderTypedDataSection()}
+              {renderLogicBlockSection()}
               {selectedNode.kind === "story" && (
                 <>
                   <label>
@@ -1386,22 +3072,6 @@ export default function BlueprintEditor({ blueprintId }: Props) {
                     <span>{t("blueprint.summary")}</span>
                     <textarea value={selectedNode.summary ?? ""} onChange={(event) => updateSelected({ summary: event.target.value })} />
                   </label>
-                  <div className="blueprint-field-group">
-                    <div className="blueprint-field-header">
-                      <span>{t("blueprint.linkedChapter")}</span>
-                      <button type="button" onClick={() => updateSelected({ linkedChapters: [...(selectedNode.linkedChapters ?? []), ""] })}>
-                        <Plus size={13} /> {t("blueprint.add")}
-                      </button>
-                    </div>
-                    {(selectedNode.linkedChapters ?? []).map((chapter, index) => (
-                      <div key={index} className="blueprint-inline-row single">
-                        <input value={chapter} onChange={(event) => updateChapter(index, event.target.value)} />
-                        <button type="button" onClick={() => updateSelected({ linkedChapters: (selectedNode.linkedChapters ?? []).filter((_, itemIndex) => itemIndex !== index) })}>
-                          <Trash2 size={13} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
                   <div className="blueprint-field-group">
                     <div className="blueprint-field-header">
                       <span>{t("blueprint.storyEvents")}</span>
@@ -1422,7 +3092,6 @@ export default function BlueprintEditor({ blueprintId }: Props) {
                       </div>
                     ))}
                   </div>
-                  {renderCustomFieldsSection()}
                 </>
               )}
               {selectedNode.kind === "character" && (
@@ -1474,7 +3143,6 @@ export default function BlueprintEditor({ blueprintId }: Props) {
                       </div>
                     ))}
                   </div>
-                  {renderCustomFieldsSection()}
                 </>
               )}
               {selectedNode.kind === "custom" && (
@@ -1487,7 +3155,6 @@ export default function BlueprintEditor({ blueprintId }: Props) {
                     <span>{t("blueprint.inputCount")}</span>
                     <input type="number" min={1} value={selectedNode.inputCount ?? 1} onChange={(event) => updateSelected({ inputCount: Math.max(1, Number(event.target.value) || 1) })} />
                   </label>
-                  {renderCustomFieldsSection()}
                 </>
               )}
             </aside>
@@ -1507,26 +3174,35 @@ export default function BlueprintEditor({ blueprintId }: Props) {
             onClick={(event) => {
               event.stopPropagation();
               setContextMenu(null);
+              setPendingConnectionCreate(null);
+              const rect = event.currentTarget.getBoundingClientRect();
+              setCreateMenuPosition(getFloatingPosition(
+                { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom },
+                {
+                  width: CREATE_MENU_WIDTH,
+                  height: CREATE_MENU_HEIGHT,
+                  padding: FLOATING_EDGE_PADDING,
+                  preferVertical: "top",
+                  preferHorizontal: "right",
+                }
+              ));
               setIsCreateMenuOpen((value) => !value);
             }}
           >
             <Plus size={15} /> {t("blueprint.createBlueprint")}
           </button>
           {isCreateMenuOpen && (
-            <div ref={createMenuRef} className="blueprint-create-menu">
-              {paletteItems.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => {
-                    const point = getViewportCenterPoint();
-                    placePaletteItem(item, point.x, point.y);
-                  }}
-                >
-                  {renderPaletteIcon(item.kind)}
-                  <span>{item.label}</span>
-                </button>
-              ))}
+            <div
+              ref={createMenuRef}
+              className="blueprint-create-menu"
+              style={createMenuPosition ? { left: createMenuPosition.left, top: createMenuPosition.top, maxHeight: createMenuPosition.maxHeight } : undefined}
+            >
+              {renderCreateItems((item) => {
+                const point = pendingConnectionCreate
+                  ? { x: pendingConnectionCreate.canvasX, y: pendingConnectionCreate.canvasY }
+                  : getViewportCenterPoint();
+                placePaletteItem(item, point.x, point.y);
+              })}
             </div>
           )}
         </div>
@@ -1555,7 +3231,7 @@ export default function BlueprintEditor({ blueprintId }: Props) {
         {saveMessage && <span className={`blueprint-save-status ${saveState}`}>{saveMessage}</span>}
       </footer>
       {contextMenu && (
-        <div className="blueprint-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
+        <div className="blueprint-context-menu" style={{ left: contextMenu.left, top: contextMenu.top, maxHeight: contextMenu.maxHeight }}>
           <button type="button" onClick={() => { undoBlueprint(blueprintId); setContextMenu(null); }}>
             {t("blueprint.undo")}
           </button>
@@ -1565,15 +3241,10 @@ export default function BlueprintEditor({ blueprintId }: Props) {
           <button type="button" onClick={() => { pasteClipboard({ x: contextMenu.canvasX, y: contextMenu.canvasY }); setContextMenu(null); }}>
             {t("blueprint.paste")}
           </button>
-          <div className="blueprint-context-submenu">
+          <div className={`blueprint-context-submenu ${contextMenu.submenuSide === "left" ? "open-left" : "open-right"}`}>
             <span>{t("blueprint.create")} &gt; {t("blueprint.title")}</span>
-            <div>
-              {paletteItems.map((item) => (
-                <button key={item.id} type="button" onClick={() => placePaletteItem(item, contextMenu.canvasX, contextMenu.canvasY)}>
-                  {renderPaletteIcon(item.kind)}
-                  {item.label}
-                </button>
-              ))}
+            <div style={{ top: contextMenu.submenuTop, maxHeight: contextMenu.submenuMaxHeight }}>
+              {renderCreateItems((item) => placePaletteItem(item, contextMenu.canvasX, contextMenu.canvasY))}
             </div>
           </div>
         </div>

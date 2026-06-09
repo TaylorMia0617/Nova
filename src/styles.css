@@ -150,11 +150,6 @@ body {
   font-size: 13px;
 }
 
-.terminal-loading {
-  min-height: 120px;
-  flex: 0 0 auto;
-}
-
 .bottom-panel {
   flex: 0 0 auto;
   min-height: 120px;

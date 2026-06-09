@@ -278,11 +278,10 @@ export async function createDocxBase64FromPlainText(text: string) {
   const paragraphs = normalized
     .split("\n")
     .map((line) => line.trimEnd())
-    .filter((line) => line.trim().length > 0)
     .map((line) =>
       new Paragraph({
         spacing: { after: 120, line: 360 },
-        children: [new TextRun({ text: line, font: "Noto Serif SC", size: 24 })],
+        children: line ? [new TextRun({ text: line, font: "Noto Serif SC", size: 24 })] : [],
       })
     );
 
@@ -382,7 +381,6 @@ function buildDocumentXml(docJson: ProseMirrorNode, originalDocumentXml: string)
   const sectionProps = body ? firstChildByName(body, "sectPr") : null;
   const sectionXml = sectionProps ? serializer.serializeToString(sectionProps) : "<w:sectPr/>";
   const contentXml = (docJson.content ?? [])
-    .filter((node) => node.type !== "paragraph" || node.content?.length)
     .map(nodeToXml)
     .join("");
 

@@ -1,6 +1,40 @@
 export type BlueprintNodeKind = "story" | "character" | "custom";
 export type BlueprintStoryType = "start" | "ending" | "custom";
 export type BlueprintFieldInputMode = "fixed" | "repeatable";
+export type BlueprintPresetType =
+  | "hook"
+  | "linearPlot"
+  | "nonlinearPlot"
+  | "trickPerspective"
+  | "trickTime"
+  | "branchPlot"
+  | "hiddenLine"
+  | "chapter"
+  | "mount"
+  | "loop"
+  | "logicBlock";
+export type BlueprintNodeLayer = "story" | "structure" | "logic" | "control" | "narrative";
+export type BlueprintStoryNodeType =
+  | "hook"
+  | "linearPlot"
+  | "nonlinearPlot"
+  | "trickPerspective"
+  | "trickTime"
+  | "branchPlot"
+  | "hiddenLine";
+export type BlueprintStructureNodeType = "chapter" | "chapterGroup" | "volume" | "act" | "mount";
+export type BlueprintLogicNodeType = "logicBlueprint" | "because" | "and" | "or" | "compare" | "condition";
+export type BlueprintControlNodeType = "loop" | "branch" | "merge";
+export type BlueprintNarrativeNodeType = "conflict" | "foreshadow" | "reveal" | "twist";
+export type BlueprintTypedNodeType =
+  | BlueprintStoryNodeType
+  | BlueprintStructureNodeType
+  | BlueprintLogicNodeType
+  | BlueprintControlNodeType
+  | BlueprintNarrativeNodeType
+  | "character"
+  | "custom";
+export type BlueprintEdgeRole = "flow" | "mount" | "logic" | "reveal" | "branch" | "merge";
 export type BlueprintFieldBindingKey =
   | "custom"
   | "title"
@@ -44,9 +78,92 @@ export type BlueprintCustomField = {
   showInCard?: boolean;
 };
 
+export type BlueprintLogicConditionOperator = "and" | "or" | "equals" | "notEquals";
+export type BlueprintLogicCompareOperator = "equals" | "notEquals" | "greaterThan" | "lessThan";
+
+export type BlueprintLogicCondition = {
+  id: string;
+  value: string;
+  operator?: BlueprintLogicConditionOperator;
+};
+
+export type BlueprintLogicBlock = {
+  conditions: BlueprintLogicCondition[];
+  result: string;
+  therefore?: string;
+};
+
+export type BlueprintMountLink = {
+  id: string;
+  label: string;
+  blueprintId: string;
+  blueprintName: string;
+  kind?: "mount" | "loop";
+};
+
+export type BlueprintLogicTree =
+  | {
+      id: string;
+      type: "condition";
+      text: string;
+    }
+  | {
+      id: string;
+      type: "group";
+      operator: "and" | "or";
+      children: BlueprintLogicTree[];
+    }
+  | {
+      id: string;
+      type: "compare";
+      left: string;
+      operator: BlueprintLogicCompareOperator;
+      right: string;
+    };
+
+export type BlueprintTypedData = {
+  summary?: string;
+  content?: string;
+  curiosity?: string;
+  timelineMode?: string;
+  perspectiveMode?: string;
+  hiddenUntil?: string;
+  chapterTitle?: string;
+  parentStructureId?: string;
+  mountKind?: string;
+  loopMode?: "count" | "condition" | "infinite";
+  loopCount?: number;
+  loopUntil?: string;
+  childBlueprint?: BlueprintDocument;
+  mountLinks?: BlueprintMountLink[];
+  timelineItems?: Array<{ id: string; time: string; event: string }>;
+  relatedCharacters?: string[];
+  conflictPoint?: string;
+  protagonists?: string[];
+  antagonists?: string[];
+  loopSteps?: string[];
+  logicTree?: BlueprintLogicTree;
+  result?: string;
+  therefore?: string;
+  conflictGoal?: string;
+  conflictObstacle?: string;
+  setup?: string;
+  payoff?: string;
+  revealContent?: string;
+  twistBefore?: string;
+  twistAfter?: string;
+  [key: string]: unknown;
+};
+
 export type BlueprintNode = {
   id: string;
   kind: BlueprintNodeKind;
+  layer?: BlueprintNodeLayer;
+  nodeType?: BlueprintTypedNodeType;
+  typedData?: BlueprintTypedData;
+  presetType?: BlueprintPresetType;
+  parentChapterId?: string;
+  parentStructureId?: string;
   x: number;
   y: number;
   title: string;
@@ -71,12 +188,14 @@ export type BlueprintNode = {
   keywords?: string[];
   relationship?: string;
   customFields?: BlueprintCustomField[];
+  logicBlock?: BlueprintLogicBlock;
 };
 
 export type BlueprintEdge = {
   id: string;
   from: string;
   to: string;
+  role?: BlueprintEdgeRole;
 };
 
 export type BlueprintDocument = {

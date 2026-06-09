@@ -26,6 +26,17 @@ export interface ConversationMessage {
   attachments?: ConversationAttachment[];
   skills?: ChatSkills;
   searchCount?: number;
+  workItems?: ConversationWorkItem[];
+}
+
+export interface ConversationWorkItem {
+  id: string;
+  kind: "tool" | "search" | "file" | "blueprint" | "write" | "thinking";
+  label: string;
+  status: "running" | "done" | "error";
+  detail?: string;
+  resultSummary?: string;
+  createdAt: string;
 }
 
 export interface ConversationAttachment {

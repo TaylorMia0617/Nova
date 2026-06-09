@@ -344,7 +344,6 @@ function tableFromNode(node: ProseMirrorNode, template: ExportTemplate) {
 
 async function exportJsonAsDocx(filename: string, title: string, docJson: ProseMirrorNode, template: ExportTemplate) {
   const children = (docJson.content ?? [])
-    .filter((node) => node.type !== "paragraph" || node.content?.length)
     .map((node) => {
       if (node.type === "table") return tableFromNode(node, template);
       if (node.type === "paragraph" || node.type === "heading") return paragraphFromNode(node, template);

@@ -1,7 +1,8 @@
 import type { ModelProfile } from "../types/ai";
 import type { McpTool, McpToolResult } from "../types/ai";
-import { readFile, readDirectory, writeFile, writeFileBinary, createFile } from "./fileSystemService";
+import { readFile, readDirectory, writeFile, writeFileBinary, createFile, listBlueprints, saveBlueprint } from "./fileSystemService";
 import type { WorkspaceNode } from "./fileSystemService";
+import type { BlueprintDocument, BlueprintEdge, BlueprintNode } from "../types/blueprint";
 import { createDocxBase64FromPlainText } from "./docxOoxmlService";
 import { searchWithTavily } from "./searchService";
 
@@ -19,6 +20,7 @@ let requestCounter = 0;
 
 const MAX_FILE_SIZE = 50 * 1024; // 50KB
 const isDocxPath = (path: string) => path.trim().toLowerCase().endsWith(".docx");
+const newBlueprintId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 type ResolvedWorkspacePath = {
   relativePath: string;
@@ -130,6 +132,41 @@ const LOCAL_FILESYSTEM_TOOLS: McpTool[] = [
     }
   },
   {
+    name: "list_blueprints",
+    description: "List existing story blueprints with node, edge, chapter, and mount summaries.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: []
+    }
+  },
+  {
+    name: "read_blueprint",
+    description: "Read a blueprint by id or name. Use this before analyzing or modifying a blueprint.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Blueprint id" },
+        name: { type: "string", description: "Blueprint name" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "create_blueprint",
+    description: "Create or replace a blueprint using the current BlueprintDocument structure.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Blueprint name" },
+        blueprint: { type: "object", description: "Optional full BlueprintDocument draft" },
+        nodes: { type: "array", description: "Blueprint nodes when blueprint is omitted" },
+        edges: { type: "array", description: "Blueprint edges when blueprint is omitted" }
+      },
+      required: ["name"]
+    }
+  },
+  {
     name: "edit_file",
     description: "对指定文件进行行级编辑（支持替换、插入、删除操作）",
     inputSchema: {
@@ -187,7 +224,7 @@ const LOCAL_FILESYSTEM_TOOLS: McpTool[] = [
 
 export function getLocalTools(agentSubMode?: "plan" | "build"): McpTool[] {
   if (agentSubMode === "plan") {
-    return LOCAL_FILESYSTEM_TOOLS.filter(t => t.name !== "edit_file" && t.name !== "create_file");
+    return LOCAL_FILESYSTEM_TOOLS.filter(t => t.name !== "edit_file" && t.name !== "create_file" && t.name !== "create_blueprint");
   }
   return LOCAL_FILESYSTEM_TOOLS;
 }
@@ -222,6 +259,55 @@ function buildDirectoryTree(nodes: WorkspaceNode[], basePath: string = ""): Arra
     }
   }
   return result;
+}
+
+function summarizeBlueprint(blueprint: BlueprintDocument) {
+  const chapters = blueprint.nodes.filter((node) => node.nodeType === "chapter");
+  const mounted = chapters.flatMap((node) => Array.isArray(node.typedData?.mountLinks) ? node.typedData.mountLinks : []);
+  return {
+    id: blueprint.id,
+    name: blueprint.name,
+    nodes: blueprint.nodes.length,
+    edges: blueprint.edges.length,
+    chapters: chapters.map((node) => ({
+      id: node.id,
+      title: node.title || node.typedData?.chapterTitle || "Untitled chapter",
+      summary: node.typedData?.summary ?? node.summary ?? "",
+      mounts: Array.isArray(node.typedData?.mountLinks) ? node.typedData.mountLinks.length : 0,
+    })),
+    mounts: mounted.map((link) => ({
+      label: link.label,
+      blueprintId: link.blueprintId,
+      blueprintName: link.blueprintName,
+      kind: link.kind ?? "mount",
+    })),
+  };
+}
+
+function normalizeBlueprintDraft(args: Record<string, unknown>): BlueprintDocument {
+  const fullDraft = args.blueprint && typeof args.blueprint === "object" ? args.blueprint as Partial<BlueprintDocument> : null;
+  const name = String(args.name ?? fullDraft?.name ?? "AI Blueprint").trim() || "AI Blueprint";
+  const now = new Date().toISOString();
+  const nodes = (fullDraft?.nodes ?? args.nodes ?? []) as BlueprintNode[];
+  const edges = (fullDraft?.edges ?? args.edges ?? []) as BlueprintEdge[];
+  return {
+    id: String(fullDraft?.id ?? newBlueprintId("blueprint")),
+    name,
+    updatedAt: now,
+    nodes: nodes.map((node, index) => ({
+      ...node,
+      id: String(node.id || newBlueprintId("node")),
+      kind: node.kind ?? "custom",
+      x: Number.isFinite(node.x) ? node.x : 120 + index * 260,
+      y: Number.isFinite(node.y) ? node.y : 120 + (index % 3) * 170,
+      title: String(node.title || node.characterName || node.typedData?.chapterTitle || `Node ${index + 1}`),
+      linkedChapters: Array.isArray(node.linkedChapters) ? node.linkedChapters : [],
+    })),
+    edges: edges
+      .filter((edge) => edge.from && edge.to && edge.from !== edge.to)
+      .map((edge) => ({ ...edge, id: String(edge.id || newBlueprintId("edge")) })),
+    viewport: fullDraft?.viewport ?? { x: 0, y: 0, zoom: 1 },
+  };
 }
 
 export async function runLocalTool(
@@ -346,6 +432,46 @@ export async function runLocalTool(
         } catch (error) {
           return { toolName, result: `Error: ${error instanceof Error ? error.message : String(error)}` };
         }
+      }
+      case "list_blueprints": {
+        const blueprints = await listBlueprints();
+        return {
+          toolName,
+          result: JSON.stringify(blueprints.map(summarizeBlueprint), null, 2),
+        };
+      }
+      case "read_blueprint": {
+        const blueprints = await listBlueprints();
+        const id = String(args.id ?? "").trim();
+        const name = String(args.name ?? "").trim();
+        const blueprint = blueprints.find((item) => item.id === id)
+          ?? blueprints.find((item) => item.name === name)
+          ?? null;
+        if (!blueprint) {
+          return { toolName, result: `Error: Blueprint not found${id ? ` id=${id}` : name ? ` name=${name}` : ""}` };
+        }
+        return {
+          toolName,
+          result: JSON.stringify({
+            summary: summarizeBlueprint(blueprint),
+            blueprint,
+          }, null, 2),
+        };
+      }
+      case "create_blueprint": {
+        if (options?.agentSubMode === "plan") {
+          return { toolName, result: "Error: create_blueprint is not available in Plan mode. Switch to Build mode to create blueprints." };
+        }
+        const blueprint = normalizeBlueprintDraft(args);
+        const saved = await saveBlueprint(blueprint);
+        return {
+          toolName,
+          result: JSON.stringify({
+            ok: true,
+            action: "create_blueprint",
+            summary: summarizeBlueprint(saved),
+          }, null, 2),
+        };
       }
       case "edit_file": {
         let resolved: ResolvedWorkspacePath;

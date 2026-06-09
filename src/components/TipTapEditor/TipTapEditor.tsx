@@ -1,5 +1,6 @@
 import {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useMemo,
@@ -66,6 +67,8 @@ export interface TipTapEditorProps {
   pageViewMode?: boolean;
   referenceEntries?: ReferenceEntry[];
   onEditorStateChange?: (editor: Editor) => void;
+  locked?: boolean;
+  lockedMessage?: string;
 }
 
 type ReferenceSuggestionState = {
@@ -114,12 +117,20 @@ const parseJsonContent = (value: string) => {
 };
 
 const getEditorContent = (value: string, format: TipTapContentFormat) => {
-  if (format === "plainText") return plainTextToEditorHtml(value);
+  if (format === "plainText" || format === "markdown") return plainTextToEditorHtml(value);
   if (format === "docx") return parseJsonContent(value);
   return value;
 };
 
-const textFromNode = (node: any): string => {
+type ProseMirrorJsonNode = {
+  type?: string;
+  text?: string;
+  attrs?: Record<string, any>;
+  marks?: Array<{ type: string; attrs?: Record<string, any> }>;
+  content?: ProseMirrorJsonNode[];
+};
+
+const textFromNode = (node: ProseMirrorJsonNode): string => {
   if (!node) return "";
   if (node.type === "text") return node.text ?? "";
   if (node.type === "hardBreak") return "\n";
@@ -137,15 +148,90 @@ export const serializeEditorPlainText = (editor: ReturnType<typeof useEditor>) =
     .join("\n");
 };
 
+const escapeMarkdownTableCell = (value: string) => value.replace(/\|/g, "\\|").replace(/\n/g, "<br>");
+
+const renderInlineMarkdown = (node: ProseMirrorJsonNode): string => {
+  if (!node) return "";
+  if (node.type === "hardBreak") return "\n";
+  if (node.type === "text") {
+    let text = node.text ?? "";
+    for (const mark of node.marks ?? []) {
+      if (mark.type === "bold") text = `**${text}**`;
+      if (mark.type === "italic") text = `*${text}*`;
+      if (mark.type === "strike") text = `~~${text}~~`;
+      if (mark.type === "code") text = `\`${text.replace(/`/g, "\\`")}\``;
+      if (mark.type === "link" && mark.attrs?.href) text = `[${text}](${mark.attrs.href})`;
+    }
+    return text;
+  }
+  if (!Array.isArray(node.content)) return "";
+  return node.content.map(renderInlineMarkdown).join("");
+};
+
+const renderListMarkdown = (node: ProseMirrorJsonNode, ordered: boolean) => {
+  if (!Array.isArray(node.content)) return "";
+  return node.content.map((item, index) => {
+    const marker = ordered ? `${index + 1}. ` : "- ";
+    const content = (item.content ?? [])
+      .map((child) => serializeMarkdownBlock(child))
+      .join("\n")
+      .split("\n")
+      .map((line, lineIndex) => (lineIndex === 0 ? `${marker}${line}` : `  ${line}`))
+      .join("\n");
+    return content;
+  }).join("\n");
+};
+
+const serializeMarkdownBlock = (node: ProseMirrorJsonNode): string => {
+  if (!node) return "";
+  if (node.type === "paragraph") return Array.isArray(node.content) ? node.content.map(renderInlineMarkdown).join("") : "";
+  if (node.type === "heading") {
+    const level = Math.min(6, Math.max(1, Number(node.attrs?.level) || 1));
+    return `${"#".repeat(level)} ${Array.isArray(node.content) ? node.content.map(renderInlineMarkdown).join("") : ""}`;
+  }
+  if (node.type === "blockquote") {
+    const content = (node.content ?? []).map(serializeMarkdownBlock).join("\n");
+    return content.split("\n").map((line) => `> ${line}`).join("\n");
+  }
+  if (node.type === "codeBlock") return `\`\`\`\n${textFromNode(node)}\n\`\`\``;
+  if (node.type === "bulletList" || node.type === "taskList") return renderListMarkdown(node, false);
+  if (node.type === "orderedList") return renderListMarkdown(node, true);
+  if (node.type === "horizontalRule") return "---";
+  if (node.type === "image") return `![${node.attrs?.alt ?? ""}](${node.attrs?.src ?? ""})`;
+  if (node.type === "table") {
+    const rows = node.content ?? [];
+    return rows.map((row, rowIndex) => {
+      const cells = (row.content ?? []).map((cell) => ` ${escapeMarkdownTableCell(textFromNode(cell))} `);
+      const line = `|${cells.join("|")}|`;
+      if (rowIndex !== 0) return line;
+      return `${line}\n|${cells.map(() => " --- ").join("|")}|`;
+    }).join("\n");
+  }
+  return textFromNode(node);
+};
+
+export const serializeEditorMarkdown = (editor: ReturnType<typeof useEditor>) => {
+  if (!editor) return "";
+  const json = editor.getJSON();
+  if (!Array.isArray(json.content)) return "";
+  return json.content.map((node: ProseMirrorJsonNode) => serializeMarkdownBlock(node)).join("\n");
+};
+
+const getMarkdownFromStorage = (editor: ReturnType<typeof useEditor>) => {
+  if (!editor) return "";
+  return editor.storage.markdown?.getMarkdown?.() ?? serializeEditorMarkdown(editor);
+};
+
 const serializeEditorContent = (
   editor: ReturnType<typeof useEditor>,
   format: TipTapContentFormat
 ) => {
   if (!editor) return "";
   if (format === "plainText") return serializeEditorPlainText(editor);
+  if (format === "markdown") return serializeEditorMarkdown(editor);
   if (format === "html") return editor.getHTML();
   if (format === "docx") return JSON.stringify(editor.getJSON());
-  return editor.storage.markdown.getMarkdown();
+  return getMarkdownFromStorage(editor);
 };
 
 const TOKEN_PATTERN = /[\p{Script=Han}A-Za-z0-9_-]+$/u;
@@ -203,6 +289,8 @@ export const TipTapEditor = forwardRef<TipTapEditorHandle, TipTapEditorProps>(
       pageViewMode = false,
       referenceEntries = [],
       onEditorStateChange,
+      locked = false,
+      lockedMessage,
     },
     ref
   ) {
@@ -354,8 +442,8 @@ export const TipTapEditor = forwardRef<TipTapEditorHandle, TipTapEditorProps>(
         }
         const desiredWidth = Math.min(280, Math.max(180, wrapperRect.width - 16));
         const desiredHeight = Math.min(220, items.length * 34 + 8);
-        const spaceBelow = wrapperRect.bottom - coords.bottom;
-        const spaceAbove = coords.top - wrapperRect.top;
+        const spaceBelow = window.innerHeight - coords.bottom - 12;
+        const spaceAbove = coords.top - 12;
         const placement: "top" | "bottom" =
           spaceBelow < desiredHeight && spaceAbove > spaceBelow ? "top" : "bottom";
         const availableHeight = Math.max(84, (placement === "top" ? spaceAbove : spaceBelow) - 12);
@@ -407,8 +495,14 @@ export const TipTapEditor = forwardRef<TipTapEditorHandle, TipTapEditorProps>(
     }, [editor, content, contentFormat, onEditorStateChange]);
 
     useEffect(() => {
-      if (editor) editor.setEditable(editable);
-    }, [editable, editor]);
+      if (editor) editor.setEditable(editable && !locked);
+    }, [editable, locked, editor]);
+
+    const stopLockedEvent = useCallback((event: React.SyntheticEvent) => {
+      if (!locked) return;
+      event.preventDefault();
+      event.stopPropagation();
+    }, [locked]);
 
     useEffect(() => {
       if (!editor) return;
@@ -548,7 +642,9 @@ export const TipTapEditor = forwardRef<TipTapEditorHandle, TipTapEditorProps>(
       getMarkdown: () => (
         contentFormat === "plainText"
           ? serializeEditorPlainText(editor)
-          : editor?.storage.markdown.getMarkdown() ?? ""
+          : contentFormat === "markdown"
+            ? serializeEditorMarkdown(editor)
+            : getMarkdownFromStorage(editor)
       ),
       getHTML: () => editor?.getHTML() ?? "",
       getJSON: () => editor?.getJSON() ?? { type: "doc", content: [{ type: "paragraph" }] },
@@ -585,8 +681,19 @@ export const TipTapEditor = forwardRef<TipTapEditorHandle, TipTapEditorProps>(
     }));
 
     return (
-      <div className={`tiptap-editor-wrapper${pageViewMode ? " page-view-mode" : ""}`} ref={wrapperRef}>
+      <div
+        className={`tiptap-editor-wrapper${pageViewMode ? " page-view-mode" : ""}${locked ? " is-locked" : ""}`}
+        ref={wrapperRef}
+        aria-busy={locked}
+        onBeforeInputCapture={stopLockedEvent}
+        onKeyDownCapture={stopLockedEvent}
+        onPasteCapture={stopLockedEvent}
+        onDropCapture={stopLockedEvent}
+        onWheelCapture={stopLockedEvent}
+        onTouchMoveCapture={stopLockedEvent}
+      >
         <EditorContent editor={editor} className="tiptap-editor-content" />
+        {locked && <div className="tiptap-editor-lock">{lockedMessage ?? t("editor.selection.locked")}</div>}
         {referenceSuggestion && (
           <div
             className={`reference-suggestion-popover ${referenceSuggestion.placement}`}

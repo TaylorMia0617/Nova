@@ -7,7 +7,8 @@ Local-first desktop writing workspace for novel drafting, reference management, 
 This project currently ships on `Electron`.
 
 - `src-tauri/` is legacy exploration material and is not the active desktop runtime.
-- Development, packaging, terminal integration, and file access all run through the Electron app.
+- Development, packaging, and file access currently run through the Electron app.
+- Tauri migration is being evaluated; see `docs/tauri-migration-assessment.md`.
 
 ## Features
 
@@ -17,7 +18,6 @@ This project currently ships on `Electron`.
   open, create, rename, duplicate, move, and delete files/folders
 - Monaco-based editor with Markdown-focused formatting
 - Local reference files for characters, places, items, skills, and world notes
-- Integrated terminal in the Electron app
 - BYOK AI support for OpenAI-compatible endpoints and remote MCP-assisted workflows
 
 ## Security and Data Behavior

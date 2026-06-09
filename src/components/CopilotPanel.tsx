@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import { MessageSquarePlus, Paperclip, Send, Settings, Sparkles, Trash2, X } from "lucide-react";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useFileStore } from "../stores/fileStore";
+import { useBlueprintStore } from "../stores/blueprintStore";
 import { useTranslation } from "../hooks/useTranslation";
 import { callAI } from "../services/aiService";
 import {
@@ -17,7 +18,7 @@ import { selectTextAttachments } from "../services/attachmentService";
 import { getEditorContent, insertTextIntoEditor } from "../services/editorInsertionService";
 import { runLocalTool } from "../services/mcpService";
 import type { WorkspaceNode } from "../services/fileSystemService";
-import type { ChatSkills, ConversationAttachment, ConversationMessage, ConversationRecord, ConversationSummary, FileChange, FileContentCache, MultiFileContext } from "../types/ai";
+import type { ChatSkills, ConversationAttachment, ConversationMessage, ConversationRecord, ConversationSummary, ConversationWorkItem, FileChange, FileContentCache, MultiFileContext } from "../types/ai";
 import "./CopilotPanel.css";
 
 // 构建目录结构字符串（隐藏 .novel-assistance/conversations/）
@@ -119,8 +120,46 @@ function parseWriteToolMetadata(result: string): WriteToolMetadata | null {
   return null;
 }
 
+function stripToolCalls(content: string) {
+  return content.replace(/```tool_?call\s*\n[\s\S]*?\n```/g, "").trim();
+}
+
+function getToolWorkKind(toolName: string): ConversationWorkItem["kind"] {
+  if (toolName === "web_search") return "search";
+  if (toolName.includes("blueprint")) return "blueprint";
+  if (toolName === "read_file" || toolName === "list_directory") return "file";
+  if (toolName === "edit_file" || toolName === "create_file" || toolName === "create_blueprint") return "write";
+  return "tool";
+}
+
+function summarizeToolArgs(toolName: string, args: Record<string, unknown>) {
+  if (toolName === "web_search") return String(args.query ?? "");
+  if (toolName === "read_file" || toolName === "list_directory" || toolName === "edit_file" || toolName === "create_file") {
+    return String(args.path ?? "workspace");
+  }
+  if (toolName === "read_blueprint") return String(args.name ?? args.id ?? "blueprint");
+  if (toolName === "create_blueprint") return String(args.name ?? (args.blueprint as { name?: string } | undefined)?.name ?? "blueprint");
+  return toolName;
+}
+
+function summarizeToolResult(result: string) {
+  if (result.startsWith("Error")) return result.slice(0, 220);
+  try {
+    const parsed = JSON.parse(result) as any;
+    if (parsed?.summary?.name) {
+      return `${parsed.summary.name}: ${parsed.summary.nodes ?? 0} nodes, ${parsed.summary.edges ?? 0} edges`;
+    }
+    if (Array.isArray(parsed)) return `${parsed.length} item(s)`;
+    if (parsed?.relativePath) return parsed.relativePath;
+  } catch {
+    // Plain text tool results are summarized below.
+  }
+  return result.replace(/\s+/g, " ").slice(0, 220);
+}
+
 const CopilotPanel: React.FC = () => {
   const { activeFile, rootPath, getOpenTabs, files, refreshLoadedWorkspace } = useFileStore();
+  const { loadBlueprints } = useBlueprintStore();
   const { modelProfiles, defaultChatModelId, getModelProfileById, chatMaxTokens, setChatMaxTokens, contextMaxLength, webSearchLimit } = useSettingsStore();
   const { t } = useTranslation();
   const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
@@ -141,7 +180,9 @@ const CopilotPanel: React.FC = () => {
     agentSubMode: "plan",
   });
   const [isAgentMode, setIsAgentMode] = useState(false);
-  const [webSearchCount, setWebSearchCount] = useState(0);
+  const [, setWebSearchCount] = useState(0);
+  const [currentAssistantText, setCurrentAssistantText] = useState("");
+  const [currentAssistantWorkItems, setCurrentAssistantWorkItems] = useState<ConversationWorkItem[]>([]);
   const [agentTodo, setAgentTodo] = useState<{
     tool: string;
     path: string;
@@ -499,9 +540,30 @@ const CopilotPanel: React.FC = () => {
     setDraftAttachments([]);
     setIsLoading(true);
     setStatusText("");
+    setCurrentAssistantText("");
+    setCurrentAssistantWorkItems([]);
     await persistConversation(draftRecord);
 
     try {
+      const assistantTextParts: string[] = [];
+      let workItems: ConversationWorkItem[] = [];
+      let requestSearchCount = 0;
+      const appendAssistantText = (text: string) => {
+        const cleaned = stripToolCalls(text);
+        if (!cleaned) return;
+        if (assistantTextParts[assistantTextParts.length - 1] === cleaned) return;
+        assistantTextParts.push(cleaned);
+        setCurrentAssistantText(assistantTextParts.join("\n\n"));
+      };
+      const appendWorkItem = (item: ConversationWorkItem) => {
+        workItems = [...workItems, item];
+        setCurrentAssistantWorkItems(workItems);
+      };
+      const updateWorkItem = (id: string, patch: Partial<ConversationWorkItem>) => {
+        workItems = workItems.map((item) => item.id === id ? { ...item, ...patch } : item);
+        setCurrentAssistantWorkItems(workItems);
+      };
+
       const fileSizeWarning = activeFile ? getFileSizeWarning(activeFile.content) : null;
       if (fileSizeWarning) {
         setStatusText(fileSizeWarning);
@@ -536,17 +598,18 @@ const CopilotPanel: React.FC = () => {
       // 实现多轮工具调用循环
       let currentResponse = response;
       const maxIterations = 100;
-      const WRITE_TOOLS = new Set(["edit_file", "create_file"]);
+      const WRITE_TOOLS = new Set(["edit_file", "create_file", "create_blueprint"]);
 
       const extractToolCalls = (text: string): Array<{ fullMatch: string; json: string }> => {
         const results: Array<{ fullMatch: string; json: string }> = [];
-        const startPattern = /```tool_?call\s*\n/g;
+        const startPattern = /```(?:tool[_-]?call|json)\s*\n/g;
         let startMatch: RegExpExecArray | null;
         while ((startMatch = startPattern.exec(text)) !== null) {
           const startIndex = startMatch.index + startMatch[0].length;
           const endMarker = text.indexOf('\n```', startIndex);
           if (endMarker === -1) break;
           const json = text.substring(startIndex, endMarker);
+          if (!/"(?:name|tool)"\s*:/.test(json)) continue;
           const fullMatch = text.substring(startMatch.index, endMarker + 4);
           results.push({ fullMatch, json });
         }
@@ -592,17 +655,12 @@ const CopilotPanel: React.FC = () => {
       };
 
       const parseToolCall = (json: string): { name: string; args: Record<string, unknown> } | null => {
-        const name = extractField(json, 'name');
+        const name = extractField(json, 'name') || extractField(json, 'tool');
         if (!name) return null;
 
         const path = extractField(json, 'path');
 
-        if (name === 'create_file') {
-          const content = extractField(json, 'content');
-          return { name, args: { path, content } };
-        }
-
-        if (name === 'edit_file') {
+        if (name === 'edit_file' && !/"arguments"\s*:|\"args\"\s*:/.test(json)) {
           const editsMatch = json.match(/"edits"\s*:\s*\[/);
           if (!editsMatch) return { name, args: { path, edits: [] } };
 
@@ -638,8 +696,14 @@ const CopilotPanel: React.FC = () => {
 
         try {
           const parsed = JSON.parse(json);
-          return { name: parsed.name, args: parsed.arguments ?? {} };
+          const parsedName = parsed.name ?? parsed.tool;
+          if (!parsedName) return null;
+          return { name: parsedName, args: parsed.arguments ?? parsed.args ?? {} };
         } catch {
+          if (name === 'create_file') {
+            const content = extractField(json, 'content');
+            return { name, args: { path, content } };
+          }
           return { name, args: { path } };
         }
       };
@@ -712,10 +776,12 @@ const CopilotPanel: React.FC = () => {
 
       const MAX_CONTINUATION_RETRIES = 3;
       let continuationCount = 0;
+      let toolFormatRetryCount = 0;
 
       for (let iteration = 0; iteration < maxIterations; iteration++) {
         const extractedCalls = extractToolCalls(currentResponse);
         if (extractedCalls.length === 0 || !rootPath) break;
+        appendAssistantText(currentResponse);
 
         const toolResults: Array<{ name: string; result: string }> = [];
 
@@ -741,11 +807,24 @@ const CopilotPanel: React.FC = () => {
               });
 
               const partialArgs = { path: partial.path, edits: partial.completedEdits };
+              const workItem: ConversationWorkItem = {
+                id: createId("work"),
+                kind: "write",
+                label: `edit_file: ${partial.path}`,
+                status: "running",
+                detail: `completed ${partial.completedEdits.length}/${partial.estimatedTotalEdits}`,
+                createdAt: new Date().toISOString(),
+              };
+              appendWorkItem(workItem);
               const toolResult = await runLocalTool("edit_file", partialArgs, rootPath, files, {
                 enableWebSearch: chatSkills.enableWebSearch,
-                searchCount: webSearchCount,
+                searchCount: requestSearchCount,
                 searchLimit: webSearchLimit,
                 agentSubMode: isAgentMode ? chatSkills.agentSubMode : undefined,
+              });
+              updateWorkItem(workItem.id, {
+                status: toolResult.result.startsWith("Error") ? "error" : "done",
+                resultSummary: summarizeToolResult(toolResult.result),
               });
               toolResults.push({ name: "edit_file", result: toolResult.result });
               if (!toolResult.result.startsWith("Error")) {
@@ -781,6 +860,10 @@ const CopilotPanel: React.FC = () => {
               continuationCount++;
               currentResponse = currentResponse.replace(call.fullMatch, "");
             } else {
+              toolResults.push({
+                name: "tool_call_format_error",
+                result: "Error: Tool call JSON was incomplete. Please retry with a complete fenced tool_call JSON block.",
+              });
               setAgentTodo(null);
               currentResponse = currentResponse.replace(call.fullMatch, "");
             }
@@ -791,19 +874,40 @@ const CopilotPanel: React.FC = () => {
             const parsed = parseToolCall(call.json);
             if (!parsed) {
               console.error("Failed to extract tool_call fields:", call.json.substring(0, 100));
+              toolResults.push({
+                name: "tool_call_format_error",
+                result: `Error: Could not parse tool call JSON. Use {"name":"tool_name","arguments":{...}}. Received: ${call.json.slice(0, 500)}`,
+              });
               currentResponse = currentResponse.replace(call.fullMatch, "");
               continue;
             }
 
+            const workItem: ConversationWorkItem = {
+              id: createId("work"),
+              kind: getToolWorkKind(parsed.name),
+              label: `${parsed.name}: ${summarizeToolArgs(parsed.name, parsed.args)}`,
+              status: "running",
+              createdAt: new Date().toISOString(),
+            };
+            appendWorkItem(workItem);
             const toolResult = await runLocalTool(parsed.name, parsed.args, rootPath, files, {
               enableWebSearch: chatSkills.enableWebSearch,
-              searchCount: webSearchCount,
+              searchCount: requestSearchCount,
               searchLimit: webSearchLimit,
               agentSubMode: isAgentMode ? chatSkills.agentSubMode : undefined,
             });
+            updateWorkItem(workItem.id, {
+              status: toolResult.result.startsWith("Error") ? "error" : "done",
+              resultSummary: summarizeToolResult(toolResult.result),
+            });
 
             if (parsed.name === "web_search" && !toolResult.result.startsWith("Error")) {
-              setWebSearchCount(prev => prev + 1);
+              requestSearchCount += 1;
+              setWebSearchCount(requestSearchCount);
+            }
+
+            if (parsed.name === "create_blueprint" && !toolResult.result.startsWith("Error")) {
+              void loadBlueprints();
             }
 
             if (WRITE_TOOLS.has(parsed.name) && !toolResult.result.startsWith("Error")) {
@@ -814,6 +918,10 @@ const CopilotPanel: React.FC = () => {
             currentResponse = currentResponse.replace(call.fullMatch, "");
           } catch (parseError) {
             console.error("Failed to parse tool_call:", call.json.substring(0, 100), parseError);
+            toolResults.push({
+              name: "tool_call_format_error",
+              result: `Error: ${parseError instanceof Error ? parseError.message : String(parseError)}. Please retry with valid tool_call JSON.`,
+            });
             currentResponse = currentResponse.replace(call.fullMatch, "");
           }
         }
@@ -823,10 +931,18 @@ const CopilotPanel: React.FC = () => {
 
           setStatusText(`Processing tool results (iteration ${iteration + 1})...`);
 
+          const hasFormatError = toolResults.some((result) => result.name === "tool_call_format_error");
+          if (hasFormatError) {
+            toolFormatRetryCount += 1;
+          }
+          if (hasFormatError && toolFormatRetryCount > 2) {
+            break;
+          }
+
           currentResponse = await callAI({
             modelProfile: currentModel,
             taskType: "chat",
-            userMessage: `Based on the tool results below, please continue with your task:\n\n${toolContext}`,
+            userMessage: `Tool Results:\n\n${toolContext}\n\nContinue the user's TODO workflow. If the next TODO needs a tool, output only valid fenced tool_call JSON blocks in this response. Do not stop at a prose statement that you will use a tool. If you have enough information, provide the final answer. For blueprint creation, use create_blueprint before summarizing, and do not limit the blueprint to a fixed number of nodes; create the content-derived nodes and edges the source actually needs.`,
             documentContext: multiFileContext?.activeFile.content || activeFile?.content || getEditorContent() || "",
             documentFileName: activeFile?.name,
         maxTokens: isAgentMode ? undefined : chatMaxTokens,
@@ -848,7 +964,8 @@ const CopilotPanel: React.FC = () => {
       setAgentTodo(null);
       
       // 组合最终响应（只显示 AI 的最终回复）
-      response = currentResponse;
+      appendAssistantText(currentResponse);
+      response = assistantTextParts.join("\n\n") || stripToolCalls(currentResponse) || currentResponse;
 
       await persistFileCaches();
       await persistChatSkills();
@@ -858,7 +975,8 @@ const CopilotPanel: React.FC = () => {
         role: "assistant",
         content: response,
         createdAt: new Date().toISOString(),
-        searchCount: webSearchCount > 0 ? webSearchCount : undefined,
+        searchCount: requestSearchCount > 0 ? requestSearchCount : undefined,
+        workItems: workItems.length > 0 ? workItems : undefined,
       };
       const finalRecord: ConversationRecord = {
         ...draftRecord,
@@ -998,9 +1116,22 @@ const CopilotPanel: React.FC = () => {
             <div key={msg.id} className={`message ${msg.role}`}>
               <div className="message-content">
                 <div className="message-role">
-                  <span>{msg.role}</span>
+                  {msg.role === "user" && <span>{msg.role}</span>}
                   <time>{new Date(msg.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
                 </div>
+                {msg.role === "assistant" && msg.workItems && msg.workItems.length > 0 && (
+                  <details className="message-work-items" open>
+                    <summary>已执行工作</summary>
+                    <div className="message-work-list">
+                      {msg.workItems.map((item) => (
+                        <div key={item.id} className={`message-work-item ${item.status}`}>
+                          <span>{item.label}</span>
+                          {item.resultSummary && <small>{item.resultSummary}</small>}
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
                 <div className="message-text">
                   <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
                 </div>
@@ -1029,8 +1160,25 @@ const CopilotPanel: React.FC = () => {
           {isLoading && (
             <div className="message assistant">
               <div className="message-content">
-                <div className="message-role">assistant</div>
-                <div className="message-text loading">{t("copilot.thinking")}</div>
+                {currentAssistantWorkItems.length > 0 && (
+                  <details className="message-work-items" open>
+                    <summary>正在执行工作</summary>
+                    <div className="message-work-list">
+                      {currentAssistantWorkItems.map((item) => (
+                        <div key={item.id} className={`message-work-item ${item.status}`}>
+                          <span>{item.label}</span>
+                          {item.resultSummary && <small>{item.resultSummary}</small>}
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
+                {currentAssistantText && (
+                  <div className="message-text">
+                    <Markdown remarkPlugins={[remarkGfm]}>{currentAssistantText}</Markdown>
+                  </div>
+                )}
+                <div className="message-text loading">{statusText || t("copilot.thinking")}</div>
               </div>
             </div>
           )}

@@ -3,12 +3,9 @@ const fs = require("fs/promises");
 const fsSync = require("fs");
 const path = require("path");
 const os = require("os");
-const pty = require("node-pty");
-const { spawn, spawnSync } = require("child_process");
 let compareNodeNames = null;
 
 const isDev = !app.isPackaged;
-const terminals = new Map();
 const workspaceWatchers = new Map();
 let currentWorkspaceRoot = null;
 const TEXT_ATTACHMENT_EXTENSIONS = new Set([
@@ -46,6 +43,23 @@ const SKIPPED_WORKSPACE_DIRECTORIES = new Set([
   ".cache",
 ]);
 
+function configureChromiumCache() {
+  const cacheRoot = path.join(
+    os.tmpdir(),
+    "Nova",
+    app.isPackaged ? "chromium-cache" : `chromium-cache-dev-${process.pid}`
+  );
+  try {
+    fsSync.mkdirSync(cacheRoot, { recursive: true });
+    app.commandLine.appendSwitch("disk-cache-dir", cacheRoot);
+    app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
+  } catch (error) {
+    console.warn("[startup] Unable to prepare Chromium cache directory:", error);
+  }
+}
+
+configureChromiumCache();
+
 function getGlobalSettingsPath(name = "novel-assistance-settings") {
   const safeName = String(name).replace(/[^a-zA-Z0-9._-]/g, "-") || "settings";
   return path.join(app.getPath("userData"), GLOBAL_SETTINGS_DIR_NAME, `${safeName}.json`);
@@ -53,192 +67,6 @@ function getGlobalSettingsPath(name = "novel-assistance-settings") {
 
 function getGlobalApiConfigPath() {
   return path.join(os.homedir(), ".config", "nova", "NovaApi.json");
-}
-
-function expandWindowsEnv(value) {
-  return value.replace(/%([^%]+)%/g, (_match, name) => process.env[name] || "");
-}
-
-function readRegistryPath(root, key) {
-  try {
-    const result = spawnSync("reg", ["query", root, "/v", key], {
-      encoding: "utf8",
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const output = result.stdout || "";
-    const match = output.match(new RegExp(`${key}\\s+REG_\\w+\\s+(.+)`, "i"));
-    return match ? expandWindowsEnv(match[1].trim()) : "";
-  } catch {
-    return "";
-  }
-}
-
-function uniquePathEntries(entries) {
-  const seen = new Set();
-  return entries
-    .flatMap((entry) => String(entry || "").split(path.delimiter))
-    .map((entry) => expandWindowsEnv(entry.trim()))
-    .filter(Boolean)
-    .filter((entry) => {
-      const key = entry.toLowerCase();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-}
-
-function findCommand(command) {
-  const pathValue = uniquePathEntries([
-    readRegistryPath("HKCU\\Environment", "Path"),
-    readRegistryPath("HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment", "Path"),
-    process.env.Path || process.env.PATH || "",
-  ]).join(path.delimiter);
-  const extensions =
-    process.platform === "win32"
-      ? (process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";")
-      : [""];
-
-  for (const directory of uniquePathEntries([pathValue])) {
-    const candidates =
-      process.platform === "win32" && path.extname(command)
-        ? [path.join(directory, command)]
-        : extensions.map((extension) => path.join(directory, `${command}${extension}`));
-
-    for (const candidate of candidates) {
-      if (fsSync.existsSync(candidate)) {
-        return candidate;
-      }
-    }
-  }
-
-  return null;
-}
-
-function resolveCommand(command) {
-  return findCommand(`${command}.cmd`) || findCommand(`${command}.exe`) || findCommand(command);
-}
-
-function resolvePreferredWindowsCommand(command) {
-  if (command === "opencode") {
-    return findCommand("opencode.cmd") || findCommand("opencode.exe") || findCommand("opencode") || command;
-  }
-  return resolveCommand(command) || command;
-}
-
-function buildTerminalEnv() {
-  const env = { ...process.env };
-
-  if (process.platform === "win32") {
-    const userPath = process.env.USERPROFILE
-      ? [
-          path.join(process.env.USERPROFILE, "AppData", "Roaming", "npm"),
-          path.join(process.env.USERPROFILE, ".npm-global", "bin"),
-          path.join(process.env.USERPROFILE, ".bun", "bin"),
-          path.join(process.env.USERPROFILE, ".deno", "bin"),
-          path.join(process.env.USERPROFILE, ".cargo", "bin"),
-        ]
-      : [];
-    const appDataPath = process.env.APPDATA ? [path.join(process.env.APPDATA, "npm")] : [];
-    const localAppDataPath = process.env.LOCALAPPDATA
-      ? [
-          path.join(process.env.LOCALAPPDATA, "Microsoft", "WindowsApps"),
-          path.join(process.env.LOCALAPPDATA, "Programs", "opencode"),
-        ]
-      : [];
-    const machineRegistryPath = readRegistryPath(
-      "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment",
-      "Path"
-    );
-    const userRegistryPath = readRegistryPath("HKCU\\Environment", "Path");
-    const processPath = process.env.Path || process.env.PATH || "";
-    const mergedPath = uniquePathEntries([
-      ...userPath,
-      ...appDataPath,
-      ...localAppDataPath,
-      userRegistryPath,
-      machineRegistryPath,
-      processPath,
-    ]).join(path.delimiter);
-
-    env.Path = mergedPath;
-    env.PATH = mergedPath;
-    env.TERM = "xterm-256color";
-    env.PATHEXT = env.PATHEXT || ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.CPL";
-  }
-
-  return env;
-}
-
-function getTerminalShell() {
-  if (process.platform === "win32") {
-    return {
-      label: "Command Prompt",
-      command: "C:\\Windows\\System32\\cmd.exe",
-      args: ["/d"],
-    };
-  }
-
-  return {
-    label: path.basename(process.env.SHELL || "bash"),
-    command: process.env.SHELL || "bash",
-    args: [],
-  };
-}
-
-function quoteCmdArg(value) {
-  const stringValue = String(value);
-  if (!stringValue.length) return "\"\"";
-  if (!/[\s\"&|<>^()]/.test(stringValue)) return stringValue;
-  return `"${stringValue.replace(/"/g, "\"\"")}"`; 
-}
-
-function buildShellStyleInvocation(command, args = []) {
-  return [quoteCmdArg(command), ...args.map((arg) => quoteCmdArg(arg))].join(" ");
-}
-
-function getWindowsCommandExecution(command, args = []) {
-  const resolvedCommand =
-    typeof command === "string" && !command.includes("\\") && !path.extname(command)
-      ? resolvePreferredWindowsCommand(command)
-      : command;
-  const isCommandScript = /\.(cmd|bat)$/i.test(resolvedCommand);
-  const invocation = buildShellStyleInvocation(resolvedCommand, args);
-
-  if (isCommandScript) {
-    return {
-      resolvedCommand,
-      launcher: "cmd.exe",
-      command: "C:\\Windows\\System32\\cmd.exe",
-      args: ["/d", "/s", "/c", invocation],
-      invocation,
-    };
-  }
-
-  return {
-    resolvedCommand,
-    launcher: "direct",
-    command: resolvedCommand,
-    args,
-    invocation,
-  };
-}
-
-function inspectPathKind(targetPath) {
-  try {
-    const stat = fsSync.statSync(targetPath);
-    return {
-      path: targetPath,
-      exists: true,
-      kind: stat.isDirectory() ? "directory" : stat.isFile() ? "file" : "other",
-    };
-  } catch {
-    return {
-      path: targetPath,
-      exists: false,
-      kind: "missing",
-    };
-  }
 }
 
 function normalizePath(filePath) {
@@ -787,124 +615,6 @@ async function watchWorkspace(rootPath) {
   workspaceWatchers.set(normalizedRoot, watcher);
 }
 
-function openExternalTerminal(cwd, commandToRun) {
-  const workingDirectory = cwd ? assertWorkspacePath(cwd) : currentWorkspaceRoot || os.homedir();
-
-  if (process.platform === "win32") {
-    const execution = commandToRun ? getWindowsCommandExecution(commandToRun) : null;
-    const cmdArgs = execution ? ["/d", "/k", execution.invocation] : ["/d"];
-    const wtProcess = spawn("wt.exe", ["-d", workingDirectory, "cmd.exe", ...cmdArgs], {
-      cwd: workingDirectory,
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true,
-      env: buildTerminalEnv(),
-    });
-    wtProcess.on("error", () => {
-      spawn("C:\\Windows\\System32\\cmd.exe", ["/d", "/c", "start", "\"\"", "cmd.exe", ...cmdArgs], {
-        cwd: workingDirectory,
-        detached: true,
-        stdio: "ignore",
-        windowsHide: true,
-        env: buildTerminalEnv(),
-      }).unref();
-    });
-    wtProcess.unref();
-    return;
-  }
-
-  spawn(getTerminalShell().command, getTerminalShell().args, {
-    cwd: workingDirectory,
-    detached: true,
-    stdio: "ignore",
-    env: buildTerminalEnv(),
-  }).unref();
-}
-
-function runProbe(command, args = [], cwd = os.homedir()) {
-  try {
-    const execution =
-      process.platform === "win32"
-        ? getWindowsCommandExecution(command, args)
-        : {
-            resolvedCommand: command,
-            launcher: "direct",
-            command,
-            args,
-            invocation: [command, ...args].join(" "),
-          };
-    const result = spawnSync(execution.command, execution.args, {
-      cwd,
-      env: buildTerminalEnv(),
-      encoding: "utf8",
-      windowsHide: true,
-      timeout: 5000,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const stdout = (result.stdout || "").trim();
-    const stderr = (result.stderr || "").trim();
-    const details = [];
-    if (/EEXIST/i.test(`${stdout}\n${stderr}`)) {
-      details.push("CLI started but failed during internal initialization (EEXIST).");
-    }
-
-    return {
-      ok: result.status === 0,
-      status: result.status,
-      stdout,
-      stderr,
-      error: result.error?.message || null,
-      resolvedCommand: execution.resolvedCommand,
-      launcher: execution.launcher,
-      invocation: execution.invocation,
-      details,
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      status: null,
-      stdout: "",
-      stderr: "",
-      error: error instanceof Error ? error.message : String(error),
-      resolvedCommand: command,
-      launcher: process.platform === "win32" ? "cmd.exe" : "direct",
-      invocation: [command, ...args].join(" "),
-      details: [],
-    };
-  }
-}
-
-function diagnoseTerminal(cwd) {
-  const workingDirectory = cwd ? assertWorkspacePath(cwd) : currentWorkspaceRoot || os.homedir();
-  const env = buildTerminalEnv();
-  const shell = getTerminalShell();
-  const pathEntries = uniquePathEntries([env.Path || env.PATH || ""]);
-  const commands = ["pwsh.exe", "powershell.exe", "cmd.exe", "wt.exe", "opencode.cmd", "opencode.exe", "opencode"];
-  const opencodeConfigPath = path.join(os.homedir(), ".config", "opencode");
-
-  return {
-    isPackaged: app.isPackaged,
-    platform: process.platform,
-    arch: process.arch,
-    cwd: workingDirectory,
-    shell,
-    commands: Object.fromEntries(commands.map((command) => [command, findCommand(command)])),
-    pathEntries,
-    opencodeConfig: inspectPathKind(opencodeConfigPath),
-    probes: {
-      powershellVersion: runProbe(
-        "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-        ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "$PSVersionTable.PSVersion.ToString()"],
-        workingDirectory
-      ),
-      cmdEcho: runProbe("C:\\Windows\\System32\\cmd.exe", ["/d", "/s", "/c", "echo terminal-ok"], workingDirectory),
-      npmVersion: runProbe("npm", ["--version"], workingDirectory),
-      opencodeWhere: runProbe("C:\\Windows\\System32\\where.exe", ["opencode"], workingDirectory),
-      opencodeVersion: runProbe("opencode", ["--version"], workingDirectory),
-    },
-  };
-}
-
 async function createWindow() {
   const win = new BrowserWindow({
     width: 1280,
@@ -949,12 +659,6 @@ app.whenReady().then(async () => {
 });
 
 app.on("before-quit", () => {
-  for (const [terminalId, terminal] of terminals.entries()) {
-    try {
-      terminal.kill();
-    } catch {}
-    terminals.delete(terminalId);
-  }
   for (const watcher of workspaceWatchers.values()) {
     watcher.close();
   }
@@ -968,12 +672,6 @@ app.on("window-all-closed", () => {
 });
 
 app.on("will-quit", () => {
-  for (const [terminalId, terminal] of terminals.entries()) {
-    try {
-      terminal.kill();
-    } catch {}
-    terminals.delete(terminalId);
-  }
   for (const watcher of workspaceWatchers.values()) {
     try {
       watcher.close();
@@ -1323,64 +1021,6 @@ ipcMain.handle("workspace:unwatch", async (_event, rootPath) => {
   await closeWorkspaceWatcher(rootPath);
 });
 
-ipcMain.handle("terminal:start", async (event, options = {}) => {
-  const cwd = options.cwd ? assertWorkspacePath(options.cwd) : currentWorkspaceRoot || os.homedir();
-  const shell = getTerminalShell();
-  const terminalId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const ptyProcess = pty.spawn(shell.command, shell.args, {
-    name: "xterm-256color",
-    cols: options.cols || 80,
-    rows: options.rows || 24,
-    cwd,
-    env: buildTerminalEnv(),
-    useConpty: true,
-    conptyInheritCursor: true,
-  });
-
-  terminals.set(terminalId, ptyProcess);
-
-  ptyProcess.onData((data) => {
-    event.sender.send("terminal:data", { terminalId, data });
-  });
-
-  ptyProcess.onExit(({ exitCode }) => {
-    terminals.delete(terminalId);
-    event.sender.send("terminal:exit", { terminalId, exitCode });
-  });
-
-  return terminalId;
-});
-
-ipcMain.handle("terminal:getShellInfo", async () => {
-  const shell = getTerminalShell();
-  return {
-    label: shell.label,
-    command: shell.command,
-  };
-});
-
-ipcMain.handle("terminal:openExternal", async (_event, options = {}) => {
-  openExternalTerminal(options.cwd, options.command);
-});
-
-ipcMain.handle("terminal:diagnose", async (_event, options = {}) => {
-  return diagnoseTerminal(options.cwd);
-});
-
-ipcMain.handle("terminal:write", async (_event, terminalId, data) => {
-  terminals.get(terminalId)?.write(data);
-});
-
-ipcMain.handle("terminal:resize", async (_event, terminalId, cols, rows) => {
-  terminals.get(terminalId)?.resize(cols, rows);
-});
-
-ipcMain.handle("terminal:dispose", async (_event, terminalId) => {
-  const terminal = terminals.get(terminalId);
-  if (!terminal) return;
-  terminal.kill();
-  terminals.delete(terminalId);
-});
 
 // PDF 导出：用隐藏窗口渲染 HTML，调用 Electron 原生 printToPDF
 // 替代 jspdf + html2canvas，导出的 PDF 文字可选中

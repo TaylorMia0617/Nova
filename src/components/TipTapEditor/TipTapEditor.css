@@ -5,6 +5,33 @@
   background-color: #000000;
 }
 
+.tiptap-editor-wrapper.is-locked {
+  cursor: wait;
+}
+
+.tiptap-editor-wrapper.is-locked .tiptap-editor-content {
+  pointer-events: none;
+  user-select: none;
+}
+
+.tiptap-editor-lock {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  z-index: 20;
+  max-width: min(320px, calc(100% - 32px));
+  padding: 8px 10px;
+  border: 1px solid rgba(94, 234, 212, 0.32);
+  border-radius: 8px;
+  background: rgba(8, 12, 19, 0.86);
+  color: var(--color-text, #e2e8f0);
+  font-size: 12px;
+  line-height: 1.35;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+  backdrop-filter: blur(10px);
+}
+
 .tiptap-editor-content {
   flex-shrink: 0;
 }

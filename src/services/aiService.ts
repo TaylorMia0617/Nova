@@ -49,6 +49,7 @@ function buildSystemPrompt(
   directoryTree?: string,
   agentSubMode?: "plan" | "build"
 ) {
+  const fence = "```";
   const base = agentSubMode === "plan"
     ? `You are in PLAN mode. Your job is to analyze the workspace and create detailed implementation plans.
 
@@ -97,7 +98,7 @@ function buildSystemPrompt(
 - Do not use edit_file on existing .docx files. To create a .docx file, use create_file with plain text content
 - Always read a file before editing it (to understand current content)
 - When editing, specify precise line numbers (startLine, endLine)
-- Keep content concise - avoid generating excessively long text
+- Keep prose concise, but do not artificially limit structured outputs such as blueprints
 - If the user provides a plan, follow it step by step`
     : `You are a creative writing assistant helping a novelist.
 
@@ -137,27 +138,73 @@ Stats: ${meta.charCount} characters, ${meta.lineCount} lines, ${meta.wordCount} 
       ).join('\n')}`
     : "";
 
-  const toolInfo = taskType === "chat"
-    ? `\n\nYou have access to the following tools to explore the workspace:
-- list_directory: List files and folders in a directory (supports recursive listing). Use path="" for root directory.
-- read_file: Read file content (max 50KB). Use relative path from workspace root (e.g., "第四章.txt" or "notes/characters.txt").${enableWebSearch ? '\n- web_search: Search the internet for information. Use when you need external knowledge.' : ''}${agentSubMode === "build" ? '\n- edit_file: Edit a file with line-level precision. Provide path and edits array with startLine, endLine, and newContent (plain text).\n- create_file: Create a new file with optional initial content. Provide path and content (plain text).' : ''}
+  const webSearchGuidance = enableWebSearch
+    ? `\n\n## Web Search Policy\n- Use web_search proactively when the user asks for current facts, external references, market/background research, historical/cultural details you are unsure about, or any claim that may depend on up-to-date information.\n- Do not search for pure prose rewriting, local file analysis, or when the user explicitly asks you not to use the web.\n- After searching, summarize the useful evidence in your own words and continue the task.`
+    : `\n\n## Web Search Policy\n- Web search is currently disabled. Do not call web_search.\n- If the task clearly needs external or current information, say that web search needs to be enabled.`;
 
-Path rules for file tools:
-- Always use workspace-relative paths such as "章节/测试.docx".
-- Never use absolute paths, Windows drive-letter paths, "/tmp/...", or paths containing "..".
-- The tool result includes relativePath and absolutePath after writing.
+  const blueprintGuidance = `\n\n## Blueprint Guide\nBlueprints are story-structure graphs. A BlueprintDocument has { id, name, updatedAt, nodes, edges, viewport }.\n- nodes are story elements. Common fields: id, kind, layer, nodeType, x, y, title, summary, linkedChapters, typedData, customFields.\n- edges connect nodes with from/to ids and optional role. Use edges for narrative flow, structure flow, reveal/logic links, branch/merge paths.\n- chapter nodes use nodeType="chapter" and typedData.summary / typedData.chapterTitle. linkedChapters binds a node to workspace file names or heading titles.\n- typedData.mountLinks on a chapter node mounts child blueprints under that chapter.\n- Use list_blueprints and read_blueprint before analyzing existing blueprints.\n- In Build mode, use create_blueprint to generate a new blueprint. Place nodes on a readable grid, give every node a clear title and summary, and create edges that tell the story structure.\n- Never cap a generated blueprint to a fixed number of nodes. Use as many content-derived nodes as the source needs: chapter beats, hooks, characters, conflicts, clues, reveals, emotional turns, scene blocks, and structural summary nodes.\n- A chapter-to-blueprint workflow should read the source chapter first, derive a TODO-style construction plan, create the complete blueprint, then summarize what was created.`;
+
+  const todoWorkflowGuidance = taskType === "chat"
+    ? `\n\n## TODO Workflow\n- For multi-step requests, make a compact TODO plan before acting. For example: locate file, read content, analyze beats, create blueprint, summarize result.\n- If a TODO step needs a tool, output the tool_call block in the same response. Do not stop after saying you will use a tool.\n- After each Tool Results message, continue the TODO workflow: either call the next needed tool or provide the final answer.\n- For requests like "read chapter one and create a blueprint", use this sequence unless the needed content is already in context: list_directory when the path is unknown, read_file for the chapter, create_blueprint with all needed nodes and edges, then summarize.\n- You may show a short visible TODO list before tool_call blocks, but the tool_call blocks must still be present when tools are needed.`
+    : "";
+
+  const buildOnlyTools = agentSubMode === "build"
+    ? `
+- create_blueprint: Create or replace a blueprint from nodes and edges.
+- edit_file: Edit a file with line-level precision. Provide path and edits array with startLine, endLine, and newContent.
+- create_file: Create a new file with optional initial content.`
+    : "";
+
+  const buildOnlyExamples = agentSubMode === "build"
+    ? `
+or
+${fence}tool_call
+{"name":"create_blueprint","arguments":{"name":"Three Act Blueprint","nodes":[{"id":"chapter-1","kind":"custom","layer":"structure","nodeType":"chapter","x":120,"y":120,"title":"第一章","summary":"章节核心内容摘要","typedData":{"summary":"章节核心内容摘要","chapterTitle":"第一章"}}],"edges":[]}}
+${fence}
+or
+${fence}tool_call
+{"name":"edit_file","arguments":{"path":"chapter-4.txt","edits":[{"startLine":10,"endLine":15,"newContent":"new text here"}]}}
+${fence}
+or
+${fence}tool_call
+{"name":"create_file","arguments":{"path":"new-chapter.txt","content":"initial content here"}}
+${fence}
+
+IMPORTANT: When writing file or blueprint content, do not use Base64 encoding. Output plain text or plain JSON. The blueprint example above is only a format example; real blueprint creation must include all nodes and edges needed by the source, not a fixed or minimal count.`
+    : "";
+
+  const toolInfo = taskType === "chat"
+    ? `
+
+You have access to these tools:
+- list_directory: List workspace files and folders. Use path="" for the root.
+- read_file: Read file content, max 50KB. Use workspace-relative paths only.
+${enableWebSearch ? "- web_search: Search the internet. Use automatically when the Web Search Policy says external/current facts are needed.\n" : ""}- list_blueprints: List all story blueprints with compact summaries.
+- read_blueprint: Read a blueprint by id or name before analyzing it.${buildOnlyTools}
+
+Path rules:
+- Always use workspace-relative paths.
+- Never use absolute paths, drive-letter paths, /tmp paths, or paths containing "..".
 - Existing .docx files cannot be edited with edit_file. To create a .docx file, call create_file with plain text content.
 
-Use these tools when you need to read files that are not currently bound to this conversation. You can call them by responding with a JSON block like:
-\`\`\`tool_call
-{"name": "list_directory", "arguments": {"path": "", "recursive": true}}
-\`\`\`
+Tool call format: when you need tools, respond with one or more fenced blocks whose info string is tool_call and whose body is JSON. Do not merely describe that you will use a tool. If you say you will inspect, read, search, list, or create something, include the matching tool_call block in the same response.
+Examples:
+${fence}tool_call
+{"name":"list_directory","arguments":{"path":"","recursive":true}}
+${fence}
 or
-\`\`\`tool_call
-{"name": "read_file", "arguments": {"path": "第四章.txt"}}
-\`\`\`${enableWebSearch ? '\nor\n```tool_call\n{"name": "web_search", "arguments": {"query": "search terms"}}\n```' : ''}${agentSubMode === "build" ? '\nor\n```tool_call\n{"name": "edit_file", "arguments": {"path": "第四章.txt", "edits": [{"startLine": 10, "endLine": 15, "newContent": "new text here"}]}}\n```' : ''}${agentSubMode === "build" ? '\nor\n```tool_call\n{"name": "create_file", "arguments": {"path": "新章节.txt", "content": "initial content here"}}\n```' : ''}${agentSubMode === "build" ? '\n\nIMPORTANT: When writing file content, do NOT use Base64 encoding. Output the content as plain text in the "content" or "newContent" field. The system will handle special characters automatically.' : ''}`
+${fence}tool_call
+{"name":"read_file","arguments":{"path":"chapter-4.txt"}}
+${fence}
+${enableWebSearch ? `or\n${fence}tool_call\n{"name":"web_search","arguments":{"query":"search terms"}}\n${fence}\n` : ""}or
+${fence}tool_call
+{"name":"list_blueprints","arguments":{}}
+${fence}
+or
+${fence}tool_call
+{"name":"read_blueprint","arguments":{"name":"Main Story Structure"}}
+${fence}${buildOnlyExamples}`
     : `\n\n${selectionPrompt || ""}\nReturn only the rewritten text.`;
-
   const directoryInfo = directoryTree
     ? `\n\nWorkspace directory structure:\n\`\`\`\n${directoryTree}\n\`\`\``
     : "";
@@ -166,7 +213,7 @@ or
     ? "\n\nWhen relevant, use the browsing or search context that has already been retrieved from MCP tools."
     : "";
 
-  return `${base}${metaInfo}${workspaceInfo}${otherBoundFilesInfo}${allBoundFilesInfo}${toolInfo}${directoryInfo}${taskSpecificInfo}
+  return `${base}${metaInfo}${workspaceInfo}${otherBoundFilesInfo}${allBoundFilesInfo}${webSearchGuidance}${blueprintGuidance}${todoWorkflowGuidance}${toolInfo}${directoryInfo}${taskSpecificInfo}
 Current document content:
 ${context}`;
 }

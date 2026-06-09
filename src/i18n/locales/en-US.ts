@@ -28,14 +28,7 @@ const enUS: TranslationDict = {
       editor: "Editor",
       copilot: "AI Copilot",
       assets: "Explorer",
-      terminal: "Terminal",
       closePanel: "Close Panel",
-    },
-    terminal: {
-      title: "Terminal",
-      newTerminal: "New Terminal",
-      clearTerminal: "Clear Terminal",
-      closeTerminal: "Close Terminal",
     },
   },
   header: {
@@ -207,6 +200,7 @@ const enUS: TranslationDict = {
       result: "Result",
       insertAfter: "Insert after selection",
       replaceOriginal: "Replace original",
+      locked: "Processing selection. Editing is temporarily locked.",
     },
     export: {
       title: "Save As",
@@ -347,9 +341,6 @@ const enUS: TranslationDict = {
       exportFailed: "Failed to export document.",
     },
   },
-  terminal: {
-    loading: "Loading terminal...",
-  },
   history: {
     title: "Version History",
     subtitle: "Last 48 hours",
@@ -396,6 +387,16 @@ const enUS: TranslationDict = {
     doubleClickOpen: "Double-click to open",
     nodePalette: "Node palette",
     placeNodeHint: "Select, then click the blueprint to place",
+    inputGuide: {
+      ready: "Ready",
+      panning: "Panning",
+      selecting: "Selecting",
+      draggingNode: "Moving node",
+      connecting: "Connecting",
+      pan: "Left drag: pan",
+      marquee: "Shift + left drag: select",
+      menu: "Right click under 1s: menu",
+    },
     newTemplate: "New template",
     useTemplate: "Use",
     saveTemplate: "Save template",

@@ -8,6 +8,8 @@
   min-height: 30px;
   -webkit-app-region: drag;
   user-select: none;
+  position: relative;
+  z-index: 10000;
 }
 
 .menubar-left {
@@ -87,17 +89,18 @@
 }
 
 .dropdown-menu {
-  position: absolute;
-  top: 100%;
-  left: 0;
+  position: fixed;
   min-width: 200px;
   background: var(--app-menu-surface);
   border: 1px solid var(--color-border-strong);
   border-radius: 6px;
   padding: 4px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-  z-index: 1000;
+  z-index: 10000;
+  overflow-y: auto;
   animation: dropdownFadeIn 0.15s ease;
+  -webkit-app-region: no-drag;
+  user-select: none;
 }
 
 @keyframes dropdownFadeIn {
