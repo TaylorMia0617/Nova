@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { GitBranch, LayoutTemplate, Minus, Plus, RotateCcw, Save, Settings2, Trash2, UserRound } from "lucide-react";
+import { GitBranch, LayoutDashboard, LayoutTemplate, Minus, Plus, RotateCcw, Save, Settings2, Trash2, UserRound } from "lucide-react";
 import { useBlueprintStore } from "../stores/blueprintStore";
 import { useFileStore } from "../stores/fileStore";
 import type { WorkspaceNode } from "../services/fileSystemService";
 import type { BlueprintDocument, BlueprintEdge, BlueprintFieldBindingKey, BlueprintFieldInputMode, BlueprintLogicCompareOperator, BlueprintLogicTree, BlueprintMountLink, BlueprintNode, BlueprintNodeKind, BlueprintNodeLayer, BlueprintNodeTemplate, BlueprintPresetType, BlueprintTypedData, BlueprintTypedNodeType } from "../types/blueprint";
 import { useTranslation } from "../hooks/useTranslation";
 import { getFloatingPosition, type FloatingPositionResult } from "../utils/floatingPosition";
+import { autoLayoutBlueprint } from "../utils/blueprintAutoLayout";
 import "./BlueprintEditor.css";
 
 interface Props {
@@ -1675,6 +1676,14 @@ export default function BlueprintEditor({ blueprintId }: Props) {
     setIsTemplateModalOpen(false);
   };
 
+  const handleAutoLayout = () => {
+    if (!blueprint || blueprint.nodes.length === 0) return;
+    commitBlueprint(autoLayoutBlueprint(blueprint));
+    setSelectedNodeIds([]);
+    setSelectedEdgeId(null);
+    focusNode(blueprintId, null);
+  };
+
   if (!blueprint) {
     return <div className="blueprint-editor-empty">{t("blueprint.loading")}</div>;
   }
@@ -3213,6 +3222,9 @@ export default function BlueprintEditor({ blueprintId }: Props) {
           setIsTemplateModalOpen(true);
         }}>
           <LayoutTemplate size={15} /> {t("blueprint.templates")}
+        </button>
+        <button type="button" onClick={handleAutoLayout} disabled={blueprint.nodes.length === 0}>
+          <LayoutDashboard size={15} /> {t("blueprint.autoLayout")}
         </button>
         <button type="button" className={connectMode ? "active" : ""} onClick={() => {
           setConnectMode((value) => !value);

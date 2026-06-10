@@ -55,23 +55,32 @@
   overflow-x: auto;
   overflow-y: visible;
   white-space: nowrap;
-  scrollbar-width: none;
+  scrollbar-width: thin;
   scrollbar-color: #4a5568 transparent;
-  padding: 4px 4px;
+  padding: 5px 8px 7px;
   background: #000000;
   border-bottom: 1px solid #2d3748;
-  -ms-overflow-style: none;
+  -ms-overflow-style: auto;
   box-sizing: border-box;
 }
 
 .panel-actions .format-toolbar::-webkit-scrollbar {
-  display: none;
+  height: 5px;
+}
+
+.panel-actions .format-toolbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.panel-actions .format-toolbar::-webkit-scrollbar-thumb {
+  background: rgba(113, 128, 150, 0.55);
+  border-radius: 999px;
 }
 
 .panel-actions .format-toolbar-inner {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
   width: max-content;
   min-width: max-content;
   white-space: nowrap;
@@ -81,8 +90,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 28px;
-  height: 28px;
+  min-width: 30px;
+  height: 30px;
   padding: 0 6px;
   background: transparent;
   color: #a0aec0;
@@ -120,6 +129,91 @@
 .panel-actions .toolbar-dropdown-wrap {
   position: relative;
   display: inline-flex;
+}
+
+.panel-actions .toolbar-control-wrap {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  flex-shrink: 0;
+}
+
+.panel-actions .toolbar-select,
+.panel-actions .toolbar-number-input {
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: #a0aec0;
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.panel-actions .toolbar-select {
+  padding: 0 28px 0 10px;
+  cursor: pointer;
+}
+
+.panel-actions .toolbar-number-input {
+  width: 58px;
+  padding: 0 4px 0 10px;
+}
+
+.panel-actions .toolbar-number-input::-webkit-inner-spin-button,
+.panel-actions .toolbar-number-input::-webkit-outer-spin-button {
+  opacity: 1;
+}
+
+.panel-actions .toolbar-select:hover:not(:disabled),
+.panel-actions .toolbar-number-input:hover:not(:disabled),
+.panel-actions .toolbar-select:focus:not(:disabled),
+.panel-actions .toolbar-number-input:focus:not(:disabled) {
+  background: #2d3748;
+  border-color: #4a5568;
+  color: #e2e8f0;
+}
+
+.panel-actions .toolbar-select:disabled,
+.panel-actions .toolbar-number-input:disabled,
+.panel-actions .toolbar-unit {
+  opacity: 0.35;
+}
+
+.panel-actions .toolbar-select option {
+  background: #1a1f2e;
+  color: #e2e8f0;
+}
+
+.panel-actions .font-family-select {
+  width: 136px;
+  min-width: 136px;
+}
+
+.panel-actions .font-size-control {
+  gap: 6px;
+  padding: 0 4px;
+  border-radius: 6px;
+  background: rgba(45, 55, 72, 0.28);
+}
+
+.panel-actions .font-size-preset-select {
+  width: 76px;
+  min-width: 76px;
+  padding: 0 24px 0 8px;
+}
+
+.panel-actions .line-height-select {
+  width: 86px;
+  min-width: 86px;
+}
+
+.panel-actions .toolbar-unit {
+  color: #a0aec0;
+  font-size: 11px;
+  margin-right: 2px;
+  pointer-events: none;
 }
 
 .panel-actions .toolbar-dropdown {
@@ -182,6 +276,14 @@
 
 .panel-actions .font-option {
   font-size: 13px;
+}
+
+.panel-actions .font-size-picker {
+  min-width: 84px;
+}
+
+.panel-actions .font-size-option {
+  text-align: center;
 }
 
 .panel-actions .line-height-picker {

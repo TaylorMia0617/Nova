@@ -3,6 +3,7 @@ const fs = require("fs/promises");
 const fsSync = require("fs");
 const path = require("path");
 const os = require("os");
+const crypto = require("crypto");
 let compareNodeNames = null;
 
 const isDev = !app.isPackaged;
@@ -33,6 +34,167 @@ const TEXT_ATTACHMENT_EXTENSIONS = new Set([
 ]);
 const MAX_ATTACHMENT_TEXT_LENGTH = 120000;
 const GLOBAL_SETTINGS_DIR_NAME = "global-settings";
+const CACHE_SCHEMA_VERSION = 1;
+const CACHE_PROMPT_VERSION = "nova-cache-v1";
+const DEFAULT_GLOBAL_HABITS = `---
+template: true
+confirmed_by_user: false
+---
+
+# 用户偏好
+
+> 默认模板只说明用途，不代表真实用户偏好。只有用户明确表达、长期稳定出现，或达到高置信证据阈值的内容才应写入这里。
+
+## 写作
+
+待观察
+
+## 代码
+
+待观察
+
+## Agent
+
+待观察
+
+## 输出习惯
+
+- 中文回答
+- 使用 Markdown
+
+## 自动识别偏好
+
+待观察
+`;
+const LEGACY_DEFAULT_GLOBAL_HABITS = `# 用户偏好
+
+## 写作
+
+- 偏好西幻
+- 偏好轻小说风格
+- 喜欢长篇规划
+- 喜欢先大纲后正文
+
+## 代码
+
+- 默认 Typescript
+- 默认 Vue3
+- 默认 Tailwind
+
+## Agent
+
+- 默认 Smart Mode
+- 超过3000字自动进入 Plan 模式
+
+## 输出习惯
+
+- 中文回答
+- 使用Markdown
+`;
+const FALLBACK_PROJECT_TITLE = "未命名项目";
+const LEGACY_DEFAULT_PROJECT_TITLE = "魔女记录集";
+
+function normalizeMarkdownTemplate(content) {
+  return String(content ?? "").replace(/\r\n/g, "\n").trim();
+}
+
+function isLegacyDefaultGlobalHabits(content) {
+  return normalizeMarkdownTemplate(content) === normalizeMarkdownTemplate(LEGACY_DEFAULT_GLOBAL_HABITS);
+}
+
+function formatProjectTitle(name) {
+  return `《${name.replace(/^《|》$/g, "")}》`;
+}
+
+function formatProjectTitleFromWorkspace(rootPath) {
+  const rawName = path.basename(String(rootPath || "").replace(/[\\/]+$/, "")).trim();
+  return formatProjectTitle(rawName || FALLBACK_PROJECT_TITLE);
+}
+
+function buildDefaultProjectImportants(rootPath) {
+  return `# 小说摘要
+
+名称：
+${formatProjectTitleFromWorkspace(rootPath)}
+
+当前进度：
+待整理
+
+核心主线：
+待整理
+
+重要设定：
+待整理
+
+未回收伏笔：
+待整理
+
+当前创作方向：
+待整理
+`;
+}
+
+function isLegacyDefaultProjectImportants(content) {
+  const normalized = String(content ?? "").replace(/\r\n/g, "\n");
+  return normalized.trim() === `# 小说摘要
+
+名称：
+${formatProjectTitle(LEGACY_DEFAULT_PROJECT_TITLE)}
+
+当前进度：
+第六章
+
+核心主线：
+...
+
+重要设定：
+...
+
+未回收伏笔：
+...
+
+当前创作方向：
+...`.trim();
+}
+
+function extractProjectTitleFromMemory(content) {
+  const newProjectMatch = String(content ?? "").match(/新项目\s*《([^》]+)》/);
+  if (newProjectMatch?.[1]) return formatProjectTitle(newProjectMatch[1].trim());
+
+  const projectNameLines = String(content ?? "").match(/^.*项目名称.*$/gm) ?? [];
+  for (let index = projectNameLines.length - 1; index >= 0; index -= 1) {
+    const titles = [...projectNameLines[index].matchAll(/《([^》]+)》/g)];
+    const latest = titles[titles.length - 1]?.[1];
+    if (latest) return formatProjectTitle(latest.trim());
+  }
+  return null;
+}
+
+function replaceProjectSummaryTitle(content, title) {
+  const normalized = String(content ?? "");
+  if (/名称：\s*\n[^\n]*/.test(normalized)) {
+    return normalized.replace(/(名称：\s*\n)[^\n]*/, `$1${title}`);
+  }
+  return normalized.replace(/^# 小说摘要\s*/u, `# 小说摘要\n\n名称：\n${title}\n\n`);
+}
+
+async function migrateLegacyDefaultProjectImportants(importantsPath, rootPath) {
+  try {
+    const content = await fs.readFile(importantsPath, "utf8");
+    if (isLegacyDefaultProjectImportants(content)) {
+      await writeWithRetry(importantsPath, buildDefaultProjectImportants(rootPath));
+      return;
+    }
+
+    const topTitle = content.match(/名称：\s*\n(《[^》]+》|[^\n]*)/)?.[1]?.trim();
+    if (topTitle === formatProjectTitle(LEGACY_DEFAULT_PROJECT_TITLE)) {
+      const nextTitle = extractProjectTitleFromMemory(content) ?? formatProjectTitleFromWorkspace(rootPath);
+      await writeWithRetry(importantsPath, replaceProjectSummaryTitle(content, nextTitle));
+    }
+  } catch (error) {
+    console.warn("[memory] Unable to migrate project importants:", error);
+  }
+}
 const SKIPPED_WORKSPACE_DIRECTORIES = new Set([
   ".git",
   ".novel-assistance",
@@ -69,6 +231,10 @@ function getGlobalApiConfigPath() {
   return path.join(os.homedir(), ".config", "nova", "NovaApi.json");
 }
 
+function getGlobalHabitsPath() {
+  return path.join(os.homedir(), ".config", "nova", "Nova.md");
+}
+
 function normalizePath(filePath) {
   return path.normalize(filePath);
 }
@@ -86,6 +252,12 @@ function getWorkspaceAppDataPaths() {
   const versionHistoryPath = path.join(referenceDataPath, "version-history.json");
   const blueprintsPath = path.join(referenceDataPath, "blueprints.json");
   const blueprintTemplatesPath = path.join(referenceDataPath, "blueprint-templates.json");
+  const habitsPath = path.join(dataPath, "habits");
+  const importantsPath = path.join(habitsPath, "Importants.md");
+  const snapshotPath = path.join(habitsPath, "Snapshot.md");
+  const cacheMemoryPath = path.join(habitsPath, "Cache.md");
+  const cachePath = path.join(dataPath, "cache");
+  const cacheIndexPath = path.join(cachePath, "index.json");
 
   return {
     rootPath: currentWorkspaceRoot,
@@ -97,6 +269,12 @@ function getWorkspaceAppDataPaths() {
     versionHistoryPath,
     blueprintsPath,
     blueprintTemplatesPath,
+    habitsPath,
+    importantsPath,
+    snapshotPath,
+    cacheMemoryPath,
+    cachePath,
+    cacheIndexPath,
   };
 }
 
@@ -126,6 +304,103 @@ async function ensureWorkspaceAppData() {
   }
 
   return paths;
+}
+
+async function ensureGlobalHabits() {
+  const habitsPath = getGlobalHabitsPath();
+  await fs.mkdir(path.dirname(habitsPath), { recursive: true });
+  if (!(await pathExists(habitsPath))) {
+    await fs.writeFile(habitsPath, DEFAULT_GLOBAL_HABITS, "utf8");
+  } else {
+    const current = await fs.readFile(habitsPath, "utf8");
+    if (isLegacyDefaultGlobalHabits(current)) {
+      await writeWithRetry(habitsPath, DEFAULT_GLOBAL_HABITS);
+    }
+  }
+  return habitsPath;
+}
+
+async function ensureWorkspaceHabits() {
+  const paths = await ensureWorkspaceAppData();
+  await fs.mkdir(paths.habitsPath, { recursive: true });
+  if (!(await pathExists(paths.importantsPath))) {
+    await fs.writeFile(paths.importantsPath, buildDefaultProjectImportants(paths.rootPath), "utf8");
+  } else {
+    await migrateLegacyDefaultProjectImportants(paths.importantsPath, paths.rootPath);
+  }
+  if (!(await pathExists(paths.snapshotPath))) {
+    await fs.writeFile(paths.snapshotPath, "# Snapshot\n\n当前短期状态：\n\n", "utf8");
+  }
+  if (!(await pathExists(paths.cacheMemoryPath))) {
+    await fs.writeFile(paths.cacheMemoryPath, "# Cache\n\n内容寻址缓存摘要：\n\n", "utf8");
+  }
+  return {
+    rootPath: paths.rootPath,
+    habitsPath: paths.habitsPath,
+    importantsPath: paths.importantsPath,
+    snapshotPath: paths.snapshotPath,
+    cacheMemoryPath: paths.cacheMemoryPath,
+  };
+}
+
+function getGlobalContentCachePaths() {
+  const cacheRoot = path.join(app.getPath("userData"), "global_cache");
+  return {
+    cacheRoot,
+    blobsPath: path.join(cacheRoot, "blobs"),
+  };
+}
+
+function stableJsonStringify(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJsonStringify).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJsonStringify(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function sha256(value) {
+  return crypto.createHash("sha256").update(String(value)).digest("hex");
+}
+
+function buildContentCacheKey({ content, schemaVersion, modelVersion, promptVersion, paramsVersion }) {
+  const contentHash = sha256(content ?? "");
+  const keyMaterial = stableJsonStringify({
+    contentHash,
+    schemaVersion: schemaVersion ?? CACHE_SCHEMA_VERSION,
+    modelVersion: modelVersion ?? "default",
+    promptVersion: promptVersion ?? CACHE_PROMPT_VERSION,
+    paramsVersion: paramsVersion ?? "default",
+  });
+  return {
+    contentHash,
+    cacheKey: sha256(keyMaterial),
+  };
+}
+
+async function readProjectCacheIndex() {
+  const paths = await ensureWorkspaceAppData();
+  await fs.mkdir(paths.cachePath, { recursive: true });
+  if (!(await pathExists(paths.cacheIndexPath))) {
+    await fs.writeFile(paths.cacheIndexPath, JSON.stringify({ schemaVersion: CACHE_SCHEMA_VERSION, entries: {} }, null, 2), "utf8");
+  }
+  try {
+    const parsed = JSON.parse(await fs.readFile(paths.cacheIndexPath, "utf8"));
+    return parsed && typeof parsed === "object" && parsed.entries && typeof parsed.entries === "object"
+      ? parsed
+      : { schemaVersion: CACHE_SCHEMA_VERSION, entries: {} };
+  } catch {
+    return { schemaVersion: CACHE_SCHEMA_VERSION, entries: {} };
+  }
+}
+
+async function writeProjectCacheIndex(index) {
+  const paths = await ensureWorkspaceAppData();
+  await fs.mkdir(paths.cachePath, { recursive: true });
+  await writeWithRetry(paths.cacheIndexPath, JSON.stringify(index, null, 2));
+  return index;
 }
 
 async function readConversationIndex() {
@@ -811,6 +1086,98 @@ ipcMain.handle("settings:writeGlobalApiConfig", async (_event, content) => {
 });
 
 // 参考列表管理 IPC 处理器
+ipcMain.handle("memory:readGlobalHabits", async () => {
+  const habitsPath = await ensureGlobalHabits();
+  return fs.readFile(habitsPath, "utf8");
+});
+
+ipcMain.handle("memory:writeGlobalHabits", async (_event, content) => {
+  const habitsPath = await ensureGlobalHabits();
+  await writeWithRetry(habitsPath, String(content ?? ""));
+});
+
+ipcMain.handle("memory:ensureWorkspaceHabits", async () => {
+  return ensureWorkspaceHabits();
+});
+
+ipcMain.handle("memory:readProjectImportant", async () => {
+  const paths = await ensureWorkspaceHabits();
+  return fs.readFile(paths.importantsPath, "utf8");
+});
+
+ipcMain.handle("memory:writeProjectImportant", async (_event, content) => {
+  const paths = await ensureWorkspaceHabits();
+  await writeWithRetry(paths.importantsPath, String(content ?? ""));
+});
+
+ipcMain.handle("memory:readProjectSnapshot", async () => {
+  const paths = await ensureWorkspaceHabits();
+  return fs.readFile(paths.snapshotPath, "utf8");
+});
+
+ipcMain.handle("memory:writeProjectSnapshot", async (_event, content) => {
+  const paths = await ensureWorkspaceHabits();
+  await writeWithRetry(paths.snapshotPath, String(content ?? ""));
+});
+
+ipcMain.handle("memory:readProjectCacheMemory", async () => {
+  const paths = await ensureWorkspaceHabits();
+  return fs.readFile(paths.cacheMemoryPath, "utf8");
+});
+
+ipcMain.handle("memory:writeProjectCacheMemory", async (_event, content) => {
+  const paths = await ensureWorkspaceHabits();
+  await writeWithRetry(paths.cacheMemoryPath, String(content ?? ""));
+});
+
+ipcMain.handle("cache:get", async (_event, request) => {
+  const { blobsPath } = getGlobalContentCachePaths();
+  const { contentHash, cacheKey } = buildContentCacheKey(request ?? {});
+  const blobPath = path.join(blobsPath, `${cacheKey}.json`);
+  if (!(await pathExists(blobPath))) {
+    return { hit: false, contentHash, cacheKey };
+  }
+  try {
+    return { hit: true, contentHash, cacheKey, value: JSON.parse(await fs.readFile(blobPath, "utf8")) };
+  } catch {
+    return { hit: false, contentHash, cacheKey };
+  }
+});
+
+ipcMain.handle("cache:put", async (_event, request) => {
+  const { blobsPath } = getGlobalContentCachePaths();
+  await fs.mkdir(blobsPath, { recursive: true });
+  const { contentHash, cacheKey } = buildContentCacheKey(request ?? {});
+  const now = new Date().toISOString();
+  const blob = {
+    schemaVersion: request?.schemaVersion ?? CACHE_SCHEMA_VERSION,
+    promptVersion: request?.promptVersion ?? CACHE_PROMPT_VERSION,
+    modelVersion: request?.modelVersion ?? "default",
+    paramsVersion: request?.paramsVersion ?? "default",
+    contentHash,
+    cacheKey,
+    kind: request?.kind ?? "generic",
+    value: request?.value ?? null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  await writeWithRetry(path.join(blobsPath, `${cacheKey}.json`), JSON.stringify(blob, null, 2));
+
+  const index = await readProjectCacheIndex();
+  index.entries[cacheKey] = {
+    contentHash,
+    kind: blob.kind,
+    relativePath: request?.relativePath ?? null,
+    updatedAt: now,
+  };
+  await writeProjectCacheIndex(index);
+  return { hit: true, contentHash, cacheKey, value: blob };
+});
+
+ipcMain.handle("cache:index", async () => {
+  return readProjectCacheIndex();
+});
+
 ipcMain.handle("reference:getLists", async () => {
   return readReferenceListsIndex();
 });

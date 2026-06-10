@@ -59,6 +59,24 @@ const DEFAULT_PROFILE: ModelProfile = {
 };
 
 const DEFAULT_PROMPTS: SelectionPromptTemplates = {
+  polish: `请你对下面文本进行“去AI味、增强作者味”的改写。
+
+要求：
+1. 保留原意、信息量和基本结构，不要擅自新增设定。
+2. 减少模板化表达，避免“首先、其次、总之、值得注意的是”等机械连接词。
+3. 让句子更像真人作者写作：有长短句变化，有轻微停顿，有自然转折。
+4. 保留适度个人判断和语气，不要写得过度客观、圆滑、像说明书。
+5. 删除空泛套话，改成更具体、更有画面感或更有作者立场的表达。
+6. 不要过度华丽，不要堆比喻，不要网文腔。
+7. 如果原文有情绪，请保留情绪；如果原文偏理性，请保持克制但别僵硬。
+8. 减少“——”的滥用。
+9. 允许保留少量不完美的口语化表达，让文本看起来像作者自然写出来的，而不是被机器打磨到过度平滑。
+10. 输出只给改写后的正文，不要解释修改过程。`,
+  correct: "请纠正这段文字中的错别字、病句、标点和语法问题，只返回修正后的文本。",
+  stylize: "请在保留核心信息的前提下，将这段文字改写得更有文学性和画面感，但不要过度华丽、不要堆比喻、不要网文腔。只返回改写后的正文。",
+};
+
+const LEGACY_DEFAULT_PROMPTS: SelectionPromptTemplates = {
   polish: "请在不改变原意的前提下润色这段文字，提升流畅度、节奏感与表达质感，只返回修改后的文本。",
   correct: "请纠正这段文字中的错别字、病句、标点和语法问题，只返回修正后的文本。",
   stylize: "请在保留核心信息的前提下，将这段文字风格化得更有文学性和画面感，只返回改写后的文本。",
@@ -68,6 +86,21 @@ const DEFAULT_HEADING_COLORS: HeadingColors = {
   h1: "#e2e8f0",
   h2: "#e2e8f0",
   h3: "#e2e8f0",
+};
+
+const normalizeSelectionPromptTemplates = (
+  prompts?: Partial<SelectionPromptTemplates> | null
+): SelectionPromptTemplates => {
+  const merged = {
+    ...DEFAULT_PROMPTS,
+    ...(prompts ?? {}),
+  };
+
+  return {
+    polish: merged.polish === LEGACY_DEFAULT_PROMPTS.polish ? DEFAULT_PROMPTS.polish : merged.polish,
+    correct: merged.correct === LEGACY_DEFAULT_PROMPTS.correct ? DEFAULT_PROMPTS.correct : merged.correct,
+    stylize: merged.stylize === LEGACY_DEFAULT_PROMPTS.stylize ? DEFAULT_PROMPTS.stylize : merged.stylize,
+  };
 };
 
 const sanitizeProfile = (profile: ModelProfile): ModelProfile => ({
@@ -156,6 +189,7 @@ export async function syncFromFile(): Promise<boolean> {
     if (hasChanges) {
       useSettingsStore.setState({
         ...parsed,
+        selectionPromptTemplates: normalizeSelectionPromptTemplates(parsed.selectionPromptTemplates),
         headingColors: {
           ...DEFAULT_HEADING_COLORS,
           ...(parsed.headingColors ?? {}),
@@ -318,6 +352,7 @@ export const useSettingsStore = create<SettingsState>()(
         return {
           ...currentState,
           ...(persisted ?? {}),
+          selectionPromptTemplates: normalizeSelectionPromptTemplates(persisted?.selectionPromptTemplates),
           headingColors: {
             ...DEFAULT_HEADING_COLORS,
             ...(persisted?.headingColors ?? {}),

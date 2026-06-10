@@ -1,4 +1,4 @@
-import { Extension } from "@tiptap/core";
+import { Extension, type CommandProps } from "@tiptap/core";
 
 declare module "@tiptap/core" {
   interface Commands<ReturnType> {
@@ -7,6 +7,42 @@ declare module "@tiptap/core" {
       unsetLineHeight: () => ReturnType;
     };
   }
+}
+
+function updateSelectedLineHeight(
+  { state, dispatch }: CommandProps,
+  types: string[],
+  lineHeight: string | null
+) {
+  const { doc, selection, tr } = state;
+  const attrsFor = (attrs: Record<string, unknown>) => ({ ...attrs, lineHeight });
+  let changed = false;
+
+  const updateNode = (pos: number, node: { type: { name: string }; attrs: Record<string, unknown> }) => {
+    if (!types.includes(node.type.name)) return;
+    tr.setNodeMarkup(pos, undefined, attrsFor(node.attrs));
+    changed = true;
+  };
+
+  if (selection.empty) {
+    for (let depth = selection.$from.depth; depth > 0; depth -= 1) {
+      const node = selection.$from.node(depth);
+      if (types.includes(node.type.name)) {
+        updateNode(selection.$from.before(depth), node);
+        break;
+      }
+    }
+  } else {
+    doc.nodesBetween(selection.from, selection.to, (node, pos) => {
+      updateNode(pos, node);
+    });
+  }
+
+  if (changed && dispatch) {
+    dispatch(tr);
+  }
+
+  return changed;
 }
 
 export const LineHeight = Extension.create({
@@ -41,17 +77,13 @@ export const LineHeight = Extension.create({
     return {
       setLineHeight:
         (height: string) =>
-        ({ commands }) => {
-          return this.options.types.every((type: string) =>
-            commands.updateAttributes(type, { lineHeight: height })
-          );
+        (props) => {
+          return updateSelectedLineHeight(props, this.options.types, height);
         },
       unsetLineHeight:
         () =>
-        ({ commands }) => {
-          return this.options.types.every((type: string) =>
-            commands.updateAttributes(type, { lineHeight: null })
-          );
+        (props) => {
+          return updateSelectedLineHeight(props, this.options.types, null);
         },
     };
   },

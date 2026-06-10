@@ -1,12 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { MessageSquarePlus, Paperclip, Send, Settings, Sparkles, Trash2, X } from "lucide-react";
+import { ChevronDown, MessageSquarePlus, Paperclip, Send, Settings, Sparkles, Trash2, X } from "lucide-react";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useFileStore } from "../stores/fileStore";
 import { useBlueprintStore } from "../stores/blueprintStore";
 import { useTranslation } from "../hooks/useTranslation";
-import { callAI } from "../services/aiService";
+import { callAI, reviewEditFileContent } from "../services/aiService";
 import {
   deleteConversation,
   ensureWorkspaceConversationStore,
@@ -17,8 +17,17 @@ import {
 import { selectTextAttachments } from "../services/attachmentService";
 import { getEditorContent, insertTextIntoEditor } from "../services/editorInsertionService";
 import { runLocalTool } from "../services/mcpService";
-import type { WorkspaceNode } from "../services/fileSystemService";
-import type { ChatSkills, ConversationAttachment, ConversationMessage, ConversationRecord, ConversationSummary, ConversationWorkItem, FileChange, FileContentCache, MultiFileContext } from "../types/ai";
+import {
+  applyMemoryCandidate,
+  buildMemoryPrompt,
+  ensureMemoryFiles,
+  extractMemoryCandidate,
+  loadMemoryContext,
+  stripMemoryCandidate,
+} from "../services/memoryService";
+import { readFile, type WorkspaceNode } from "../services/fileSystemService";
+import { calculateTextStats } from "../utils/textStats";
+import type { AgentMode, ChatSkills, ConversationAttachment, ConversationMessage, ConversationRecord, ConversationSummary, ConversationWorkItem, FileChange, FileContentCache, MultiFileContext } from "../types/ai";
 import "./CopilotPanel.css";
 
 // 构建目录结构字符串（隐藏 .novel-assistance/conversations/）
@@ -59,6 +68,79 @@ function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 }
 
+const DEFAULT_CHAT_SKILLS: ChatSkills = {
+  enableWebSearch: false,
+  agentMode: "smart",
+  agentSubMode: "plan",
+  forcePlanMode: false,
+};
+
+const PLAN_REQUIRED_PATTERNS = [
+  /先.*(计划|方案|大纲|确认)|制定.*(计划|方案|大纲)|输出.*(计划|方案|大纲)|计划.*确认|确认.*计划/i,
+  /长篇规划|世界观|角色弧|主线|伏笔|多文件|结构性重写|重构.*结构|蓝图方案/i,
+  /第[一二三四五六七八九十百千万\d]+章.*(正文|创作|生成|写作|蓝图)|整章.*(正文|创作|生成|写作)/i,
+  /plan first|confirm.*plan|outline first|multi-file|long[-\s]?form|worldbuilding|chapter.*(draft|generate|write|blueprint)/i,
+];
+
+const PROJECT_MEMORY_PATTERNS = [
+  /小说|写作|剧情|蓝图|大纲|章节|正文|伏笔|主线|设定|世界观|角色|人物|创作|故事|幕|卷/i,
+  /novel|story|plot|blueprint|outline|chapter|draft|character|worldbuilding|foreshadow/i,
+];
+
+const FILE_CREATION_PATTERNS = [
+  /创建|保存|写入|生成文件|新建|建一个|另存|存成|存为/i,
+  /create|save|write (?:a )?file|new file/i,
+];
+
+const CHAPTER_DRAFT_PATTERNS = [
+  /章节|正文|第一章|第二章|第三章|第四章|第五章|第六章|第七章|第八章|第九章|第十章|序章|终章|番外/i,
+  /第[一二三四五六七八九十百千万\d]+章|EP[_-]?\d+|chapter|episode|prologue|epilogue/i,
+];
+
+function normalizeChatSkills(skills?: Partial<ChatSkills> | null): ChatSkills {
+  return {
+    ...DEFAULT_CHAT_SKILLS,
+    ...skills,
+  };
+}
+
+function isProjectMemoryRelevant(content: string): boolean {
+  return PROJECT_MEMORY_PATTERNS.some((pattern) => pattern.test(content));
+}
+
+function shouldForceCreateFile(content: string): boolean {
+  const trimmed = content.trim();
+  if (!trimmed) return false;
+  if (/你没有创建|没有实际创建|依旧没有创建|没创建|补上文件|实际创建/i.test(trimmed)) return true;
+  return FILE_CREATION_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+function shouldDefaultChapterToDocx(content: string): boolean {
+  const trimmed = content.trim();
+  if (!trimmed) return false;
+  if (/\.(?:docx|md|markdown|txt)\b/i.test(trimmed)) return false;
+  return shouldForceCreateFile(trimmed) && CHAPTER_DRAFT_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+function shouldNeedPlan(content: string, mode: AgentMode): boolean {
+  const trimmed = content.trim();
+  if (!trimmed) return false;
+  if (shouldForceCreateFile(trimmed)) return false;
+  if (PLAN_REQUIRED_PATTERNS.some((pattern) => pattern.test(trimmed))) return true;
+  if (trimmed.length > 3000) return true;
+  if (mode === "architect") {
+    return trimmed.length > 1200 && isProjectMemoryRelevant(trimmed);
+  }
+  if (mode === "smart") {
+    return trimmed.length > 1800 && isProjectMemoryRelevant(trimmed);
+  }
+  return false;
+}
+
+function isClarificationResponse(content: string): boolean {
+  return /(^|\n)##\s*Clarification Needed\b/i.test(content);
+}
+
 function createConversation(modelId: string | null, contextFilePath?: string | null): ConversationRecord {
   const now = new Date().toISOString();
   return {
@@ -96,6 +178,13 @@ function normalizeWorkspacePath(path: string) {
 function joinWorkspacePath(rootPath: string, relativePath: string) {
   const separator = rootPath.includes("\\") ? "\\" : "/";
   return `${rootPath.replace(/[/\\]+$/, "")}${separator}${normalizeWorkspacePath(relativePath).replace(/\//g, separator)}`;
+}
+
+function isPathInsideRoot(path: string, rootPath: string | null) {
+  if (!rootPath) return false;
+  const normalizedPath = normalizeWorkspacePath(path).toLowerCase();
+  const normalizedRoot = normalizeWorkspacePath(rootPath).replace(/\/$/, "").toLowerCase();
+  return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
 }
 
 function findWorkspaceNode(nodes: WorkspaceNode[], targetPath: string): WorkspaceNode | null {
@@ -157,8 +246,19 @@ function summarizeToolResult(result: string) {
   return result.replace(/\s+/g, " ").slice(0, 220);
 }
 
+const CopilotActiveFileContextLabel = React.memo(function CopilotActiveFileContextLabel() {
+  const activeFileName = useFileStore((state) => state.activeFile?.name ?? null);
+  const { t } = useTranslation();
+  return (
+    <span>
+      {activeFileName ? `${t("copilot.context")}: ${activeFileName}` : t("copilot.noActiveFileContext")}
+    </span>
+  );
+});
+
 const CopilotPanel: React.FC = () => {
-  const { activeFile, rootPath, getOpenTabs, files, refreshLoadedWorkspace } = useFileStore();
+  const rootPath = useFileStore((state) => state.rootPath);
+  const refreshLoadedWorkspace = useFileStore((state) => state.refreshLoadedWorkspace);
   const { loadBlueprints } = useBlueprintStore();
   const { modelProfiles, defaultChatModelId, getModelProfileById, chatMaxTokens, setChatMaxTokens, contextMaxLength, webSearchLimit } = useSettingsStore();
   const { t } = useTranslation();
@@ -171,15 +271,12 @@ const CopilotPanel: React.FC = () => {
   const [statusText, setStatusText] = useState("");
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
+  const [isAgentModeMenuOpen, setIsAgentModeMenuOpen] = useState(false);
+  const [agentModeMenuPosition, setAgentModeMenuPosition] = useState<{ left: number; bottom: number; width: number } | null>(null);
   const [tempMaxTokens, setTempMaxTokens] = useState(String(chatMaxTokens));
-  const [fileCaches, setFileCaches] = useState<Map<string, FileContentCache>>(new Map());
+  const [, setFileCaches] = useState<Map<string, FileContentCache>>(new Map());
   const fileCachesRef = useRef<Map<string, FileContentCache>>(new Map());
-  const [chatSkills, setChatSkills] = useState<ChatSkills>({
-    enableWebSearch: false,
-    thinkingDepth: "off",
-    agentSubMode: "plan",
-  });
-  const [isAgentMode, setIsAgentMode] = useState(false);
+  const [chatSkills, setChatSkills] = useState<ChatSkills>(DEFAULT_CHAT_SKILLS);
   const [, setWebSearchCount] = useState(0);
   const [currentAssistantText, setCurrentAssistantText] = useState("");
   const [currentAssistantWorkItems, setCurrentAssistantWorkItems] = useState<ConversationWorkItem[]>([]);
@@ -191,7 +288,9 @@ const CopilotPanel: React.FC = () => {
     status: "running" | "truncated" | "continuing";
   } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const agentModeButtonRef = useRef<HTMLButtonElement>(null);
   const lastDefaultChatModelIdRef = useRef(defaultChatModelId);
+  const workspaceLoadRequestRef = useRef(0);
 
   const currentModel = useMemo(
     () => getModelProfileById(activeConversation?.modelId || defaultChatModelId),
@@ -263,9 +362,11 @@ const CopilotPanel: React.FC = () => {
   };
 
   const buildMultiFileContext = (): MultiFileContext | undefined => {
+    const { activeFile, getOpenTabs } = useFileStore.getState();
     if (!activeFile) return undefined;
 
     const currentContent = activeFile.content;
+    const currentStats = calculateTextStats(currentContent);
 
     if (!shouldCacheFile(currentContent)) {
       return {
@@ -273,9 +374,9 @@ const CopilotPanel: React.FC = () => {
           meta: {
             fileName: activeFile.name,
             filePath: activeFile.path,
-            charCount: currentContent.length,
-            lineCount: currentContent.split('\n').length,
-            wordCount: currentContent.length,
+            charCount: currentStats.characters,
+            lineCount: currentStats.lines,
+            wordCount: currentStats.words,
           },
           content: currentContent,
           cachedContent: null,
@@ -304,39 +405,43 @@ const CopilotPanel: React.FC = () => {
       .map(([path, cache]) => {
         const tab = getOpenTabs().find(t => t.path === path);
         const tabContent = tab?.content ?? cache.content;
+        const tabStats = calculateTextStats(tabContent);
 
         return {
           meta: {
             fileName: path.split(/[/\\]/).pop() || path,
             filePath: path,
-            charCount: tabContent.length,
-            lineCount: tabContent.split('\n').length,
-            wordCount: tabContent.length,
+            charCount: tabStats.characters,
+            lineCount: tabStats.lines,
+            wordCount: tabStats.words,
           },
           recentChanges: calculateChanges(cache.content, tabContent),
         };
       });
 
     // 使用 ref 构建 allBoundFiles
-    const allBoundFiles = Array.from(fileCachesRef.current.values()).map(cache => ({
-      meta: {
-        fileName: cache.filePath.split(/[/\\]/).pop() || cache.filePath,
-        filePath: cache.filePath,
-        charCount: cache.content.length,
-        lineCount: cache.content.split('\n').length,
-        wordCount: cache.content.length,
-      },
-      lastUsed: cache.lastSentAt,
-    }));
+    const allBoundFiles = Array.from(fileCachesRef.current.values()).map(cache => {
+      const cacheStats = calculateTextStats(cache.content);
+      return {
+        meta: {
+          fileName: cache.filePath.split(/[/\\]/).pop() || cache.filePath,
+          filePath: cache.filePath,
+          charCount: cacheStats.characters,
+          lineCount: cacheStats.lines,
+          wordCount: cacheStats.words,
+        },
+        lastUsed: cache.lastSentAt,
+      };
+    });
 
     return {
       activeFile: {
         meta: {
           fileName: activeFile.name,
           filePath: activeFile.path,
-          charCount: currentContent.length,
-          lineCount: currentContent.split('\n').length,
-          wordCount: currentContent.length,
+          charCount: currentStats.characters,
+          lineCount: currentStats.lines,
+          wordCount: currentStats.words,
         },
         content: currentContent,
         cachedContent: activeCachedContent,
@@ -347,8 +452,9 @@ const CopilotPanel: React.FC = () => {
     };
   };
 
-  const loadConversation = async (conversationId: string) => {
+  const loadConversation = async (conversationId: string, expectedRootPath = rootPath) => {
     const record = await readConversation(conversationId);
+    if (expectedRootPath !== useFileStore.getState().rootPath) return;
     if (!record) return;
     setActiveConversation(record);
     setInput(record.draftInput || "");
@@ -364,7 +470,7 @@ const CopilotPanel: React.FC = () => {
   const persistFileCaches = async () => {
     if (!activeConversation) return;
 
-    const cachesArray = Array.from(fileCaches.values());
+    const cachesArray = Array.from(fileCachesRef.current.values());
     const updatedRecord = {
       ...activeConversation,
       boundFileCaches: cachesArray,
@@ -374,16 +480,35 @@ const CopilotPanel: React.FC = () => {
     await persistConversation(updatedRecord);
   };
 
-  const persistChatSkills = async () => {
-    if (!activeConversation) return;
+  const updateChatSkills = (updater: (current: ChatSkills) => ChatSkills) => {
+    setChatSkills((current) => {
+      const nextSkills = normalizeChatSkills(updater(current));
+      if (activeConversation) {
+        const updatedRecord: ConversationRecord = {
+          ...activeConversation,
+          chatSkills: nextSkills,
+          updatedAt: new Date().toISOString(),
+        };
+        setActiveConversation(updatedRecord);
+        void persistConversation(updatedRecord);
+      }
+      return nextSkills;
+    });
+  };
 
-    const updatedRecord = {
-      ...activeConversation,
-      chatSkills,
-      updatedAt: new Date().toISOString(),
-    };
-
-    await persistConversation(updatedRecord);
+  const resetCopilotRuntimeState = () => {
+    const emptyCaches = new Map<string, FileContentCache>();
+    fileCachesRef.current = emptyCaches;
+    setFileCaches(emptyCaches);
+    setConversationSummaries([]);
+    setActiveConversation(null);
+    setInput("");
+    setDraftAttachments([]);
+    setCurrentAssistantText("");
+    setCurrentAssistantWorkItems([]);
+    setAgentTodo(null);
+    setIsLoading(false);
+    setIsAgentModeMenuOpen(false);
   };
 
   useEffect(() => {
@@ -417,55 +542,61 @@ const CopilotPanel: React.FC = () => {
     if (activeConversation?.boundFileCaches) {
       const cachesMap = new Map<string, FileContentCache>();
       activeConversation.boundFileCaches.forEach(cache => {
-        cachesMap.set(cache.filePath, cache);
+        if (isPathInsideRoot(cache.filePath, rootPath)) {
+          cachesMap.set(cache.filePath, cache);
+        }
       });
+      fileCachesRef.current = cachesMap;
       setFileCaches(cachesMap);
     } else {
-      setFileCaches(new Map());
+      const emptyCaches = new Map<string, FileContentCache>();
+      fileCachesRef.current = emptyCaches;
+      setFileCaches(emptyCaches);
     }
-  }, [activeConversation?.id]);
+  }, [activeConversation?.id, rootPath]);
 
   useEffect(() => {
     if (activeConversation?.chatSkills) {
-      setChatSkills(activeConversation.chatSkills);
+      setChatSkills(normalizeChatSkills(activeConversation.chatSkills));
     } else {
-      setChatSkills({
-        enableWebSearch: false,
-        thinkingDepth: "off",
-        agentSubMode: "plan",
-      });
+      setChatSkills(DEFAULT_CHAT_SKILLS);
     }
   }, [activeConversation?.id]);
 
   useEffect(() => {
+    workspaceLoadRequestRef.current += 1;
+    const requestId = workspaceLoadRequestRef.current;
+    resetCopilotRuntimeState();
+
     const bootstrap = async () => {
       if (!rootPath) {
-        setConversationSummaries([]);
-        setActiveConversation(null);
-        setInput("");
-        setDraftAttachments([]);
         setStatusText(t("copilot.openWorkspace"));
         return;
       }
 
       try {
         await ensureWorkspaceConversationStore();
+        await ensureMemoryFiles();
         const summaries = await listConversationSummaries();
+        if (requestId !== workspaceLoadRequestRef.current || rootPath !== useFileStore.getState().rootPath) return;
         setConversationSummaries(summaries);
         if (summaries[0]) {
-          await loadConversation(summaries[0].id);
+          await loadConversation(summaries[0].id, rootPath);
+          if (requestId !== workspaceLoadRequestRef.current || rootPath !== useFileStore.getState().rootPath) return;
           return;
         }
 
-        const draft = createConversation(defaultChatModelId, activeFile?.path);
+        const draft = createConversation(defaultChatModelId, useFileStore.getState().activeFile?.path);
+        if (requestId !== workspaceLoadRequestRef.current || rootPath !== useFileStore.getState().rootPath) return;
         setActiveConversation(draft);
       } catch (error) {
+        if (requestId !== workspaceLoadRequestRef.current) return;
         setStatusText(error instanceof Error ? error.message : "Failed to load conversations.");
       }
     };
 
     void bootstrap();
-  }, [activeFile?.path, defaultChatModelId, rootPath]);
+  }, [defaultChatModelId, rootPath]);
 
   useEffect(() => {
     const handleMouseUp = () => {
@@ -503,7 +634,7 @@ const CopilotPanel: React.FC = () => {
   }, []);
 
   const handleNewConversation = async () => {
-    const next = createConversation(defaultChatModelId, activeFile?.path);
+    const next = createConversation(defaultChatModelId, useFileStore.getState().activeFile?.path);
     setActiveConversation(next);
     setInput("");
     setDraftAttachments([]);
@@ -511,8 +642,30 @@ const CopilotPanel: React.FC = () => {
     await persistConversation(next);
   };
 
-  const handleSendMessage = async () => {
-    if (!input.trim() || !activeConversation || !currentModel || isLoading) return;
+  const handleSendMessage = async (override?: {
+    content: string;
+    attachments?: ConversationAttachment[];
+    skills?: ChatSkills;
+    clearPendingPlan?: boolean;
+  }) => {
+    const messageContent = (override?.content ?? input).trim();
+    const requestAttachments = override?.attachments ?? draftAttachments;
+    let requestSkills = normalizeChatSkills(override?.skills ?? chatSkills);
+    const forceCreateFile = shouldForceCreateFile(messageContent);
+    const defaultChapterToDocx = shouldDefaultChapterToDocx(messageContent);
+    if (!override) {
+      const hasPendingClarification = Boolean(activeConversation?.pendingClarification);
+      const needPlan = shouldNeedPlan(messageContent, requestSkills.agentMode);
+      requestSkills = {
+        ...requestSkills,
+        agentSubMode: requestSkills.forcePlanMode || hasPendingClarification
+          ? "plan"
+          : forceCreateFile ? "build" : needPlan ? "plan" : "build",
+      };
+    }
+    if (!messageContent || !activeConversation || !currentModel || isLoading) return;
+    const rootPathAtStart = rootPath;
+    const isWorkspaceCurrent = () => rootPathAtStart === useFileStore.getState().rootPath;
 
     // 重置搜索计数
     setWebSearchCount(0);
@@ -520,29 +673,38 @@ const CopilotPanel: React.FC = () => {
     const userMessage: ConversationMessage = {
       id: createId("msg"),
       role: "user",
-      content: input.trim(),
+      content: messageContent,
       createdAt: new Date().toISOString(),
-      attachments: draftAttachments,
-      skills: chatSkills,
+      attachments: requestAttachments,
+      skills: requestSkills,
     };
 
     const nextMessages = [...activeConversation.messages, userMessage];
+    const pendingClarification = !override ? activeConversation.pendingClarification ?? null : null;
     const draftRecord: ConversationRecord = {
       ...activeConversation,
       title: activeConversation.messages.length === 0 ? buildTitleFromMessage(userMessage.content) : activeConversation.title,
       updatedAt: new Date().toISOString(),
-      contextFilePath: activeFile?.path ?? activeConversation.contextFilePath ?? null,
+      contextFilePath: useFileStore.getState().activeFile?.path ?? activeConversation.contextFilePath ?? null,
       messages: nextMessages,
       draftInput: "",
+      pendingPlan: override?.clearPendingPlan ? null : activeConversation.pendingPlan ?? null,
+      pendingClarification: activeConversation.pendingClarification ?? null,
     };
 
-    setInput("");
-    setDraftAttachments([]);
+    if (!override) {
+      setInput("");
+      setDraftAttachments([]);
+    }
     setIsLoading(true);
     setStatusText("");
     setCurrentAssistantText("");
     setCurrentAssistantWorkItems([]);
+    const fileSnapshotAtStart = useFileStore.getState();
+    const activeFileAtStart = fileSnapshotAtStart.activeFile;
+    const filesAtStart = fileSnapshotAtStart.files;
     await persistConversation(draftRecord);
+    if (!isWorkspaceCurrent()) return;
 
     try {
       const assistantTextParts: string[] = [];
@@ -564,41 +726,126 @@ const CopilotPanel: React.FC = () => {
         setCurrentAssistantWorkItems(workItems);
       };
 
-      const fileSizeWarning = activeFile ? getFileSizeWarning(activeFile.content) : null;
+      const fileSizeWarning = activeFileAtStart ? getFileSizeWarning(activeFileAtStart.content) : null;
       if (fileSizeWarning) {
         setStatusText(fileSizeWarning);
       }
 
       // 更新文件缓存
-      if (activeFile) {
-        updateFileCache(activeFile.path, activeFile.content);
+      if (activeFileAtStart) {
+        updateFileCache(activeFileAtStart.path, activeFileAtStart.content);
       }
+      if (!isWorkspaceCurrent()) return;
 
       const multiFileContext = buildMultiFileContext();
 
       // 构建目录结构字符串
-      const directoryTree = buildDirectoryTreeString(files);
+      const directoryTree = buildDirectoryTreeString(filesAtStart);
+      const shouldRequestPlan =
+        !override && requestSkills.agentSubMode === "plan";
+      const shouldIncludeProjectMemory =
+        shouldRequestPlan || override?.clearPendingPlan || isProjectMemoryRelevant(userMessage.content);
+      const memoryPrompt = buildMemoryPrompt(await loadMemoryContext({
+        includeProjectImportant: shouldIncludeProjectMemory,
+        includeProjectSnapshot: shouldIncludeProjectMemory,
+      }));
+
+      if (shouldRequestPlan) {
+        const planSkills: ChatSkills = {
+          ...requestSkills,
+          agentSubMode: "plan",
+        };
+        const basePlanRequest = pendingClarification
+          ? `The user is answering a previous clarification question. Continue planning from the original request and the new answer.\n\n## Original Request\n${pendingClarification.userMessage.content}\n\n## Clarification Question\n${pendingClarification.promptContent}\n\n## User Answer\n${userMessage.content}\n\nNow produce the formal plan if enough information is available. If information is still missing, output a new "## Clarification Needed" section and ask only the missing questions.`
+          : userMessage.content;
+        const planRequest = requestSkills.agentMode === "architect"
+          ? `${basePlanRequest}\n\nNeedPlan 已触发。请先输出执行计划，并额外进行一次 Plan Review：检查故事逻辑、伏笔、风险、缺失信息和验证方式。现在不要写文件、不要生成正文。\n\nIf essential information is missing, do not pretend this is a plan. Output exactly a "## Clarification Needed" section with the questions instead.`
+          : `${basePlanRequest}\n\nNeedPlan 已触发。请先输出执行计划，等待用户确认后再生成蓝图、正文或修改文件。现在不要写文件。\n\nIf essential information is missing, do not pretend this is a plan. Output exactly a "## Clarification Needed" section with the questions instead.`;
+
+        const planResponse = await callAI({
+          modelProfile: currentModel,
+          taskType: "chat",
+          userMessage: planRequest,
+          documentContext: multiFileContext?.activeFile.content || activeFileAtStart?.content || getEditorContent() || "",
+          documentFileName: activeFileAtStart?.name,
+          maxTokens: chatMaxTokens,
+          conversationHistory: nextMessages.slice(-6, -1),
+          attachments: requestAttachments,
+          multiFileContext,
+          contextMaxLength,
+          skills: planSkills,
+          workspaceRoot: rootPath ?? undefined,
+          directoryTree,
+          memoryContext: memoryPrompt,
+        });
+        if (!isWorkspaceCurrent()) return;
+
+        const assistantMessage: ConversationMessage = {
+          id: createId("msg"),
+          role: "assistant",
+          content: stripToolCalls(planResponse),
+          createdAt: new Date().toISOString(),
+        };
+        const isClarification = isClarificationResponse(assistantMessage.content);
+        const finalRecord: ConversationRecord = {
+          ...draftRecord,
+          updatedAt: new Date().toISOString(),
+          messages: [...draftRecord.messages, assistantMessage],
+          chatSkills: planSkills,
+          pendingClarification: isClarification
+            ? {
+                messageId: assistantMessage.id,
+                userMessage: pendingClarification?.userMessage ?? userMessage,
+                promptContent: assistantMessage.content,
+                agentMode: requestSkills.agentMode,
+                createdAt: new Date().toISOString(),
+              }
+            : null,
+          pendingPlan: isClarification
+            ? null
+            : {
+                planMessageId: assistantMessage.id,
+                userMessage: pendingClarification?.userMessage ?? userMessage,
+                planContent: assistantMessage.content,
+                agentMode: requestSkills.agentMode,
+                createdAt: new Date().toISOString(),
+              },
+        };
+        await persistConversation(finalRecord);
+        return;
+      }
+
+      const withCreateFileDirective = (content: string) => {
+        if (!forceCreateFile) return content;
+        return `${content}\n\n## 文件创建强制要求\n用户这次要求实际创建/保存文件。你必须在本轮输出 create_file 工具调用，不能只输出正文，不能只说“我会创建”。${defaultChapterToDocx ? "这是章节正文创建请求；如果用户没有明确指定 .md/.txt/.docx，文件路径必须使用 .docx。" : ""}如果之前已经写出正文但没有创建文件，本轮优先补 create_file。`;
+      };
 
       let response = await callAI({
         modelProfile: currentModel,
         taskType: "chat",
-        userMessage: userMessage.content,
-        documentContext: multiFileContext?.activeFile.content || activeFile?.content || getEditorContent() || "",
-        documentFileName: activeFile?.name,
-        maxTokens: isAgentMode ? undefined : chatMaxTokens,
+        userMessage: override?.clearPendingPlan
+          ? `用户已确认以下计划，请按计划执行。先生成或更新蓝图，再生成正文或完成必要文件操作${activeConversation.pendingPlan?.agentMode === "architect" ? "，然后进行一致性检查并根据检查结果做必要精修" : ""}，最后输出 Memory Candidate。\n\n## 原始需求\n${activeConversation.pendingPlan?.userMessage.content ?? userMessage.content}\n\n## 已确认计划\n${activeConversation.pendingPlan?.planContent ?? ""}\n\n## 本次指令\n${userMessage.content}`
+          : withCreateFileDirective(userMessage.content),
+        documentContext: multiFileContext?.activeFile.content || activeFileAtStart?.content || getEditorContent() || "",
+        documentFileName: activeFileAtStart?.name,
+        maxTokens: undefined,
         conversationHistory: nextMessages.slice(-6, -1),
-        attachments: draftAttachments,
+        attachments: requestAttachments,
         multiFileContext,
         contextMaxLength,
-        skills: chatSkills,
+        skills: requestSkills,
         workspaceRoot: rootPath ?? undefined,
-        directoryTree: directoryTree,
+        directoryTree,
+        memoryContext: memoryPrompt,
       });
+      if (!isWorkspaceCurrent()) return;
 
       // 实现多轮工具调用循环
       let currentResponse = response;
       const maxIterations = 100;
       const WRITE_TOOLS = new Set(["edit_file", "create_file", "create_blueprint"]);
+      let hasSuccessfulCreateFile = false;
+      let createFileRecoveryAttempted = false;
 
       const extractToolCalls = (text: string): Array<{ fullMatch: string; json: string }> => {
         const results: Array<{ fullMatch: string; json: string }> = [];
@@ -633,10 +880,9 @@ const CopilotPanel: React.FC = () => {
       };
 
       const extractField = (json: string, fieldName: string): string => {
-        const marker = `"${fieldName}": "`;
-        const startIdx = json.indexOf(marker);
-        if (startIdx === -1) return '';
-        const valueStart = startIdx + marker.length;
+        const match = new RegExp(`"${fieldName}"\\s*:\\s*"`).exec(json);
+        if (!match) return '';
+        const valueStart = match.index + match[0].length;
         let endIdx = valueStart;
         while (endIdx < json.length) {
           if (json[endIdx] === '\\') {
@@ -655,6 +901,15 @@ const CopilotPanel: React.FC = () => {
       };
 
       const parseToolCall = (json: string): { name: string; args: Record<string, unknown> } | null => {
+        try {
+          const parsed = JSON.parse(json);
+          const parsedName = parsed.name ?? parsed.tool;
+          if (!parsedName) return null;
+          return { name: String(parsedName), args: parsed.arguments ?? parsed.args ?? {} };
+        } catch {
+          // Fallback below handles truncated or malformed tool calls.
+        }
+
         const name = extractField(json, 'name') || extractField(json, 'tool');
         if (!name) return null;
 
@@ -694,18 +949,11 @@ const CopilotPanel: React.FC = () => {
           return { name, args: { path, edits } };
         }
 
-        try {
-          const parsed = JSON.parse(json);
-          const parsedName = parsed.name ?? parsed.tool;
-          if (!parsedName) return null;
-          return { name: parsedName, args: parsed.arguments ?? parsed.args ?? {} };
-        } catch {
-          if (name === 'create_file') {
-            const content = extractField(json, 'content');
-            return { name, args: { path, content } };
-          }
-          return { name, args: { path } };
+        if (name === 'create_file') {
+          const content = extractField(json, 'content');
+          return { name, args: { path, content } };
         }
+        return { name, args: { path } };
       };
 
       const extractPartialEditFile = (json: string): {
@@ -774,18 +1022,107 @@ const CopilotPanel: React.FC = () => {
         setStatusText(`文件已写入 ${absolutePath}，但工作区树未刷新到该路径`);
       };
 
+      const MAX_EDIT_REVIEW_CONTENT_LENGTH = 8000;
+      const reviewEditFileArgs = async (args: Record<string, unknown>): Promise<Record<string, unknown>> => {
+        if (requestSkills.agentSubMode === "plan") return args;
+        const path = typeof args.path === "string" ? args.path : "";
+        const edits = args.edits;
+        if (!path || !Array.isArray(edits) || edits.length === 0 || !rootPath || !currentModel) return args;
+
+        let originalContent = "";
+        try {
+          originalContent = await readFile(joinWorkspacePath(rootPath, path));
+        } catch {
+          return args;
+        }
+        if (!isWorkspaceCurrent()) return args;
+
+        const originalLines = originalContent.split("\n");
+        const reviewedEdits = [];
+
+        for (const edit of edits) {
+          if (!edit || typeof edit !== "object") {
+            reviewedEdits.push(edit);
+            continue;
+          }
+
+          const typedEdit = edit as { startLine?: unknown; endLine?: unknown; newContent?: unknown };
+          const newContent = typeof typedEdit.newContent === "string" ? typedEdit.newContent : "";
+          if (!newContent.trim() || newContent.length > MAX_EDIT_REVIEW_CONTENT_LENGTH) {
+            reviewedEdits.push(edit);
+            continue;
+          }
+
+          const startLine = Number(typedEdit.startLine);
+          const endLine = Number(typedEdit.endLine);
+          const originalSnippet = Number.isInteger(startLine) && Number.isInteger(endLine) && startLine >= 1 && endLine >= startLine
+            ? originalLines.slice(startLine - 1, endLine).join("\n")
+            : "";
+
+          try {
+            setStatusText(`AI编辑审核中：${path}`);
+            const reviewedContent = await reviewEditFileContent({
+              modelProfile: currentModel,
+              filePath: path,
+              originalContent: originalSnippet,
+              proposedContent: newContent,
+              maxTokens: Math.min(Math.max(chatMaxTokens, 1024), 4096),
+            });
+            if (!isWorkspaceCurrent()) return args;
+            reviewedEdits.push({
+              ...typedEdit,
+              newContent: reviewedContent.trim() ? reviewedContent : newContent,
+            });
+          } catch {
+            reviewedEdits.push(edit);
+          }
+        }
+
+        return {
+          ...args,
+          edits: reviewedEdits,
+        };
+      };
+
       const MAX_CONTINUATION_RETRIES = 3;
       let continuationCount = 0;
       let toolFormatRetryCount = 0;
 
       for (let iteration = 0; iteration < maxIterations; iteration++) {
+        if (!isWorkspaceCurrent()) return;
         const extractedCalls = extractToolCalls(currentResponse);
-        if (extractedCalls.length === 0 || !rootPath) break;
+        if (extractedCalls.length === 0 || !rootPath) {
+          if (rootPath && forceCreateFile && !hasSuccessfulCreateFile && !createFileRecoveryAttempted) {
+            appendAssistantText(currentResponse);
+            createFileRecoveryAttempted = true;
+            setStatusText("需要实际创建文件，正在要求 AI 补充 create_file...");
+            currentResponse = await callAI({
+              modelProfile: currentModel,
+              taskType: "chat",
+              userMessage: withCreateFileDirective(`用户要求实际创建或保存文件，但你上一轮没有调用 create_file。请现在只输出必要的 create_file 工具调用，path 使用工作区相对路径，content 使用完整正文纯文本。${defaultChapterToDocx ? "这是章节正文文件，除非用户明确指定其他扩展名，否则必须使用 .docx。" : ""}`),
+              documentContext: multiFileContext?.activeFile.content || activeFileAtStart?.content || getEditorContent() || "",
+              documentFileName: activeFileAtStart?.name,
+              maxTokens: undefined,
+              conversationHistory: nextMessages.slice(-6, -1),
+              attachments: requestAttachments,
+              multiFileContext,
+              contextMaxLength,
+              skills: requestSkills,
+              workspaceRoot: rootPath ?? undefined,
+              directoryTree: directoryTree,
+              memoryContext: memoryPrompt,
+            });
+            if (!isWorkspaceCurrent()) return;
+            continue;
+          }
+          break;
+        }
         appendAssistantText(currentResponse);
 
         const toolResults: Array<{ name: string; result: string }> = [];
 
         for (const call of extractedCalls) {
+          if (!isWorkspaceCurrent()) return;
           if (!isLikelyCompleteJson(call.json)) {
             console.warn("tool_call incomplete, attempting continuation:", call.json.substring(0, 100));
 
@@ -806,7 +1143,7 @@ const CopilotPanel: React.FC = () => {
                 status: "truncated"
               });
 
-              const partialArgs = { path: partial.path, edits: partial.completedEdits };
+              const partialArgs = await reviewEditFileArgs({ path: partial.path, edits: partial.completedEdits });
               const workItem: ConversationWorkItem = {
                 id: createId("work"),
                 kind: "write",
@@ -816,12 +1153,14 @@ const CopilotPanel: React.FC = () => {
                 createdAt: new Date().toISOString(),
               };
               appendWorkItem(workItem);
-              const toolResult = await runLocalTool("edit_file", partialArgs, rootPath, files, {
-                enableWebSearch: chatSkills.enableWebSearch,
+              if (!isWorkspaceCurrent()) return;
+              const toolResult = await runLocalTool("edit_file", partialArgs, rootPath, filesAtStart, {
+                enableWebSearch: requestSkills.enableWebSearch,
                 searchCount: requestSearchCount,
                 searchLimit: webSearchLimit,
-                agentSubMode: isAgentMode ? chatSkills.agentSubMode : undefined,
+                agentSubMode: requestSkills.agentSubMode,
               });
+              if (!isWorkspaceCurrent()) return;
               updateWorkItem(workItem.id, {
                 status: toolResult.result.startsWith("Error") ? "error" : "done",
                 resultSummary: summarizeToolResult(toolResult.result),
@@ -845,17 +1184,19 @@ const CopilotPanel: React.FC = () => {
                 modelProfile: currentModel,
                 taskType: "chat",
                 userMessage: `Your previous edit_file response was truncated. Here's your progress:\n\n${JSON.stringify(todoInfo, null, 2)}\n\nPlease continue the edit_file operation for "${partial.path}". Apply only the remaining edits that were not completed.`,
-                documentContext: multiFileContext?.activeFile.content || activeFile?.content || getEditorContent() || "",
-                documentFileName: activeFile?.name,
-                maxTokens: isAgentMode ? undefined : chatMaxTokens,
+                documentContext: multiFileContext?.activeFile.content || activeFileAtStart?.content || getEditorContent() || "",
+                documentFileName: activeFileAtStart?.name,
+                maxTokens: undefined,
                 conversationHistory: nextMessages.slice(-6, -1),
-                attachments: draftAttachments,
+                attachments: requestAttachments,
                 multiFileContext,
                 contextMaxLength,
-                skills: chatSkills,
+                skills: requestSkills,
                 workspaceRoot: rootPath ?? undefined,
                 directoryTree: directoryTree,
+                memoryContext: memoryPrompt,
               });
+              if (!isWorkspaceCurrent()) return;
 
               continuationCount++;
               currentResponse = currentResponse.replace(call.fullMatch, "");
@@ -890,12 +1231,18 @@ const CopilotPanel: React.FC = () => {
               createdAt: new Date().toISOString(),
             };
             appendWorkItem(workItem);
-            const toolResult = await runLocalTool(parsed.name, parsed.args, rootPath, files, {
-              enableWebSearch: chatSkills.enableWebSearch,
+            if (!isWorkspaceCurrent()) return;
+            const toolArgs = parsed.name === "edit_file"
+              ? await reviewEditFileArgs(parsed.args)
+              : parsed.args;
+            if (!isWorkspaceCurrent()) return;
+            const toolResult = await runLocalTool(parsed.name, toolArgs, rootPath, filesAtStart, {
+              enableWebSearch: requestSkills.enableWebSearch,
               searchCount: requestSearchCount,
               searchLimit: webSearchLimit,
-              agentSubMode: isAgentMode ? chatSkills.agentSubMode : undefined,
+              agentSubMode: requestSkills.agentSubMode,
             });
+            if (!isWorkspaceCurrent()) return;
             updateWorkItem(workItem.id, {
               status: toolResult.result.startsWith("Error") ? "error" : "done",
               resultSummary: summarizeToolResult(toolResult.result),
@@ -911,7 +1258,10 @@ const CopilotPanel: React.FC = () => {
             }
 
             if (WRITE_TOOLS.has(parsed.name) && !toolResult.result.startsWith("Error")) {
-              await handleWriteToolSuccess(parsed.name, toolResult.result, parsed.args?.path as string ?? "");
+              if (parsed.name === "create_file") {
+                hasSuccessfulCreateFile = true;
+              }
+              await handleWriteToolSuccess(parsed.name, toolResult.result, toolArgs?.path as string ?? "");
             }
 
             toolResults.push({ name: parsed.name, result: toolResult.result });
@@ -943,32 +1293,57 @@ const CopilotPanel: React.FC = () => {
             modelProfile: currentModel,
             taskType: "chat",
             userMessage: `Tool Results:\n\n${toolContext}\n\nContinue the user's TODO workflow. If the next TODO needs a tool, output only valid fenced tool_call JSON blocks in this response. Do not stop at a prose statement that you will use a tool. If you have enough information, provide the final answer. For blueprint creation, use create_blueprint before summarizing, and do not limit the blueprint to a fixed number of nodes; create the content-derived nodes and edges the source actually needs.`,
-            documentContext: multiFileContext?.activeFile.content || activeFile?.content || getEditorContent() || "",
-            documentFileName: activeFile?.name,
-        maxTokens: isAgentMode ? undefined : chatMaxTokens,
+            documentContext: multiFileContext?.activeFile.content || activeFileAtStart?.content || getEditorContent() || "",
+            documentFileName: activeFileAtStart?.name,
+            maxTokens: undefined,
             conversationHistory: nextMessages.slice(-6, -1),
-            attachments: draftAttachments,
+            attachments: requestAttachments,
             multiFileContext,
             contextMaxLength,
-            skills: chatSkills,
+            skills: requestSkills,
             workspaceRoot: rootPath ?? undefined,
             directoryTree: directoryTree,
+            memoryContext: memoryPrompt,
           });
+          if (!isWorkspaceCurrent()) return;
 
-          if (extractToolCalls(currentResponse).length === 0) {
+          if (
+            extractToolCalls(currentResponse).length === 0 &&
+            (!forceCreateFile || hasSuccessfulCreateFile || createFileRecoveryAttempted)
+          ) {
             break;
           }
         }
       }
 
       setAgentTodo(null);
+      if (!isWorkspaceCurrent()) return;
       
       // 组合最终响应（只显示 AI 的最终回复）
       appendAssistantText(currentResponse);
       response = assistantTextParts.join("\n\n") || stripToolCalls(currentResponse) || currentResponse;
+      const memoryCandidate = extractMemoryCandidate(response);
+      if (memoryCandidate) {
+        const memoryResult = await applyMemoryCandidate(memoryCandidate, {
+          hasSuccessfulCreateFile,
+          isConfirmedPlanExecution: Boolean(override?.clearPendingPlan),
+        });
+        if (!isWorkspaceCurrent()) return;
+        response = stripMemoryCandidate(response);
+        if (memoryResult.applied) {
+          const targetName = memoryResult.target === "important"
+            ? "Importants.md"
+            : memoryResult.target === "nova"
+              ? "Nova.md"
+              : memoryResult.target === "snapshot"
+                ? "Snapshot.md"
+                : "Cache.md";
+          setStatusText(`已更新 ${targetName}`);
+        }
+      }
 
       await persistFileCaches();
-      await persistChatSkills();
+      if (!isWorkspaceCurrent()) return;
 
       const assistantMessage: ConversationMessage = {
         id: createId("msg"),
@@ -982,12 +1357,15 @@ const CopilotPanel: React.FC = () => {
         ...draftRecord,
         updatedAt: new Date().toISOString(),
         messages: [...draftRecord.messages, assistantMessage],
+        chatSkills: requestSkills,
+        pendingPlan: null,
       };
       await persistConversation(finalRecord);
     } catch (error) {
+      if (!isWorkspaceCurrent()) return;
       setStatusText(error instanceof Error ? error.message : "Failed to get AI response.");
     } finally {
-      setIsLoading(false);
+      if (isWorkspaceCurrent()) setIsLoading(false);
     }
   };
 
@@ -998,20 +1376,40 @@ const CopilotPanel: React.FC = () => {
     try {
       const summaries = await deleteConversation(activeConversation.id);
       setConversationSummaries(summaries);
-      setFileCaches(new Map());
+      const emptyCaches = new Map<string, FileContentCache>();
+      fileCachesRef.current = emptyCaches;
+      setFileCaches(emptyCaches);
 
       if (summaries[0]) {
         await loadConversation(summaries[0].id);
         return;
       }
 
-      const draft = createConversation(defaultChatModelId, activeFile?.path);
+      const draft = createConversation(defaultChatModelId, useFileStore.getState().activeFile?.path);
       setActiveConversation(draft);
       setInput("");
       setDraftAttachments([]);
     } catch (error) {
       setStatusText(error instanceof Error ? error.message : "Failed to delete conversation.");
     }
+  };
+
+  const handleConfirmPlan = async () => {
+    const pendingPlan = activeConversation?.pendingPlan;
+    if (!pendingPlan) return;
+
+    const buildSkills: ChatSkills = {
+      ...normalizeChatSkills(activeConversation?.chatSkills ?? chatSkills),
+      agentMode: pendingPlan.agentMode,
+      agentSubMode: "build",
+    };
+
+    await handleSendMessage({
+      content: "确认计划，请开始执行。",
+      attachments: pendingPlan.userMessage.attachments ?? [],
+      skills: buildSkills,
+      clearPendingPlan: true,
+    });
   };
 
   const handleInsertToEditor = (content: string) => {
@@ -1031,14 +1429,6 @@ const CopilotPanel: React.FC = () => {
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === "Tab" && isAgentMode) {
-      e.preventDefault();
-      setChatSkills(prev => ({
-        ...prev,
-        agentSubMode: prev.agentSubMode === "plan" ? "build" : "plan",
-      }));
-      return;
-    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       void handleSendMessage();
@@ -1149,6 +1539,13 @@ const CopilotPanel: React.FC = () => {
                     {t("copilot.insertToEditor")}
                   </button>
                 )}
+                {msg.role === "assistant" && activeConversation?.pendingPlan?.planMessageId === msg.id && (
+                  <div className="plan-confirm-actions">
+                    <button className="plan-confirm-button" onClick={() => void handleConfirmPlan()} disabled={isLoading}>
+                      {t("copilot.confirmPlan")}
+                    </button>
+                  </div>
+                )}
                 {msg.role === "assistant" && msg.searchCount && msg.searchCount > 0 && (
                   <div className="message-search-count">
                     {t("copilot.searchCount", { count: msg.searchCount, limit: webSearchLimit })}
@@ -1256,18 +1653,6 @@ const CopilotPanel: React.FC = () => {
             )}
           </div>
           <div className="input-textbox-wrapper">
-            {isAgentMode && (
-              <button
-                type="button"
-                className="agent-mode-toggle"
-                onClick={() => setChatSkills(prev => ({
-                  ...prev,
-                  agentSubMode: prev.agentSubMode === "plan" ? "build" : "plan",
-                }))}
-              >
-                {chatSkills.agentSubMode === "plan" ? t("copilot.plan") : t("copilot.build")}
-              </button>
-            )}
             <textarea
               value={input}
               onChange={(e) => {
@@ -1304,19 +1689,41 @@ const CopilotPanel: React.FC = () => {
             )}
           </div>
           <div className="input-footer">
-            <div className="skills-toolbar">
-              <button
-                type="button"
-                className={`skill-pill ${isAgentMode ? "active" : ""}`}
-                onClick={() => setIsAgentMode(prev => !prev)}
-              >
-                {isAgentMode ? t("header.agent") : t("header.copilot")}
-              </button>
+            <div
+              className="skills-toolbar"
+              onWheel={(event) => {
+                if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+                event.currentTarget.scrollLeft += event.deltaY;
+              }}
+            >
+              <div className="agent-mode-picker">
+                <button
+                  ref={agentModeButtonRef}
+                  type="button"
+                  className={`agent-mode-menu-button ${isAgentModeMenuOpen ? "active" : ""}`}
+                  onClick={() => {
+                    const rect = agentModeButtonRef.current?.getBoundingClientRect();
+                    if (rect) {
+                      setAgentModeMenuPosition({
+                        left: rect.left,
+                        bottom: window.innerHeight - rect.top + 8,
+                        width: Math.max(rect.width, 128),
+                      });
+                    }
+                    setIsAgentModeMenuOpen(prev => !prev);
+                  }}
+                  aria-haspopup="menu"
+                  aria-expanded={isAgentModeMenuOpen}
+                >
+                  <span>{t(`copilot.${chatSkills.agentMode}`)}</span>
+                  <ChevronDown size={13} />
+                </button>
+              </div>
 
               <button
                 type="button"
                 className={`skill-pill ${chatSkills.enableWebSearch ? "active" : ""}`}
-                onClick={() => setChatSkills(prev => ({
+                onClick={() => updateChatSkills(prev => ({
                   ...prev,
                   enableWebSearch: !prev.enableWebSearch,
                 }))}
@@ -1324,21 +1731,18 @@ const CopilotPanel: React.FC = () => {
                 {t("copilot.search")}
               </button>
 
-              <div className="skill-select">
-                <span>{t("copilot.thinkingDepth")}</span>
-                <select
-                  value={chatSkills.thinkingDepth}
-                  onChange={(e) => setChatSkills(prev => ({
-                    ...prev,
-                    thinkingDepth: e.target.value as ChatSkills["thinkingDepth"],
-                  }))}
-                >
-                  <option value="off">{t("copilot.off")}</option>
-                  <option value="low">{t("copilot.low")}</option>
-                  <option value="medium">{t("copilot.medium")}</option>
-                  <option value="high">{t("copilot.high")}</option>
-                </select>
-              </div>
+              <button
+                type="button"
+                className={`skill-pill ${chatSkills.forcePlanMode ? "active" : ""}`}
+                onClick={() => updateChatSkills(prev => ({
+                  ...prev,
+                  forcePlanMode: !prev.forcePlanMode,
+                  agentSubMode: !prev.forcePlanMode ? "plan" : prev.agentSubMode,
+                }))}
+              >
+                {t("copilot.planMode")}
+              </button>
+
             </div>
 
             <button
@@ -1349,10 +1753,41 @@ const CopilotPanel: React.FC = () => {
               <Send size={16} />
             </button>
           </div>
+          {isAgentModeMenuOpen && agentModeMenuPosition && (
+            <div
+              className="agent-mode-menu"
+              style={{
+                left: agentModeMenuPosition.left,
+                bottom: agentModeMenuPosition.bottom,
+                minWidth: agentModeMenuPosition.width,
+              }}
+              role="menu"
+            >
+              {(["quick", "smart", "architect"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={chatSkills.agentMode === mode ? "active" : ""}
+                  onClick={() => {
+                    updateChatSkills(prev => ({
+                      ...prev,
+                      agentMode: mode,
+                      agentSubMode: mode === "quick" ? "build" : prev.agentSubMode,
+                    }));
+                    setIsAgentModeMenuOpen(false);
+                  }}
+                  role="menuitemradio"
+                  aria-checked={chatSkills.agentMode === mode}
+                >
+                  {chatSkills.agentMode === mode ? `[${t(`copilot.${mode}`)}]` : t(`copilot.${mode}`)}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
         <div className="copilot-footer-note">
           <span>{currentModel ? `${t("copilot.model")}: ${currentModel.label}` : t("copilot.noModelSelected")}</span>
-          <span>{activeFile ? `${t("copilot.context")}: ${activeFile.name}` : t("copilot.noActiveFileContext")}</span>
+          <CopilotActiveFileContextLabel />
           <button
             className="copilot-settings-button"
             onClick={() => {

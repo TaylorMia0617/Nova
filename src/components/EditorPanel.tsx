@@ -24,13 +24,14 @@ import { onWorkspaceChanged, unwatchWorkspace, watchWorkspace } from "../service
 import { compareNodeNames } from "../../shared/workspaceSort.js";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { TipTapEditor } from "./TipTapEditor";
-import type { TipTapContentFormat, TipTapEditorHandle } from "./TipTapEditor";
+import type { TipTapContentFormat, TipTapEditorHandle, TipTapSelectionInfo } from "./TipTapEditor";
 import { FindReplacePanel } from "./TipTapEditor/FindReplacePanel";
 import { OutlinePanel } from "./TipTapEditor/OutlinePanel";
 import type { OutlineBlueprintMatch } from "./TipTapEditor/OutlinePanel";
 import type { BlueprintMountLink, BlueprintNode } from "../types/blueprint";
 import { EditorToolbar } from "./EditorToolbar";
 import BlueprintEditor from "./BlueprintEditor";
+import { calculateTextStats } from "../utils/textStats";
 import { useTranslation } from "../hooks/useTranslation";
 import "./EditorPanel.css";
 
@@ -89,6 +90,9 @@ type SelectionAction = "polish" | "correct" | "stylize";
 
 type SelectionPopupState = {
   text: string;
+  from: number;
+  to: number;
+  filePath: string | null;
   top: number;
   left: number;
 };
@@ -155,7 +159,7 @@ const EditorPanel: React.FC = () => {
     moveTabToGroup,
     moveTabToNewGroup,
   } = useFileStore();
-  const { blueprints, loadBlueprints, focusNode: focusBlueprintNode } = useBlueprintStore();
+  const { blueprints, loadBlueprints, resetBlueprints, focusNode: focusBlueprintNode } = useBlueprintStore();
   const { defaultSelectionModelId, selectionPromptTemplates, getModelProfileById } = useSettingsStore();
   const tiptapRef = useRef<TipTapEditorHandle>(null);
   const workspaceRefreshTimeoutRef = useRef<number | null>(null);
@@ -175,8 +179,9 @@ const EditorPanel: React.FC = () => {
   const imageInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    resetBlueprints();
     if (rootPath) void loadBlueprints();
-  }, [rootPath, loadBlueprints]);
+  }, [rootPath, loadBlueprints, resetBlueprints]);
 
   const {
     isFindReplaceOpen, isOutlineOpen, isPageViewMode, isFocusMode,
@@ -195,6 +200,7 @@ const EditorPanel: React.FC = () => {
   ), [selectionEditLocked, selectionLockedPath]);
   const releaseSelectionLock = useCallback(() => {
     setSelectionPreview(null);
+    setSelectionPopup(null);
     setSelectionError("");
     setSelectionLockedPath(null);
   }, []);
@@ -219,7 +225,7 @@ const EditorPanel: React.FC = () => {
     const { $from, from, to } = editor.state.selection;
     const textBefore = editor.state.doc.textBetween(0, $from.pos, "\n");
     const lines = textBefore.split("\n");
-    const selectionLength = from === to ? 0 : editor.state.doc.textBetween(from, to).length;
+    const selectionLength = from === to ? 0 : calculateTextStats(editor.state.doc.textBetween(from, to)).characters;
     const alignCenter = editor.isActive({ textAlign: "center" });
     const alignRight = editor.isActive({ textAlign: "right" });
 
@@ -251,12 +257,50 @@ const EditorPanel: React.FC = () => {
     });
   }, [isReferenceFile]);
 
+  const getSelectionPopupPosition = useCallback((editor: Editor, to: number) => {
+    const selection = window.getSelection();
+    const rangeRect =
+      selection && selection.rangeCount > 0
+        ? selection.getRangeAt(0).getBoundingClientRect()
+        : null;
+    const coords = editor.view.coordsAtPos(to);
+    const hasRangeRect =
+      rangeRect &&
+      Number.isFinite(rangeRect.left) &&
+      Number.isFinite(rangeRect.bottom) &&
+      (rangeRect.width > 0 || rangeRect.height > 0);
+    const anchorLeft = hasRangeRect ? rangeRect.left + rangeRect.width / 2 : coords.left;
+    const anchorTop = hasRangeRect ? rangeRect.bottom + 8 : coords.bottom + 8;
+
+    return {
+      left: clamp(anchorLeft, 120, Math.max(120, window.innerWidth - 120)),
+      top: clamp(anchorTop, 8, Math.max(8, window.innerHeight - 56)),
+    };
+  }, []);
+
+  const refreshSelectionPopupPosition = useCallback(() => {
+    const editor = tiptapRef.current?.getEditor();
+    if (!editor) return;
+    setSelectionPopup((current) => {
+      if (!current) return current;
+      if (current.filePath !== activeFile?.path) return null;
+      try {
+        return {
+          ...current,
+          ...getSelectionPopupPosition(editor, current.to),
+        };
+      } catch {
+        return current;
+      }
+    });
+  }, [activeFile?.path, getSelectionPopupPosition]);
+
   const handleSelectionAi = async (mode: SelectionAction) => {
     const modelProfile = getModelProfileById(defaultSelectionModelId);
     const handle = tiptapRef.current;
     if (!modelProfile || !handle) return;
 
-    const selectedText = handle.getSelectionText().trim();
+    const selectedText = (selectionPopup?.text || handle.getSelectionText()).trim();
     if (!selectedText) return;
 
     setSelectionLockedPath(activeFile?.path ?? null);
@@ -314,60 +358,47 @@ const EditorPanel: React.FC = () => {
     closeLinkDialog();
   };
 
-  const handleContentChange = useCallback((content: string) => {
-    if (activeFile?.isReadOnly) return;
-    const path = loadedFilePathRef.current;
-    if (path) {
-      updateFileContent(path, content);
-    }
-  }, [activeFile?.isReadOnly, updateFileContent]);
+  const handleContentChange = useCallback((path: string, content: string) => {
+    setSelectionPopup(null);
+    updateFileContent(path, content);
+  }, [updateFileContent]);
 
-  const handleSelectionChange = useCallback((text: string) => {
-    if (text.trim()) {
-      useEditorStatusStore.getState().setSelectionLength(text.length);
+  const handleSelectionChange = useCallback((selection: TipTapSelectionInfo | null) => {
+    if (selection?.text.trim()) {
+      useEditorStatusStore.getState().setSelectionLength(calculateTextStats(selection.text).characters);
       const handle = tiptapRef.current;
       const editor = handle?.getEditor();
       if (editor) {
-        const { to } = editor.state.selection;
-        const selection = window.getSelection();
-        const rangeRect =
-          selection && selection.rangeCount > 0
-            ? selection.getRangeAt(0).getBoundingClientRect()
-            : null;
-        const coords = editor.view.coordsAtPos(to);
-        const hasRangeRect =
-          rangeRect &&
-          Number.isFinite(rangeRect.left) &&
-          Number.isFinite(rangeRect.bottom) &&
-          (rangeRect.width > 0 || rangeRect.height > 0);
-        const anchorLeft = hasRangeRect ? rangeRect.left + rangeRect.width / 2 : coords.left;
-        const anchorTop = hasRangeRect ? rangeRect.bottom + 8 : coords.bottom + 8;
+        const position = getSelectionPopupPosition(editor, selection.to);
 
         setSelectionPopup({
-          text,
-          left: clamp(anchorLeft, 120, Math.max(120, window.innerWidth - 120)),
-          top: clamp(anchorTop, 8, Math.max(8, window.innerHeight - 56)),
+          text: selection.text,
+          from: selection.from,
+          to: selection.to,
+          filePath: activeFile?.path ?? null,
+          ...position,
         });
       }
     } else {
       useEditorStatusStore.getState().setSelectionLength(0);
-      setSelectionPopup(null);
     }
-  }, []);
+  }, [activeFile?.path, getSelectionPopupPosition]);
 
   const handleUpdateCursor = useCallback(() => {
     const handle = tiptapRef.current;
     const editor = handle?.getEditor();
     syncEditorStatus(editor);
-  }, [syncEditorStatus]);
+  }, [refreshSelectionPopupPosition, syncEditorStatus]);
 
   const handleEditorStateChange = useCallback((editor: Editor) => {
     syncEditorStatus(editor);
+    refreshSelectionPopupPosition();
   }, [syncEditorStatus]);
 
   useEffect(() => {
     const editor = tiptapRef.current?.getEditor();
     if (!editor || !activeFile) return;
+    setSelectionPopup(null);
     if (loadedFilePathRef.current === activeFile.path) return;
     if (activeFile.historyViewMode === "compare") {
       loadedFilePathRef.current = activeFile.path;
@@ -398,6 +429,19 @@ const EditorPanel: React.FC = () => {
 
     syncEditorStatus(editor);
   }, [activeFile?.path, syncEditorStatus]);
+
+  useEffect(() => {
+    const handleResize = () => refreshSelectionPopupPosition();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSelectionPopup(null);
+    };
+    window.addEventListener("resize", handleResize);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("resize", handleResize);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [refreshSelectionPopupPosition]);
 
   const handleSave = async () => {
     if (!activeFile || activeFile.isReadOnly) return;
@@ -548,18 +592,9 @@ const EditorPanel: React.FC = () => {
 
   const fileStats = useMemo(() => {
     const content = activeFile?.content || "";
-    const words = content.trim() ? content.trim().split(/\s+/).length : 0;
-    const charsNoSpace = content.replace(/\s/g, "").length;
-    const paragraphs = content.trim() ? content.trim().split(/\n\s*\n/).length : 0;
-    const lines = content.trim() ? content.trim().split(/\n/).length : 0;
-    const readingTimeMin = Math.max(1, Math.ceil(words / 200));
+    const stats = calculateTextStats(content);
     return {
-      characters: content.length,
-      charsNoSpace,
-      words,
-      paragraphs,
-      lines,
-      readingTime: readingTimeMin,
+      ...stats,
       language: isReferenceFile
         ? t("editor.status.plainText")
         : activeFile?.fileMode === "docx"
@@ -846,6 +881,16 @@ const EditorPanel: React.FC = () => {
     }
   }, []);
 
+  const handleToolbarApplyFontSize = useCallback((size: string) => {
+    const editor = tiptapRef.current?.getEditor();
+    if (!editor) return;
+    if (size) {
+      editor.chain().focus().setFontSize(size).run();
+    } else {
+      editor.chain().focus().unsetFontSize().run();
+    }
+  }, []);
+
   const handleToolbarApplyLineHeight = useCallback((height: string) => {
     tiptapRef.current?.getEditor()?.chain().focus().setLineHeight(height).run();
   }, []);
@@ -1027,7 +1072,11 @@ const EditorPanel: React.FC = () => {
                       key={group.activeTabPath}
                       ref={tiptapRef}
                       content={groupActiveTab.content}
-                      onChange={groupActiveTab.isReadOnly ? undefined : handleContentChange}
+                      onChange={
+                        groupActiveTab.isReadOnly
+                          ? undefined
+                          : (content) => handleContentChange(groupActiveTab.path, content)
+                      }
                       onSelectionChange={handleSelectionChange}
                       onEditorStateChange={handleEditorStateChange}
                       onFocus={handleUpdateCursor}
@@ -1109,6 +1158,7 @@ const EditorPanel: React.FC = () => {
                 onApplyColor={handleToolbarApplyColor}
                 onApplyHighlight={handleToolbarApplyHighlight}
                 onApplyFontFamily={handleToolbarApplyFontFamily}
+                onApplyFontSize={handleToolbarApplyFontSize}
                 onApplyLineHeight={handleToolbarApplyLineHeight}
                 onToggleBlockquote={handleToolbarToggleBlockquote}
                 onToggleCodeBlock={handleToolbarToggleCodeBlock}
@@ -1143,6 +1193,7 @@ const EditorPanel: React.FC = () => {
             <div
               className={`editor-container${isFocusMode ? " focus-mode" : ""}${isPageViewMode ? " page-view-mode" : ""}${editorDropTarget?.type === "group" && editorDropTarget.groupId === activeGroupId ? " drop-active" : ""}`}
               ref={wrapperRef}
+              onScroll={refreshSelectionPopupPosition}
               style={{ position: "relative" }}
               onDragOver={(event) => handleEditorDragOver(event, { type: "group", groupId: activeGroupId })}
               onDrop={(event) => void handleDropOnEditorGroup(event, activeGroupId)}
@@ -1175,7 +1226,11 @@ const EditorPanel: React.FC = () => {
                 <TipTapEditor
                   ref={tiptapRef}
                   content={activeFile.content}
-                  onChange={activeFile.isReadOnly ? undefined : handleContentChange}
+                  onChange={
+                    activeFile.isReadOnly
+                      ? undefined
+                      : (content) => handleContentChange(activeFile.path, content)
+                  }
                   onSelectionChange={handleSelectionChange}
                   onEditorStateChange={handleEditorStateChange}
                   onFocus={handleUpdateCursor}

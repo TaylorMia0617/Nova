@@ -11,6 +11,8 @@ import {
 import type { BlueprintDocument, BlueprintEdge, BlueprintFieldBindingKey, BlueprintLogicBlock, BlueprintLogicTree, BlueprintMountLink, BlueprintNode, BlueprintNodeKind, BlueprintNodeLayer, BlueprintNodeTemplate, BlueprintTypedData, BlueprintTypedNodeType } from "../types/blueprint";
 
 const newId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+let blueprintLoadRequestId = 0;
+let templateLoadRequestId = 0;
 const ensureValues = (values: string[] | undefined, fallback = "") => (Array.isArray(values) && values.length > 0 ? values : [fallback]);
 const firstValue = (values: string[] | undefined, fallback = "") => ensureValues(values, fallback)[0] ?? "";
 const ensureStringList = (values: unknown, fallback: string[] = [""]) => (
@@ -423,6 +425,7 @@ interface BlueprintState {
   isLoading: boolean;
   errorMessage: string | null;
   templateErrorMessage: string | null;
+  resetBlueprints: () => void;
   loadBlueprints: () => Promise<void>;
   loadTemplates: () => Promise<void>;
   createBlueprint: (name?: string) => Promise<BlueprintDocument>;
@@ -453,26 +456,45 @@ export const useBlueprintStore = create<BlueprintState>((set, get) => ({
   isLoading: false,
   errorMessage: null,
   templateErrorMessage: null,
+  resetBlueprints: () => {
+    blueprintLoadRequestId++;
+    templateLoadRequestId++;
+    set({
+      blueprints: [],
+      templates: [],
+      focusedNodeByBlueprintId: {},
+      undoStacks: {},
+      isLoading: false,
+      errorMessage: null,
+      templateErrorMessage: null,
+    });
+  },
   loadBlueprints: async () => {
+    const requestId = ++blueprintLoadRequestId;
     set({ isLoading: true, errorMessage: null });
     try {
       const blueprints = (await listBlueprints()).map(normalizeBlueprint);
+      if (requestId !== blueprintLoadRequestId) return;
       set({
         blueprints: blueprints.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
         isLoading: false,
       });
     } catch (error) {
+      if (requestId !== blueprintLoadRequestId) return;
       set({ isLoading: false, errorMessage: error instanceof Error ? error.message : "Failed to load blueprints." });
     }
   },
   loadTemplates: async () => {
+    const requestId = ++templateLoadRequestId;
     try {
       const templates = (await listBlueprintTemplates()).map(normalizeTemplate);
+      if (requestId !== templateLoadRequestId) return;
       set({
         templates: templates.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
         templateErrorMessage: null,
       });
     } catch (error) {
+      if (requestId !== templateLoadRequestId) return;
       set({ templateErrorMessage: error instanceof Error ? error.message : "Failed to load blueprint templates." });
     }
   },

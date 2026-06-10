@@ -15,6 +15,10 @@ export default function BlueprintPanel() {
   const [renameValue, setRenameValue] = useState("");
 
   useEffect(() => {
+    setSelectedBlueprintId(null);
+    setRenamingId(null);
+    setRenameValue("");
+    setNewName("");
     if (rootPath) void loadBlueprints();
   }, [rootPath, loadBlueprints]);
 

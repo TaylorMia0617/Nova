@@ -349,6 +349,33 @@
   background-color: #2f5c91;
 }
 
+.plan-confirm-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.plan-confirm-button {
+  border: none;
+  border-radius: 6px;
+  background: #5a9e8f;
+  color: #ffffff;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 7px 12px;
+}
+
+.plan-confirm-button:hover:not(:disabled) {
+  background: #68ad9f;
+}
+
+.plan-confirm-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
 .tool-confirm-message {
   background: #1a2332;
   border: 1px solid #3278d3;
@@ -568,25 +595,6 @@
   flex-direction: column;
 }
 
-.agent-mode-toggle {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  z-index: 2;
-  background: #255aa7;
-  border: none;
-  color: #ffffff;
-  border-radius: 4px;
-  padding: 2px 8px;
-  font-size: 11px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.agent-mode-toggle:hover {
-  background: #3278d3;
-}
-
 .draft-attachments-inline {
   display: flex;
   align-items: center;
@@ -631,7 +639,7 @@
 .input-area textarea {
   flex: 1;
   min-height: 60px;
-  padding: 28px 10px 10px;
+  padding: 10px;
   border-radius: 10px;
   font-size: 13px;
   resize: none;
@@ -678,25 +686,40 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
   padding: 6px 0 0;
   margin-top: 4px;
+  min-width: 0;
 }
 
 .skills-toolbar {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   overflow-x: auto;
+  overflow-y: visible;
   min-width: 0;
   flex: 1;
-  scrollbar-width: none;
+  padding: 0 0 4px;
+  scrollbar-width: thin;
+  scrollbar-color: #43536b transparent;
 }
 
 .skills-toolbar::-webkit-scrollbar {
-  display: none;
+  height: 5px;
+}
+
+.skills-toolbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.skills-toolbar::-webkit-scrollbar-thumb {
+  background: #43536b;
+  border-radius: 999px;
 }
 
 .skill-pill {
+  flex: 0 0 auto;
   background: #252c39;
   border: 1px solid #324057;
   color: #9bb0cf;
@@ -705,6 +728,7 @@
   font-size: 11px;
   cursor: pointer;
   transition: all 0.2s;
+  white-space: nowrap;
 }
 
 .skill-pill:hover {
@@ -718,27 +742,61 @@
   color: #ffffff;
 }
 
-.skill-select {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 11px;
-  color: #9bb0cf;
+.agent-mode-picker {
+  position: relative;
+  flex-shrink: 0;
 }
 
-.skill-select select {
-  background: #111722;
+.agent-mode-menu-button {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #252c39;
   border: 1px solid #324057;
-  color: #edf2f8;
-  border-radius: 6px;
-  padding: 3px 6px;
+  color: #e2ebf7;
+  border-radius: 16px;
+  padding: 3px 9px;
   font-size: 11px;
   cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
 }
 
-.skill-select select:focus {
-  outline: none;
-  border-color: #4f8cff;
+.agent-mode-menu-button:hover,
+.agent-mode-menu-button.active {
+  background: #2d3442;
+  border-color: #3278d3;
+  color: #ffffff;
+}
+
+.agent-mode-menu {
+  position: fixed;
+  z-index: 3000;
+  padding: 6px;
+  background: #111722;
+  border: 1px solid #324057;
+  border-radius: 8px;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.35);
+}
+
+.agent-mode-menu button {
+  display: block;
+  width: 100%;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: #aebbd0;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.agent-mode-menu button:hover,
+.agent-mode-menu button.active {
+  background: #255aa7;
+  color: #ffffff;
 }
 
 .copilot-footer-note {
@@ -811,8 +869,7 @@
 .message-role,
 .empty-chat,
 .empty-chat .hint,
-.copilot-footer-note,
-.skill-select {
+.copilot-footer-note {
   color: var(--color-text-muted);
 }
 
@@ -823,7 +880,8 @@
 
 .copilot-toolbar select,
 .input-area textarea,
-.skill-select select {
+.agent-mode-menu-button,
+.agent-mode-menu {
   background-color: var(--color-bg-soft);
   border-color: var(--color-border-strong);
   color: var(--color-text);
@@ -911,14 +969,15 @@
 
 .copilot-toolbar select,
 .input-area textarea,
-.skill-select select {
+.agent-mode-menu-button,
+.agent-mode-menu {
   background-color: var(--app-control-surface);
   border-color: var(--color-border);
   color: var(--color-text);
 }
 
 .input-area textarea:focus,
-.skill-select select:focus {
+.agent-mode-menu-button:focus {
   border-color: var(--color-accent);
 }
 
@@ -998,7 +1057,8 @@
 .draft-attachment-icon,
 .message-attachment-chip,
 .skill-pill,
-.skill-select select,
+.agent-mode-menu-button,
+.agent-mode-menu,
 .copilot-toolbar select,
 .input-area textarea {
   background: var(--app-control-surface);

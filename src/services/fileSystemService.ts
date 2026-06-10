@@ -75,6 +75,18 @@ interface NovelHostApi {
   onWorkspaceChanged?: (callback: (payload: { rootPath: string; changedPath: string | null }) => void) => () => void;
   readGlobalApiConfig?: () => Promise<string>;
   writeGlobalApiConfig?: (content: string) => Promise<void>;
+  readGlobalHabits?: () => Promise<string>;
+  writeGlobalHabits?: (content: string) => Promise<void>;
+  ensureWorkspaceHabits?: () => Promise<WorkspaceHabitsPaths>;
+  readProjectImportant?: () => Promise<string>;
+  writeProjectImportant?: (content: string) => Promise<void>;
+  readProjectSnapshot?: () => Promise<string>;
+  writeProjectSnapshot?: (content: string) => Promise<void>;
+  readProjectCacheMemory?: () => Promise<string>;
+  writeProjectCacheMemory?: (content: string) => Promise<void>;
+  getContentCache?: (request: ContentCacheRequest) => Promise<ContentCacheResult>;
+  putContentCache?: (request: ContentCachePutRequest) => Promise<ContentCacheResult>;
+  getProjectCacheIndex?: () => Promise<ProjectCacheIndex>;
   // 参考列表管理
   getReferenceLists?: () => Promise<ReferenceListIndex[]>;
   getReferenceList?: (listId: string) => Promise<ReferenceListData | null>;
@@ -96,6 +108,40 @@ export interface ReferenceListData {
     key: string;
     value: string;
   }>;
+}
+
+export interface ContentCacheRequest {
+  content: string;
+  schemaVersion?: number;
+  modelVersion?: string;
+  promptVersion?: string;
+  paramsVersion?: string;
+  kind?: string;
+}
+
+export interface ContentCachePutRequest extends ContentCacheRequest {
+  value: unknown;
+  relativePath?: string | null;
+}
+
+export interface ContentCacheResult {
+  hit: boolean;
+  contentHash: string;
+  cacheKey: string;
+  value?: unknown;
+}
+
+export interface ProjectCacheIndex {
+  schemaVersion: number;
+  entries: Record<string, { contentHash: string; kind: string; relativePath?: string | null; updatedAt: string }>;
+}
+
+export interface WorkspaceHabitsPaths {
+  rootPath: string;
+  habitsPath: string;
+  importantsPath: string;
+  snapshotPath?: string;
+  cacheMemoryPath?: string;
 }
 
 type AnyDirectoryHandle = FileSystemDirectoryHandle & {
@@ -666,6 +712,98 @@ export async function writeGlobalApiConfig(content: string): Promise<void> {
   if (host?.writeGlobalApiConfig) {
     await host.writeGlobalApiConfig(content);
   }
+}
+
+export async function readGlobalHabits(): Promise<string | null> {
+  const host = getHostApi();
+  if (host?.readGlobalHabits) {
+    return host.readGlobalHabits();
+  }
+  return null;
+}
+
+export async function writeGlobalHabits(content: string): Promise<void> {
+  const host = getHostApi();
+  if (host?.writeGlobalHabits) {
+    await host.writeGlobalHabits(content);
+  }
+}
+
+export async function ensureWorkspaceHabits(): Promise<WorkspaceHabitsPaths | null> {
+  const host = getHostApi();
+  if (host?.ensureWorkspaceHabits) {
+    return host.ensureWorkspaceHabits();
+  }
+  return null;
+}
+
+export async function readProjectImportant(): Promise<string | null> {
+  const host = getHostApi();
+  if (host?.readProjectImportant) {
+    return host.readProjectImportant();
+  }
+  return null;
+}
+
+export async function writeProjectImportant(content: string): Promise<void> {
+  const host = getHostApi();
+  if (host?.writeProjectImportant) {
+    await host.writeProjectImportant(content);
+  }
+}
+
+export async function readProjectSnapshot(): Promise<string | null> {
+  const host = getHostApi();
+  if (host?.readProjectSnapshot) {
+    return host.readProjectSnapshot();
+  }
+  return null;
+}
+
+export async function writeProjectSnapshot(content: string): Promise<void> {
+  const host = getHostApi();
+  if (host?.writeProjectSnapshot) {
+    await host.writeProjectSnapshot(content);
+  }
+}
+
+export async function readProjectCacheMemory(): Promise<string | null> {
+  const host = getHostApi();
+  if (host?.readProjectCacheMemory) {
+    return host.readProjectCacheMemory();
+  }
+  return null;
+}
+
+export async function writeProjectCacheMemory(content: string): Promise<void> {
+  const host = getHostApi();
+  if (host?.writeProjectCacheMemory) {
+    await host.writeProjectCacheMemory(content);
+  }
+}
+
+export async function getContentCache(request: ContentCacheRequest): Promise<ContentCacheResult | null> {
+  const host = getHostApi();
+  if (host?.getContentCache) {
+    return host.getContentCache(request);
+  }
+  return null;
+}
+
+export async function putContentCache(request: ContentCachePutRequest): Promise<ContentCacheResult | null> {
+  const host = getHostApi();
+  if (host?.putContentCache) {
+    return host.putContentCache(request);
+  }
+  return null;
+}
+
+export async function getProjectCacheIndex(): Promise<ProjectCacheIndex | null> {
+  const host = getHostApi();
+  if (host?.getProjectCacheIndex) {
+    return host.getProjectCacheIndex();
+  }
+  return null;
 }
 
 // 参考列表管理函数

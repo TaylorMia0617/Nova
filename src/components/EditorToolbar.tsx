@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import {
   AlignCenter,
   AlignLeft,
@@ -51,6 +51,7 @@ interface EditorToolbarProps {
   onApplyColor: (color: string) => void;
   onApplyHighlight: (color: string) => void;
   onApplyFontFamily: (font: string) => void;
+  onApplyFontSize: (size: string) => void;
   onApplyLineHeight: (height: string) => void;
   onToggleBlockquote: () => void;
   onToggleCodeBlock: () => void;
@@ -108,6 +109,20 @@ const FONT_FAMILIES = [
   { labelKey: "editor.fonts.courierNew", value: "Courier New, monospace" },
 ];
 
+const FONT_SIZES = [
+  { labelKey: "editor.fontSizes.default", label: "", value: "" },
+  { label: "12", value: "12px" },
+  { label: "14", value: "14px" },
+  { label: "16", value: "16px" },
+  { label: "18", value: "18px" },
+  { label: "20", value: "20px" },
+  { label: "24", value: "24px" },
+  { label: "28", value: "28px" },
+  { label: "32", value: "32px" },
+  { label: "36", value: "36px" },
+  { label: "48", value: "48px" },
+];
+
 const LINE_HEIGHTS = [
   { label: "1.0", value: "1" },
   { label: "1.15", value: "1.15" },
@@ -127,6 +142,7 @@ export const EditorToolbar = memo(function EditorToolbar({
   onApplyColor,
   onApplyHighlight,
   onApplyFontFamily,
+  onApplyFontSize,
   onApplyLineHeight,
   onToggleBlockquote,
   onToggleCodeBlock,
@@ -156,58 +172,69 @@ export const EditorToolbar = memo(function EditorToolbar({
 
   const [isColorPickerOpen, setIsColorPickerOpen] = useState(false);
   const [isHighlightPickerOpen, setIsHighlightPickerOpen] = useState(false);
-  const [isFontPickerOpen, setIsFontPickerOpen] = useState(false);
   const [isTableMenuOpen, setIsTableMenuOpen] = useState(false);
-  const [isLineHeightOpen, setIsLineHeightOpen] = useState(false);
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
+  const [fontSizeInput, setFontSizeInput] = useState("");
 
   const closeAllDropdowns = useCallback(() => {
     setIsColorPickerOpen(false);
     setIsHighlightPickerOpen(false);
-    setIsFontPickerOpen(false);
     setIsTableMenuOpen(false);
-    setIsLineHeightOpen(false);
   }, []);
 
   const toggleColorPicker = useCallback(() => {
     setIsColorPickerOpen(prev => !prev);
     setIsHighlightPickerOpen(false);
-    setIsFontPickerOpen(false);
     setIsTableMenuOpen(false);
-    setIsLineHeightOpen(false);
   }, []);
 
   const toggleHighlightPicker = useCallback(() => {
     setIsHighlightPickerOpen(prev => !prev);
     setIsColorPickerOpen(false);
-    setIsFontPickerOpen(false);
     setIsTableMenuOpen(false);
-    setIsLineHeightOpen(false);
-  }, []);
-
-  const toggleFontPicker = useCallback(() => {
-    setIsFontPickerOpen(prev => !prev);
-    setIsColorPickerOpen(false);
-    setIsHighlightPickerOpen(false);
-    setIsTableMenuOpen(false);
-    setIsLineHeightOpen(false);
   }, []);
 
   const toggleTableMenu = useCallback(() => {
     setIsTableMenuOpen(prev => !prev);
     setIsColorPickerOpen(false);
     setIsHighlightPickerOpen(false);
-    setIsFontPickerOpen(false);
-    setIsLineHeightOpen(false);
   }, []);
 
-  const toggleLineHeight = useCallback(() => {
-    setIsLineHeightOpen(prev => !prev);
-    setIsColorPickerOpen(false);
-    setIsHighlightPickerOpen(false);
-    setIsFontPickerOpen(false);
-    setIsTableMenuOpen(false);
-  }, []);
+  const applyFontSizeInput = useCallback(() => {
+    const normalized = fontSizeInput.trim();
+    if (!normalized) {
+      onApplyFontSize("");
+      return;
+    }
+    const numericValue = Number(normalized);
+    if (!Number.isFinite(numericValue) || numericValue <= 0) return;
+    const clampedValue = Math.min(200, Math.max(1, numericValue));
+    const nextValue = String(clampedValue);
+    setFontSizeInput(nextValue);
+    onApplyFontSize(`${nextValue}px`);
+  }, [fontSizeInput, onApplyFontSize]);
+
+  const handleFontSizeKeyDown = useCallback((event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      applyFontSizeInput();
+    }
+    if (event.key === "Escape") {
+      setFontSizeInput("");
+      onApplyFontSize("");
+    }
+  }, [applyFontSizeInput, onApplyFontSize]);
+
+  const handleFontSizePreset = useCallback((value: string) => {
+    if (!value) {
+      setFontSizeInput("");
+      onApplyFontSize("");
+      return;
+    }
+    const numericValue = value.replace(/px$/, "");
+    setFontSizeInput(numericValue);
+    onApplyFontSize(value);
+  }, [onApplyFontSize]);
 
   const toolbarButtonClass = (active = false) => `toolbar-button${active ? " active" : ""}`;
 
@@ -296,33 +323,76 @@ export const EditorToolbar = memo(function EditorToolbar({
               )}
             </div>
             <span className="toolbar-divider" />
-            <div className="toolbar-dropdown-wrap">
-              <button className={toolbarButtonClass(isFontPickerOpen)} onClick={toggleFontPicker} title={t("editor.toolbar.font")} disabled={disabled}>
-                <span className="toolbar-text-btn">Aa</span>
-              </button>
-              {isFontPickerOpen && (
-                <div className="toolbar-dropdown font-picker">
-                  {FONT_FAMILIES.map((f) => (
-                    <button key={f.value} className="font-option" style={{ fontFamily: f.value || "inherit" }} onClick={() => { onApplyFontFamily(f.value); closeAllDropdowns(); }}>
-                      {t(f.labelKey)}
-                    </button>
-                  ))}
-                </div>
-              )}
+            <div className="toolbar-control-wrap">
+              <select
+                className="toolbar-select font-family-select"
+                defaultValue=""
+                onChange={(event) => {
+                  onApplyFontFamily(event.target.value);
+                  event.currentTarget.value = "";
+                }}
+                title={t("editor.toolbar.font")}
+                disabled={disabled}
+              >
+                <option value="">{t("editor.toolbar.font")}</option>
+                {FONT_FAMILIES.map((f) => (
+                  <option key={f.value || "default"} value={f.value} style={{ fontFamily: f.value || "inherit" }}>
+                    {t(f.labelKey)}
+                  </option>
+                ))}
+              </select>
             </div>
-            <div className="toolbar-dropdown-wrap">
-              <button className={toolbarButtonClass(isLineHeightOpen)} onClick={toggleLineHeight} title={t("editor.toolbar.lineHeight")} disabled={disabled}>
-                <span className="toolbar-text-btn" style={{ fontSize: 12 }}>{t("editor.toolbar.lineHeightShort")}</span>
-              </button>
-              {isLineHeightOpen && (
-                <div className="toolbar-dropdown line-height-picker">
-                  {LINE_HEIGHTS.map((h) => (
-                    <button key={h.value} className="line-height-option" onClick={() => { onApplyLineHeight(h.value); closeAllDropdowns(); }}>
-                      {h.label}
-                    </button>
-                  ))}
-                </div>
-              )}
+            <div className="toolbar-control-wrap font-size-control">
+              <input
+                className="toolbar-number-input"
+                type="number"
+                min={1}
+                max={200}
+                step={1}
+                value={fontSizeInput}
+                onChange={(event) => setFontSizeInput(event.target.value)}
+                onBlur={applyFontSizeInput}
+                onKeyDown={handleFontSizeKeyDown}
+                placeholder={t("editor.toolbar.fontSizeShort")}
+                title={t("editor.toolbar.fontSize")}
+                disabled={disabled}
+              />
+              <span className="toolbar-unit">px</span>
+              <select
+                className="toolbar-select font-size-preset-select"
+                defaultValue=""
+                onChange={(event) => {
+                  handleFontSizePreset(event.target.value);
+                  event.currentTarget.value = "";
+                }}
+                title={t("editor.toolbar.fontSize")}
+                disabled={disabled}
+              >
+                {FONT_SIZES.map((s) => (
+                  <option key={s.value || "default"} value={s.value}>
+                    {s.labelKey ? t(s.labelKey) : s.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="toolbar-control-wrap">
+              <select
+                className="toolbar-select line-height-select"
+                defaultValue=""
+                onChange={(event) => {
+                  if (event.target.value) onApplyLineHeight(event.target.value);
+                  event.currentTarget.value = "";
+                }}
+                title={t("editor.toolbar.lineHeight")}
+                disabled={disabled}
+              >
+                <option value="">{t("editor.toolbar.lineHeightShort")}</option>
+                {LINE_HEIGHTS.map((h) => (
+                  <option key={h.value} value={h.value}>
+                    {h.label}
+                  </option>
+                ))}
+              </select>
             </div>
             <span className="toolbar-divider" />
             <button className={toolbarButtonClass()} onClick={onIndent} title={t("editor.toolbar.indent")} disabled={disabled}>

@@ -75,6 +75,7 @@ const RECENT_WORKSPACES_KEY = "novel-assistance-recent-workspaces";
 const MAX_RECENT_WORKSPACES = 5;
 export const MAX_EDITOR_GROUPS = 3;
 let refreshWorkspaceRequestId = 0;
+let openFileRequestId = 0;
 const historyIdleTimers = new Map<string, number>();
 const historyBaselineKeys = new Set<string>();
 const historyLastSnapshotContent = new Map<string, string>();
@@ -100,6 +101,39 @@ function clearHistoryIdleTimer(path: string) {
     window.clearTimeout(timer);
     historyIdleTimers.delete(path);
   }
+}
+
+function clearAllHistoryIdleTimers() {
+  for (const path of historyIdleTimers.keys()) {
+    clearHistoryIdleTimer(path);
+  }
+}
+
+function resetWorkspaceEditingState() {
+  openFileRequestId++;
+  refreshWorkspaceRequestId++;
+  clearAllHistoryIdleTimers();
+  historyBaselineKeys.clear();
+  historyLastSnapshotContent.clear();
+
+  return {
+    activeFile: null,
+    editorGroups: [createEditorGroup(PRIMARY_GROUP_ID)],
+    activeGroupId: PRIMARY_GROUP_ID,
+  };
+}
+
+function resetWorkspaceRuntimeState() {
+  return {
+    rootPath: null,
+    rootName: null,
+    files: [],
+    referenceEntries: [],
+    referenceLists: [],
+    selectedListId: null,
+    fileChanges: new Map<string, FileChange[]>(),
+    ...resetWorkspaceEditingState(),
+  };
 }
 
 function rememberSnapshotContent(path: string, content: string) {
@@ -553,6 +587,20 @@ function placeTabInHistoryTarget(editorGroups: EditorGroup[], tab: OpenFileTab) 
   return { groups, targetGroupId };
 }
 
+function getAllOpenTabs(editorGroups: EditorGroup[]): OpenFileTab[] {
+  return editorGroups.flatMap((group) => group.tabs);
+}
+
+function isWritableFileTab(tab: OpenFileTab) {
+  return (
+    !tab.isReadOnly &&
+    !tab.historyViewMode &&
+    tab.fileMode !== "blueprint" &&
+    tab.fileMode !== "image" &&
+    tab.fileMode !== "unsupported"
+  );
+}
+
 export const useFileStore = create<FileState>()((set, get) => ({
   rootPath: null,
   rootName: null,
@@ -589,7 +637,7 @@ export const useFileStore = create<FileState>()((set, get) => ({
     set({ recentWorkspaces: next });
   },
   openRecentWorkspace: async (path: string) => {
-    set({ isLoadingWorkspace: true, errorMessage: null });
+    set({ ...resetWorkspaceRuntimeState(), isLoadingWorkspace: true, errorMessage: null });
 
     try {
       const workspace = await loadWorkspace(path);
@@ -615,7 +663,7 @@ export const useFileStore = create<FileState>()((set, get) => ({
         rootPath: workspace.rootPath,
         rootName: workspace.rootName,
         files: workspace.nodes,
-        activeFile: null,
+        ...resetWorkspaceEditingState(),
         referenceEntries,
         referenceLists,
         selectedListId: referenceLists[0]?.id ?? null,
@@ -824,6 +872,7 @@ export const useFileStore = create<FileState>()((set, get) => ({
         return;
       }
 
+      set({ ...resetWorkspaceRuntimeState(), isLoadingWorkspace: true, errorMessage: null });
       const workspace = await loadWorkspace(selectedPath);
 
       // 加载参考列表
@@ -848,7 +897,7 @@ export const useFileStore = create<FileState>()((set, get) => ({
         rootPath: workspace.rootPath,
         rootName: workspace.rootName,
         files: workspace.nodes,
-        activeFile: null,
+        ...resetWorkspaceEditingState(),
         referenceEntries,
         referenceLists,
         selectedListId: referenceLists[0]?.id ?? null,
@@ -1036,6 +1085,8 @@ export const useFileStore = create<FileState>()((set, get) => ({
   },
   openFile: async (path, groupId) => {
     refreshWorkspaceRequestId++;
+    const requestId = ++openFileRequestId;
+    const rootPathAtStart = get().rootPath;
     const targetGroupId = groupId ?? get().activeGroupId;
     const targetGroup = get().editorGroups.find((g) => g.id === targetGroupId);
     if (!targetGroup) return;
@@ -1067,6 +1118,8 @@ export const useFileStore = create<FileState>()((set, get) => ({
           : fileMode === "unsupported"
             ? ""
             : await readFile(path);
+      if (rootPathAtStart !== get().rootPath) return;
+
       const newTab: OpenFileTab = {
         path,
         name: node.name,
@@ -1078,25 +1131,38 @@ export const useFileStore = create<FileState>()((set, get) => ({
       };
 
       set((state) => {
+        if (rootPathAtStart !== state.rootPath) {
+          return state;
+        }
+
+        const shouldActivate = requestId === openFileRequestId;
         const group = state.editorGroups.find((g) => g.id === targetGroupId);
         if (!group || group.tabs.some((tab) => tab.path === path)) {
           const existing = group?.tabs.find((tab) => tab.path === path) ?? null;
-          return { activeFile: existing };
+          return shouldActivate && existing
+            ? {
+                activeFile: targetGroupId === state.activeGroupId ? existing : state.activeFile,
+                editorGroups: state.editorGroups.map((g) =>
+                  g.id === targetGroupId ? { ...g, activeTabPath: path } : g
+                ),
+              }
+            : state;
         }
 
         const updatedGroups = state.editorGroups.map((g) =>
           g.id === targetGroupId
-            ? { ...g, tabs: [...g.tabs, newTab], activeTabPath: path }
+            ? { ...g, tabs: [...g.tabs, newTab], activeTabPath: shouldActivate ? path : g.activeTabPath }
             : g
         );
 
         return {
           editorGroups: updatedGroups,
-          activeFile: targetGroupId === state.activeGroupId ? newTab : state.activeFile,
+          activeFile: shouldActivate && targetGroupId === state.activeGroupId ? newTab : state.activeFile,
           errorMessage: null,
         };
       });
     } catch (error) {
+      if (requestId !== openFileRequestId || rootPathAtStart !== get().rootPath) return;
       set({
         errorMessage: error instanceof Error ? error.message : "Failed to open file.",
       });
@@ -1292,14 +1358,13 @@ export const useFileStore = create<FileState>()((set, get) => ({
     const targetPath = path ?? get().activeFile?.path;
     if (!targetPath) return;
 
-    const tab = get().getOpenTabs().find((item) => item.path === targetPath);
-    if (!tab) return;
-    if (tab.isReadOnly) {
-      set({ errorMessage: null });
+    const tab = getAllOpenTabs(get().editorGroups).find((item) => item.path === targetPath);
+    if (!tab) {
+      set({ errorMessage: "Cannot save because the file is no longer open." });
       return;
     }
-    if (tab.fileMode === "blueprint" || tab.fileMode === "image" || tab.fileMode === "unsupported") {
-      set({ errorMessage: null });
+    if (!isWritableFileTab(tab)) {
+      set({ errorMessage: "This tab cannot be saved to a file." });
       return;
     }
 
@@ -1353,8 +1418,13 @@ export const useFileStore = create<FileState>()((set, get) => ({
     }
   },
   saveAllFiles: async () => {
-    const dirtyTabs = get().getOpenTabs().filter((tab) => tab.isDirty);
+    const dirtyTabs = getAllOpenTabs(get().editorGroups).filter(
+      (tab) => tab.isDirty && isWritableFileTab(tab)
+    );
+    const seenPaths = new Set<string>();
     for (const tab of dirtyTabs) {
+      if (seenPaths.has(tab.path)) continue;
+      seenPaths.add(tab.path);
       await get().saveFile(tab.path);
     }
   },

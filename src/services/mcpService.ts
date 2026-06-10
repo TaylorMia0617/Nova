@@ -1,10 +1,11 @@
 import type { ModelProfile } from "../types/ai";
 import type { McpTool, McpToolResult } from "../types/ai";
-import { readFile, readDirectory, writeFile, writeFileBinary, createFile, listBlueprints, saveBlueprint } from "./fileSystemService";
+import { readFile, readDirectory, readFileBinary, writeFile, writeFileBinary, createFile, listBlueprints, saveBlueprint } from "./fileSystemService";
 import type { WorkspaceNode } from "./fileSystemService";
 import type { BlueprintDocument, BlueprintEdge, BlueprintNode } from "../types/blueprint";
-import { createDocxBase64FromPlainText } from "./docxOoxmlService";
+import { createDocxBase64FromPlainText, parseDocxBase64, type ProseMirrorNode } from "./docxOoxmlService";
 import { searchWithTavily } from "./searchService";
+import { autoLayoutBlueprint } from "../utils/blueprintAutoLayout";
 
 type JsonRpcResponse<T = unknown> = {
   jsonrpc: "2.0";
@@ -222,11 +223,33 @@ const LOCAL_FILESYSTEM_TOOLS: McpTool[] = [
   }
 ];
 
+function normalizeToolForPrompt(tool: McpTool): McpTool {
+  if (tool.name !== "create_file") return tool;
+  return {
+    ...tool,
+    description: "创建新文件并写入内容。章节正文默认使用 .docx；传入纯文本 content，工具会自动生成真正的 DOCX 文件。",
+    inputSchema: {
+      ...tool.inputSchema,
+      properties: {
+        ...tool.inputSchema.properties,
+        path: {
+          ...tool.inputSchema.properties.path,
+          description: "文件路径（相对于工作区根目录）。章节正文建议使用 .docx；大纲、设定、摘要可使用 .md。",
+        },
+        content: {
+          ...tool.inputSchema.properties.content,
+          description: "文件初始内容。创建 .docx 时仍然传纯文本，工具会转换为 Word 文档。",
+        },
+      },
+    },
+  };
+}
+
 export function getLocalTools(agentSubMode?: "plan" | "build"): McpTool[] {
-  if (agentSubMode === "plan") {
-    return LOCAL_FILESYSTEM_TOOLS.filter(t => t.name !== "edit_file" && t.name !== "create_file" && t.name !== "create_blueprint");
-  }
-  return LOCAL_FILESYSTEM_TOOLS;
+  const tools = agentSubMode === "plan"
+    ? LOCAL_FILESYSTEM_TOOLS.filter(t => t.name !== "edit_file" && t.name !== "create_file" && t.name !== "create_blueprint")
+    : LOCAL_FILESYSTEM_TOOLS;
+  return tools.map(normalizeToolForPrompt);
 }
 
 function normalizePath(path: string): string {
@@ -290,7 +313,7 @@ function normalizeBlueprintDraft(args: Record<string, unknown>): BlueprintDocume
   const now = new Date().toISOString();
   const nodes = (fullDraft?.nodes ?? args.nodes ?? []) as BlueprintNode[];
   const edges = (fullDraft?.edges ?? args.edges ?? []) as BlueprintEdge[];
-  return {
+  return autoLayoutBlueprint({
     id: String(fullDraft?.id ?? newBlueprintId("blueprint")),
     name,
     updatedAt: now,
@@ -307,7 +330,33 @@ function normalizeBlueprintDraft(args: Record<string, unknown>): BlueprintDocume
       .filter((edge) => edge.from && edge.to && edge.from !== edge.to)
       .map((edge) => ({ ...edge, id: String(edge.id || newBlueprintId("edge")) })),
     viewport: fullDraft?.viewport ?? { x: 0, y: 0, zoom: 1 },
-  };
+  });
+}
+
+function proseMirrorToPlainText(node: ProseMirrorNode | null | undefined): string {
+  if (!node) return "";
+  if (node.type === "text") return node.text ?? "";
+  if (node.type === "hardBreak") return "\n";
+
+  const childText = (node.content ?? []).map(proseMirrorToPlainText).join("");
+  if (["paragraph", "heading"].includes(node.type)) {
+    return childText.trim() ? `${childText}\n` : "";
+  }
+  if (node.type === "tableRow") {
+    return `${(node.content ?? []).map(proseMirrorToPlainText).map((text) => text.trim()).filter(Boolean).join(" | ")}\n`;
+  }
+  if (node.type === "table" || node.type === "doc") {
+    return childText;
+  }
+  return childText;
+}
+
+async function readWorkspaceFileContent(resolved: ResolvedWorkspacePath): Promise<string> {
+  if (isDocxPath(resolved.relativePath)) {
+    const parsed = await parseDocxBase64(await readFileBinary(resolved.absolutePath));
+    return proseMirrorToPlainText(parsed.docJson).trim();
+  }
+  return readFile(resolved.absolutePath);
 }
 
 export async function runLocalTool(
@@ -390,7 +439,7 @@ export async function runLocalTool(
         try {
           console.log("[read_file] relativePath:", resolved.relativePath);
           console.log("[read_file] absolutePath:", resolved.absolutePath);
-          const content = await readFile(resolved.absolutePath);
+          const content = await readWorkspaceFileContent(resolved);
           if (content.length > MAX_FILE_SIZE) {
             return { toolName, result: `Error: File size (${content.length} bytes) exceeds the 50KB limit.` };
           }
@@ -403,7 +452,7 @@ export async function runLocalTool(
             try {
               await readDirectory(parentPath);
               // 再次尝试读取文件
-              const content = await readFile(resolved.absolutePath);
+              const content = await readWorkspaceFileContent(resolved);
               if (content.length > MAX_FILE_SIZE) {
                 return { toolName, result: `Error: File size (${content.length} bytes) exceeds the 50KB limit.` };
               }

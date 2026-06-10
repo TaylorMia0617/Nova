@@ -55,10 +55,16 @@ export type TipTapEditorHandle = {
 
 export type TipTapContentFormat = "markdown" | "html" | "plainText" | "docx";
 
+export type TipTapSelectionInfo = {
+  text: string;
+  from: number;
+  to: number;
+};
+
 export interface TipTapEditorProps {
   content: string;
   onChange?: (content: string) => void;
-  onSelectionChange?: (text: string) => void;
+  onSelectionChange?: (selection: TipTapSelectionInfo | null) => void;
   onFocus?: () => void;
   onBlur?: () => void;
   editable?: boolean;
@@ -382,9 +388,9 @@ export const TipTapEditor = forwardRef<TipTapEditorHandle, TipTapEditorProps>(
           const { from, to } = ed.state.selection;
           if (from !== to) {
             const text = ed.state.doc.textBetween(from, to);
-            onSelectionChange?.(text);
+            onSelectionChange?.({ text, from, to });
           } else {
-            onSelectionChange?.("");
+            onSelectionChange?.(null);
           }
         }, 50);
       },

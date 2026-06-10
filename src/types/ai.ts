@@ -65,12 +65,33 @@ export interface ConversationRecord extends ConversationSummary {
   lastInsertedText?: string | null;
   boundFileCaches?: FileContentCache[];
   chatSkills?: ChatSkills;
+  pendingPlan?: PendingPlanConfirmation | null;
+  pendingClarification?: PendingClarification | null;
+}
+
+export type AgentMode = "quick" | "smart" | "architect";
+
+export interface PendingPlanConfirmation {
+  planMessageId: string;
+  userMessage: ConversationMessage;
+  planContent: string;
+  agentMode: AgentMode;
+  createdAt: string;
+}
+
+export interface PendingClarification {
+  messageId: string;
+  userMessage: ConversationMessage;
+  promptContent: string;
+  agentMode: AgentMode;
+  createdAt: string;
 }
 
 export interface ChatSkills {
   enableWebSearch: boolean;
-  thinkingDepth: "off" | "low" | "medium" | "high";
+  agentMode: AgentMode;
   agentSubMode: "plan" | "build";
+  forcePlanMode: boolean;
 }
 
 export type AiTaskType = "chat" | "polish" | "correct" | "stylize";
