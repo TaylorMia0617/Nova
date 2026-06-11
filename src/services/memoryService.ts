@@ -46,6 +46,8 @@ export interface MemoryApplyResult {
 
 const MEMORY_CANDIDATE_HEADING = /(?:^|\n)#{1,3}\s*Memory Candidate\s*\n/i;
 const NEXT_HEADING = /\n#{1,3}\s+\S/g;
+const smartTruncate = (content: string, maxLength: number) =>
+  content.length <= maxLength ? content : `${content.slice(0, maxLength)}\n\n...[truncated]...`;
 const TOP_LEVEL_KEY = /^([A-Za-z_][A-Za-z0-9_ -]*):\s*(.*)$/;
 const NOVA_EVIDENCE_KEY = "nova.preferenceEvidence.v1";
 const NOVA_CONFIDENCE_THRESHOLD = 0.8;
@@ -163,6 +165,7 @@ export async function loadMemoryContext(options: LoadMemoryOptions = {}): Promis
 }
 
 export function buildMemoryPrompt(context: MemoryContext): string {
+  const compactProjectImportant = smartTruncate(context.projectImportant.trim(), 5200);
   const sections = [
     "## Nova Memory",
     "Read these memories before answering. Nova.md contains only durable, confirmed user preferences; default placeholder text is not preference evidence. Importants.md is project state. Snapshot.md is short-term project/session state.",
@@ -171,11 +174,11 @@ export function buildMemoryPrompt(context: MemoryContext): string {
     globalHabitsForPrompt(context.globalHabits),
   ];
 
-  if (context.projectImportant.trim()) {
+  if (compactProjectImportant) {
     sections.push(
       "",
       "### Project Important (.novel-assistance/habits/Importants.md)",
-      context.projectImportant
+      compactProjectImportant
     );
   }
 

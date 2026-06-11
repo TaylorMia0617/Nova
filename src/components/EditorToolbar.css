@@ -191,17 +191,56 @@
   min-width: 136px;
 }
 
-.panel-actions .font-size-control {
-  gap: 6px;
-  padding: 0 4px;
-  border-radius: 6px;
-  background: rgba(45, 55, 72, 0.28);
+.panel-actions .font-size-combo {
+  width: 94px;
+  min-width: 94px;
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: rgba(45, 55, 72, 0.42);
+  overflow: hidden;
+  transition: background 0.15s, border-color 0.15s;
 }
 
-.panel-actions .font-size-preset-select {
-  width: 76px;
-  min-width: 76px;
-  padding: 0 24px 0 8px;
+.panel-actions .font-size-combo:hover,
+.panel-actions .font-size-combo:focus-within {
+  background: #2d3748;
+  border-color: #4a5568;
+}
+
+.panel-actions .font-size-combo-input {
+  width: 58px;
+  min-width: 58px;
+  border: 0;
+  border-radius: 0;
+  padding: 0 4px 0 10px;
+}
+
+.panel-actions .font-size-combo-input:hover:not(:disabled),
+.panel-actions .font-size-combo-input:focus:not(:disabled) {
+  background: transparent;
+  border-color: transparent;
+}
+
+.panel-actions .font-size-combo-select {
+  width: 34px;
+  min-width: 34px;
+  border: 0;
+  border-left: 1px solid rgba(160, 174, 192, 0.16);
+  border-radius: 0;
+  padding: 0 18px 0 0;
+  background: transparent;
+  color: transparent;
+}
+
+.panel-actions .font-size-combo-select:hover:not(:disabled),
+.panel-actions .font-size-combo-select:focus:not(:disabled) {
+  background: rgba(74, 85, 104, 0.35);
+  border-color: rgba(160, 174, 192, 0.2);
+}
+
+.panel-actions .font-size-combo-select option {
+  color: #e2e8f0;
 }
 
 .panel-actions .line-height-select {

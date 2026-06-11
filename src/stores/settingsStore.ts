@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import type { ModelProfile, SelectionPromptTemplates } from "../types/ai";
+import type { ModelProfile, ModelTransportType, SelectionPromptTemplates } from "../types/ai";
 import { readGlobalApiConfig, writeGlobalApiConfig } from "../services/fileSystemService";
 import type { Locale } from "../i18n";
 import { setLocale } from "../i18n";
@@ -22,6 +22,7 @@ interface SettingsState {
   modelProfiles: ModelProfile[];
   defaultChatModelId: string;
   defaultSelectionModelId: string;
+  defaultEditReviewModelId: string;
   selectionPromptTemplates: SelectionPromptTemplates;
   chatMaxTokens: number;
   contextMaxLength: number;
@@ -38,6 +39,7 @@ interface SettingsState {
   removeModelProfile: (id: string) => void;
   setDefaultChatModelId: (id: string) => void;
   setDefaultSelectionModelId: (id: string) => void;
+  setDefaultEditReviewModelId: (id: string) => void;
   setSelectionPromptTemplate: (key: PromptKey, value: string) => void;
   setChatMaxTokens: (value: number) => void;
   setContextMaxLength: (value: number) => void;
@@ -52,10 +54,54 @@ const DEFAULT_PROFILE: ModelProfile = {
   model: "gpt-4o-mini",
   apiKey: "",
   baseUrl: "https://api.openai.com/v1/responses",
-  transportType: "sse-http",
+  transportType: "openai-responses",
   mcpServerUrl: "",
   headers: [],
   rememberSecrets: true,
+};
+
+const inferTransportType = (profile: Partial<ModelProfile>): ModelTransportType => {
+  const explicit = profile.transportType;
+  if (
+    explicit === "openai-responses" ||
+    explicit === "openai-chat-completions" ||
+    explicit === "anthropic-messages" ||
+    explicit === "openai-compatible"
+  ) {
+    return explicit;
+  }
+
+  const baseUrl = (profile.baseUrl ?? "").trim().toLowerCase();
+  const model = (profile.model ?? "").trim().toLowerCase();
+  if (baseUrl.includes("anthropic.com") || model.startsWith("claude-")) {
+    return "anthropic-messages";
+  }
+  if (/\/responses\/?$/i.test(baseUrl)) {
+    return "openai-responses";
+  }
+  if (/\/chat\/completions\/?$/i.test(baseUrl)) {
+    return "openai-chat-completions";
+  }
+  return "openai-compatible";
+};
+
+const normalizeModelProfile = (profile: Partial<ModelProfile>): ModelProfile => ({
+  ...DEFAULT_PROFILE,
+  ...profile,
+  id: profile.id || `model-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+  label: profile.label || "Untitled Model",
+  model: profile.model ?? "",
+  apiKey: profile.apiKey ?? "",
+  baseUrl: profile.baseUrl || DEFAULT_PROFILE.baseUrl,
+  transportType: inferTransportType(profile),
+  mcpServerUrl: profile.mcpServerUrl ?? "",
+  headers: Array.isArray(profile.headers) ? profile.headers : [],
+  rememberSecrets: profile.rememberSecrets ?? true,
+});
+
+const normalizeModelProfiles = (profiles?: Partial<ModelProfile>[] | null): ModelProfile[] => {
+  const normalized = (profiles ?? []).map(normalizeModelProfile);
+  return normalized.length > 0 ? normalized : [DEFAULT_PROFILE];
 };
 
 const DEFAULT_PROMPTS: SelectionPromptTemplates = {
@@ -103,8 +149,20 @@ const normalizeSelectionPromptTemplates = (
   };
 };
 
+const resolveModelId = (
+  profiles: ModelProfile[],
+  preferredId?: string | null,
+  fallbackId?: string | null
+) => {
+  const safeProfiles = profiles.length > 0 ? profiles : [DEFAULT_PROFILE];
+  const availableIds = new Set(safeProfiles.map((profile) => profile.id));
+  if (preferredId && availableIds.has(preferredId)) return preferredId;
+  if (fallbackId && availableIds.has(fallbackId)) return fallbackId;
+  return safeProfiles[0].id;
+};
+
 const sanitizeProfile = (profile: ModelProfile): ModelProfile => ({
-  ...profile,
+  ...normalizeModelProfile(profile),
   apiKey: profile.rememberSecrets ? profile.apiKey : "",
   headers: profile.rememberSecrets ? profile.headers : [],
 });
@@ -166,15 +224,18 @@ export async function syncFromFile(): Promise<boolean> {
 
     const parsed = JSON.parse(fileContent);
     const currentState = useSettingsStore.getState();
+    const parsedProfiles = normalizeModelProfiles(parsed.modelProfiles);
 
     const hasChanges =
-      JSON.stringify(parsed.modelProfiles) !== JSON.stringify(currentState.modelProfiles) ||
+      JSON.stringify(parsedProfiles) !== JSON.stringify(currentState.modelProfiles) ||
       JSON.stringify(parsed.selectionPromptTemplates) !==
         JSON.stringify(currentState.selectionPromptTemplates) ||
       JSON.stringify(parsed.defaultChatModelId) !==
         JSON.stringify(currentState.defaultChatModelId) ||
       JSON.stringify(parsed.defaultSelectionModelId) !==
         JSON.stringify(currentState.defaultSelectionModelId) ||
+      JSON.stringify(parsed.defaultEditReviewModelId) !==
+        JSON.stringify(currentState.defaultEditReviewModelId) ||
       parsed.chatMaxTokens !== currentState.chatMaxTokens ||
       parsed.contextMaxLength !== currentState.contextMaxLength ||
       parsed.tavilyApiKey !== currentState.tavilyApiKey ||
@@ -189,6 +250,18 @@ export async function syncFromFile(): Promise<boolean> {
     if (hasChanges) {
       useSettingsStore.setState({
         ...parsed,
+        modelProfiles: parsedProfiles,
+        defaultChatModelId: resolveModelId(parsedProfiles, parsed.defaultChatModelId),
+        defaultSelectionModelId: resolveModelId(
+          parsedProfiles,
+          parsed.defaultSelectionModelId,
+          parsed.defaultChatModelId ?? currentState.defaultChatModelId
+        ),
+        defaultEditReviewModelId: resolveModelId(
+          parsedProfiles,
+          parsed.defaultEditReviewModelId,
+          parsed.defaultSelectionModelId ?? currentState.defaultSelectionModelId
+        ),
         selectionPromptTemplates: normalizeSelectionPromptTemplates(parsed.selectionPromptTemplates),
         headingColors: {
           ...DEFAULT_HEADING_COLORS,
@@ -222,6 +295,7 @@ export async function exportToFile(): Promise<boolean> {
       modelProfiles: state.modelProfiles.map(sanitizeProfile),
       defaultChatModelId: state.defaultChatModelId,
       defaultSelectionModelId: state.defaultSelectionModelId,
+      defaultEditReviewModelId: state.defaultEditReviewModelId,
       selectionPromptTemplates: state.selectionPromptTemplates,
       chatMaxTokens: state.chatMaxTokens,
       contextMaxLength: state.contextMaxLength,
@@ -251,6 +325,7 @@ export const useSettingsStore = create<SettingsState>()(
       modelProfiles: [DEFAULT_PROFILE],
       defaultChatModelId: DEFAULT_PROFILE.id,
       defaultSelectionModelId: DEFAULT_PROFILE.id,
+      defaultEditReviewModelId: DEFAULT_PROFILE.id,
       selectionPromptTemplates: DEFAULT_PROMPTS,
       chatMaxTokens: 8192,
       contextMaxLength: 5000,
@@ -273,26 +348,24 @@ export const useSettingsStore = create<SettingsState>()(
         })),
       setModelProfiles: (profiles) =>
         set((state) => {
-          const nextProfiles = profiles.length > 0 ? profiles : [DEFAULT_PROFILE];
-          const availableIds = new Set(nextProfiles.map((profile) => profile.id));
+          const nextProfiles = normalizeModelProfiles(profiles);
+          const nextChatModelId = resolveModelId(nextProfiles, state.defaultChatModelId);
+          const nextSelectionModelId = resolveModelId(nextProfiles, state.defaultSelectionModelId, nextChatModelId);
           return {
             modelProfiles: nextProfiles,
-            defaultChatModelId: availableIds.has(state.defaultChatModelId)
-              ? state.defaultChatModelId
-              : nextProfiles[0].id,
-            defaultSelectionModelId: availableIds.has(state.defaultSelectionModelId)
-              ? state.defaultSelectionModelId
-              : nextProfiles[0].id,
+            defaultChatModelId: nextChatModelId,
+            defaultSelectionModelId: nextSelectionModelId,
+            defaultEditReviewModelId: resolveModelId(nextProfiles, state.defaultEditReviewModelId, nextSelectionModelId),
           };
         }),
       updateModelProfile: (id, patch) =>
         set((state) => ({
           modelProfiles: state.modelProfiles.map((profile) =>
             profile.id === id
-              ? {
+              ? normalizeModelProfile({
                   ...profile,
                   ...patch,
-                }
+                })
               : profile
           ),
         })),
@@ -303,16 +376,18 @@ export const useSettingsStore = create<SettingsState>()(
 
           return {
             modelProfiles: safeProfiles,
-            defaultChatModelId:
-              state.defaultChatModelId === id ? safeProfiles[0].id : state.defaultChatModelId,
-            defaultSelectionModelId:
-              state.defaultSelectionModelId === id
-                ? safeProfiles[0].id
-                : state.defaultSelectionModelId,
+            defaultChatModelId: resolveModelId(safeProfiles, state.defaultChatModelId === id ? null : state.defaultChatModelId),
+            defaultSelectionModelId: resolveModelId(safeProfiles, state.defaultSelectionModelId === id ? null : state.defaultSelectionModelId),
+            defaultEditReviewModelId: resolveModelId(
+              safeProfiles,
+              state.defaultEditReviewModelId === id ? null : state.defaultEditReviewModelId,
+              state.defaultSelectionModelId === id ? null : state.defaultSelectionModelId
+            ),
           };
         }),
       setDefaultChatModelId: (id) => set({ defaultChatModelId: id }),
       setDefaultSelectionModelId: (id) => set({ defaultSelectionModelId: id }),
+      setDefaultEditReviewModelId: (id) => set({ defaultEditReviewModelId: id }),
       setSelectionPromptTemplate: (key, value) =>
         set((state) => ({
           selectionPromptTemplates: {
@@ -337,6 +412,7 @@ export const useSettingsStore = create<SettingsState>()(
         modelProfiles: state.modelProfiles.map(sanitizeProfile),
         defaultChatModelId: state.defaultChatModelId,
         defaultSelectionModelId: state.defaultSelectionModelId,
+        defaultEditReviewModelId: state.defaultEditReviewModelId,
         selectionPromptTemplates: state.selectionPromptTemplates,
         chatMaxTokens: state.chatMaxTokens,
         contextMaxLength: state.contextMaxLength,
@@ -349,9 +425,22 @@ export const useSettingsStore = create<SettingsState>()(
       }),
       merge: (persistedState, currentState) => {
         const persisted = persistedState as Partial<SettingsState> | null;
+        const persistedProfiles = normalizeModelProfiles(persisted?.modelProfiles);
         return {
           ...currentState,
           ...(persisted ?? {}),
+          modelProfiles: persistedProfiles,
+          defaultChatModelId: resolveModelId(persistedProfiles, persisted?.defaultChatModelId),
+          defaultSelectionModelId: resolveModelId(
+            persistedProfiles,
+            persisted?.defaultSelectionModelId,
+            persisted?.defaultChatModelId ?? currentState.defaultChatModelId
+          ),
+          defaultEditReviewModelId: resolveModelId(
+            persistedProfiles,
+            persisted?.defaultEditReviewModelId,
+            persisted?.defaultSelectionModelId ?? currentState.defaultSelectionModelId
+          ),
           selectionPromptTemplates: normalizeSelectionPromptTemplates(persisted?.selectionPromptTemplates),
           headingColors: {
             ...DEFAULT_HEADING_COLORS,

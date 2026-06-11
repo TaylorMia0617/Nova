@@ -103,6 +103,36 @@ type SelectionPreviewState = {
   result: string;
 };
 
+const getFontSizeFromMarks = (marks: readonly any[] | null | undefined): string => {
+  const textStyle = marks?.find((mark) => mark.type?.name === "textStyle" && mark.attrs?.fontSize);
+  return String(textStyle?.attrs?.fontSize ?? "");
+};
+
+const resolveActiveFontSize = (editor: Editor): string => {
+  const { state } = editor;
+  const { from, to, empty, $from } = state.selection;
+
+  if (!empty) {
+    const sizes = new Set<string>();
+    state.doc.nodesBetween(from, to, (node) => {
+      if (!node.isText) return;
+      sizes.add(getFontSizeFromMarks(node.marks));
+    });
+    return sizes.size === 1 ? [...sizes][0] : "";
+  }
+
+  const storedFontSize = getFontSizeFromMarks(state.storedMarks);
+  if (storedFontSize) return storedFontSize;
+
+  const currentFontSize = getFontSizeFromMarks($from.marks());
+  if (currentFontSize) return currentFontSize;
+
+  const beforeFontSize = getFontSizeFromMarks($from.nodeBefore?.marks);
+  if (beforeFontSize) return beforeFontSize;
+
+  return getFontSizeFromMarks($from.nodeAfter?.marks);
+};
+
 const getPathSeparator = (path: string) => (path.includes("\\") ? "\\" : "/");
 
 const getParentPath = (path: string): string => {
@@ -158,8 +188,9 @@ const EditorPanel: React.FC = () => {
     setActiveGroup,
     moveTabToGroup,
     moveTabToNewGroup,
+    closeBlueprintTabs,
   } = useFileStore();
-  const { blueprints, loadBlueprints, resetBlueprints, focusNode: focusBlueprintNode } = useBlueprintStore();
+  const { blueprints, hasLoadedBlueprints, loadBlueprints, resetBlueprints, focusNode: focusBlueprintNode } = useBlueprintStore();
   const { defaultSelectionModelId, selectionPromptTemplates, getModelProfileById } = useSettingsStore();
   const tiptapRef = useRef<TipTapEditorHandle>(null);
   const workspaceRefreshTimeoutRef = useRef<number | null>(null);
@@ -183,6 +214,17 @@ const EditorPanel: React.FC = () => {
     if (rootPath) void loadBlueprints();
   }, [rootPath, loadBlueprints, resetBlueprints]);
 
+  useEffect(() => {
+    if (!hasLoadedBlueprints) return;
+    const existingBlueprintIds = new Set(blueprints.map((blueprint) => blueprint.id));
+    const staleBlueprintIds = new Set(
+      getOpenTabs()
+        .filter((tab) => tab.fileMode === "blueprint" && tab.blueprintId && !existingBlueprintIds.has(tab.blueprintId))
+        .map((tab) => tab.blueprintId!)
+    );
+    staleBlueprintIds.forEach((blueprintId) => closeBlueprintTabs(blueprintId));
+  }, [blueprints, closeBlueprintTabs, getOpenTabs, hasLoadedBlueprints]);
+
   const {
     isFindReplaceOpen, isOutlineOpen, isPageViewMode, isFocusMode,
     isExportDialogOpen, exportFormat, exportTemplateId, exportError,
@@ -199,6 +241,7 @@ const EditorPanel: React.FC = () => {
     Boolean(path && selectionEditLocked && selectionLockedPath === path)
   ), [selectionEditLocked, selectionLockedPath]);
   const releaseSelectionLock = useCallback(() => {
+    tiptapRef.current?.clearCachedSelection();
     setSelectionPreview(null);
     setSelectionPopup(null);
     setSelectionError("");
@@ -228,6 +271,7 @@ const EditorPanel: React.FC = () => {
     const selectionLength = from === to ? 0 : calculateTextStats(editor.state.doc.textBetween(from, to)).characters;
     const alignCenter = editor.isActive({ textAlign: "center" });
     const alignRight = editor.isActive({ textAlign: "right" });
+    const fontSize = resolveActiveFontSize(editor);
 
     statusStore.setCursorPosition({
       line: lines.length,
@@ -254,6 +298,7 @@ const EditorPanel: React.FC = () => {
       alignLeft: editor.isActive({ textAlign: "left" }) || (!alignCenter && !alignRight),
       alignCenter,
       alignRight,
+      fontSize,
     });
   }, [isReferenceFile]);
 
@@ -303,6 +348,7 @@ const EditorPanel: React.FC = () => {
     const selectedText = (selectionPopup?.text || handle.getSelectionText()).trim();
     if (!selectedText) return;
 
+    handle.clearCachedSelection();
     setSelectionLockedPath(activeFile?.path ?? null);
     setSelectionLoading(true);
     setSelectionError("");
@@ -433,7 +479,10 @@ const EditorPanel: React.FC = () => {
   useEffect(() => {
     const handleResize = () => refreshSelectionPopupPosition();
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSelectionPopup(null);
+      if (event.key === "Escape") {
+        tiptapRef.current?.clearCachedSelection();
+        setSelectionPopup(null);
+      }
     };
     window.addEventListener("resize", handleResize);
     window.addEventListener("keydown", handleKeyDown);
@@ -889,7 +938,8 @@ const EditorPanel: React.FC = () => {
     } else {
       editor.chain().focus().unsetFontSize().run();
     }
-  }, []);
+    syncEditorStatus(editor);
+  }, [syncEditorStatus]);
 
   const handleToolbarApplyLineHeight = useCallback((height: string) => {
     tiptapRef.current?.getEditor()?.chain().focus().setLineHeight(height).run();

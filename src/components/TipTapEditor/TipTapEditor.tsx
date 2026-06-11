@@ -8,6 +8,11 @@ import {
   useState,
 } from "react";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
+import { Extension } from "@tiptap/core";
+import { DOMSerializer } from "@tiptap/pm/model";
+import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { Decoration, DecorationSet } from "@tiptap/pm/view";
+import type { EditorView } from "@tiptap/pm/view";
 import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "tiptap-markdown";
 import { Underline } from "@tiptap/extension-underline";
@@ -51,6 +56,7 @@ export type TipTapEditorHandle = {
   replaceSelection: (text: string) => void;
   focus: () => void;
   scrollToSelection: () => void;
+  clearCachedSelection: () => void;
 };
 
 export type TipTapContentFormat = "markdown" | "html" | "plainText" | "docx";
@@ -103,6 +109,80 @@ const escapeHtml = (value: string) =>
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+
+const sanitizeClipboardHtml = (html: string) => {
+  const documentRef = window.document;
+  const container = documentRef.createElement("div");
+  container.innerHTML = html;
+
+  container.querySelectorAll<HTMLElement>("*").forEach((element) => {
+    element.style.removeProperty("font-family");
+    element.style.removeProperty("font-size");
+    element.removeAttribute("class");
+    if (!element.getAttribute("style")?.trim()) {
+      element.removeAttribute("style");
+    }
+  });
+
+  container.querySelectorAll("span").forEach((span) => {
+    if (span.attributes.length > 0) return;
+    span.replaceWith(...Array.from(span.childNodes));
+  });
+
+  return container.innerHTML;
+};
+
+const getEditorSelectionClipboardContent = (view: EditorView) => {
+  const { state } = view;
+  const { from, to } = state.selection;
+  const text = from === to ? "" : state.doc.textBetween(from, to, "\n\n", "\n");
+  const fragment = state.selection.content().content;
+  const container = view.dom.ownerDocument.createElement("div");
+  container.appendChild(DOMSerializer.fromSchema(state.schema).serializeFragment(fragment));
+  return {
+    text,
+    html: sanitizeClipboardHtml(container.innerHTML),
+  };
+};
+
+type CachedSelectionRange = { from: number; to: number } | null;
+
+const cachedSelectionKey = new PluginKey<CachedSelectionRange>("cached-selection-highlight");
+
+const CachedSelectionHighlight = Extension.create({
+  name: "cachedSelectionHighlight",
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin<CachedSelectionRange>({
+        key: cachedSelectionKey,
+        state: {
+          init: () => null,
+          apply(transaction, previous) {
+            const meta = transaction.getMeta(cachedSelectionKey) as CachedSelectionRange | undefined;
+            if (meta !== undefined) return meta;
+            if (transaction.docChanged) return null;
+            return previous;
+          },
+        },
+        props: {
+          decorations(state) {
+            const range = cachedSelectionKey.getState(state);
+            if (!range || range.from === range.to) return DecorationSet.empty;
+            return DecorationSet.create(state.doc, [
+              Decoration.inline(range.from, range.to, { class: "cached-selection-highlight" }),
+            ]);
+          },
+        },
+      }),
+    ];
+  },
+});
+
+const setCachedSelectionHighlight = (editor: Editor | null | undefined, range: CachedSelectionRange) => {
+  if (!editor) return;
+  editor.view.dispatch(editor.state.tr.setMeta(cachedSelectionKey, range));
+};
 
 export const plainTextToEditorHtml = (value: string) => {
   const normalized = value.replace(/\r\n?/g, "\n");
@@ -341,6 +421,7 @@ export const TipTapEditor = forwardRef<TipTapEditorHandle, TipTapEditorProps>(
         FontSize,
         LineHeight,
         Indent,
+        CachedSelectionHighlight,
         Image.configure({
           inline: false,
           allowBase64: true,
@@ -374,6 +455,16 @@ export const TipTapEditor = forwardRef<TipTapEditorHandle, TipTapEditorProps>(
         attributes: {
           class: "tiptap-editor-prose",
         },
+        handleDOMEvents: {
+          copy: (view, event) => {
+            if (!event.clipboardData || view.state.selection.empty) return false;
+            const { text, html } = getEditorSelectionClipboardContent(view);
+            event.clipboardData.setData("text/plain", text);
+            event.clipboardData.setData("text/html", html);
+            event.preventDefault();
+            return true;
+          },
+        },
       },
       onUpdate: ({ editor: ed }) => {
         const serialized = serializeEditorContent(ed, contentFormatRef.current);
@@ -388,6 +479,7 @@ export const TipTapEditor = forwardRef<TipTapEditorHandle, TipTapEditorProps>(
           const { from, to } = ed.state.selection;
           if (from !== to) {
             const text = ed.state.doc.textBetween(from, to);
+            setCachedSelectionHighlight(ed, { from, to });
             onSelectionChange?.({ text, from, to });
           } else {
             onSelectionChange?.(null);
@@ -503,6 +595,17 @@ export const TipTapEditor = forwardRef<TipTapEditorHandle, TipTapEditorProps>(
     useEffect(() => {
       if (editor) editor.setEditable(editable && !locked);
     }, [editable, locked, editor]);
+
+    useEffect(() => {
+      if (!editor) return;
+      const handleKeyDown = (event: KeyboardEvent) => {
+        if (event.key === "Escape") {
+          setCachedSelectionHighlight(editor, null);
+        }
+      };
+      window.addEventListener("keydown", handleKeyDown);
+      return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [editor]);
 
     const stopLockedEvent = useCallback((event: React.SyntheticEvent) => {
       if (!locked) return;
@@ -684,6 +787,7 @@ export const TipTapEditor = forwardRef<TipTapEditorHandle, TipTapEditorProps>(
           wrapper.scrollTop += coords.top - rect.top - rect.height / 2;
         }
       },
+      clearCachedSelection: () => setCachedSelectionHighlight(editor, null),
     }));
 
     return (
@@ -721,7 +825,11 @@ export const TipTapEditor = forwardRef<TipTapEditorHandle, TipTapEditorProps>(
                 }}
               >
                 <span className="reference-suggestion-name">{entry.name}</span>
-                {entry.description && <span className="reference-suggestion-description">{entry.description}</span>}
+                {(entry.description || entry.body) && (
+                  <span className="reference-suggestion-description">
+                    {[entry.description, entry.body ? "含结构数据" : ""].filter(Boolean).join(" · ")}
+                  </span>
+                )}
               </button>
             ))}
           </div>

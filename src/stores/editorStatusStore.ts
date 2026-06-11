@@ -13,6 +13,7 @@ export type ActiveFormatState = {
   alignLeft: boolean;
   alignCenter: boolean;
   alignRight: boolean;
+  fontSize: string;
 };
 
 export const DEFAULT_ACTIVE_FORMATS: ActiveFormatState = {
@@ -26,6 +27,7 @@ export const DEFAULT_ACTIVE_FORMATS: ActiveFormatState = {
   alignLeft: false,
   alignCenter: false,
   alignRight: false,
+  fontSize: "",
 };
 
 interface EditorStatusState {

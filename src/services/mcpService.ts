@@ -3,7 +3,7 @@ import type { McpTool, McpToolResult } from "../types/ai";
 import { readFile, readDirectory, readFileBinary, writeFile, writeFileBinary, createFile, listBlueprints, saveBlueprint } from "./fileSystemService";
 import type { WorkspaceNode } from "./fileSystemService";
 import type { BlueprintDocument, BlueprintEdge, BlueprintNode } from "../types/blueprint";
-import { createDocxBase64FromPlainText, parseDocxBase64, type ProseMirrorNode } from "./docxOoxmlService";
+import { createDocxBase64FromPlainText, parseDocxBase64, serializeDocxBase64, type ProseMirrorNode } from "./docxOoxmlService";
 import { searchWithTavily } from "./searchService";
 import { autoLayoutBlueprint } from "../utils/blueprintAutoLayout";
 
@@ -23,6 +23,40 @@ const MAX_FILE_SIZE = 50 * 1024; // 50KB
 const isDocxPath = (path: string) => path.trim().toLowerCase().endsWith(".docx");
 const newBlueprintId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
+function decodeCommonHtmlEntities(value: string): string {
+  return value
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&amp;/gi, "&");
+}
+
+function sanitizeContentForDocxCreate(value: string): string {
+  if (!/<\/?[a-z][\s\S]*>/i.test(value)) {
+    return value;
+  }
+
+  return decodeCommonHtmlEntities(value)
+    .replace(/<span\b[^>]*>/gi, "")
+    .replace(/<\/span>/gi, "")
+    .replace(/\sstyle=(["'])[\s\S]*?\1/gi, "")
+    .replace(/\sclass=(["'])[\s\S]*?\1/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p\s*>/gi, "\n\n")
+    .replace(/<p\b[^>]*>/gi, "")
+    .replace(/<\/h([1-6])\s*>/gi, "\n\n")
+    .replace(/<h([1-6])\b[^>]*>/gi, (_match, level: string) => `${"#".repeat(Number(level))} `)
+    .replace(/<\/?strong\b[^>]*>/gi, "")
+    .replace(/<\/?b\b[^>]*>/gi, "")
+    .replace(/<\/?em\b[^>]*>/gi, "")
+    .replace(/<\/?i\b[^>]*>/gi, "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 type ResolvedWorkspacePath = {
   relativePath: string;
   absolutePath: string;
@@ -31,13 +65,14 @@ type ResolvedWorkspacePath = {
 
 type WriteToolSuccess = {
   ok: true;
-  action: "create_file" | "edit_file";
+  action: "create_file" | "edit_file" | "edit_docx";
   relativePath: string;
   absolutePath: string;
   fileType: "text" | "docx";
   existed?: boolean;
   bytes?: number;
   edits?: number;
+  insertions?: number;
 };
 
 function formatPathError(path: string): string {
@@ -204,6 +239,42 @@ const LOCAL_FILESYSTEM_TOOLS: McpTool[] = [
     }
   },
   {
+    name: "edit_docx",
+    description: "Safely edit an existing DOCX by inserting plain-text paragraphs before or after matched text. Use this for local changes in existing .docx files; do not use create_file to overwrite an existing DOCX.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Existing .docx file path relative to the workspace root."
+        },
+        operations: {
+          type: "array",
+          description: "DOCX paragraph insertion operations, applied in order.",
+          items: {
+            type: "object",
+            properties: {
+              type: {
+                type: "string",
+                description: "append_after_text inserts after the matching paragraph; insert_before_text inserts before it."
+              },
+              matchText: {
+                type: "string",
+                description: "Plain text to find in a paragraph. The first matching paragraph is used."
+              },
+              insertText: {
+                type: "string",
+                description: "Plain text to insert. Blank lines create separate paragraphs."
+              }
+            },
+            required: ["type", "matchText", "insertText"]
+          }
+        }
+      },
+      required: ["path", "operations"]
+    }
+  },
+  {
     name: "create_file",
     description: "创建新文件并写入内容",
     inputSchema: {
@@ -351,6 +422,147 @@ function proseMirrorToPlainText(node: ProseMirrorNode | null | undefined): strin
   return childText;
 }
 
+function nodeInlineText(node: ProseMirrorNode | null | undefined): string {
+  if (!node) return "";
+  if (node.type === "text") return node.text ?? "";
+  if (node.type === "hardBreak") return "\n";
+  return (node.content ?? []).map(nodeInlineText).join("");
+}
+
+function normalizeMatchText(value: string): string {
+  return String(value ?? "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/^[ \t]*#{1,6}[ \t]+/gm, "")
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/[–—]/g, "—")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function docxMatchParts(value: string): string[] {
+  const rawLines = String(value ?? "")
+    .replace(/\r\n?/g, "\n")
+    .split(/\n+/)
+    .map(normalizeMatchText)
+    .filter(Boolean);
+  if (rawLines.length > 1) return rawLines;
+
+  const normalized = normalizeMatchText(value);
+  if (!normalized) return [];
+  const titleWithSeparator = normalized.match(/^(.{4,}?)\s+([—-])$/);
+  if (titleWithSeparator) {
+    return [normalizeMatchText(titleWithSeparator[1]), "—"];
+  }
+  return [normalized];
+}
+
+function isDocxTextBlock(node: ProseMirrorNode | null | undefined) {
+  return Boolean(node && ["paragraph", "heading"].includes(node.type));
+}
+
+function findDocxMatchRange(content: ProseMirrorNode[], matchText: string): { startIndex: number; endIndex: number } | null {
+  const parts = docxMatchParts(matchText);
+  if (parts.length === 0) return null;
+
+  const entries = content
+    .map((node, index) => ({ index, text: isDocxTextBlock(node) ? normalizeMatchText(nodeInlineText(node)) : "" }))
+    .filter((entry) => entry.text);
+
+  for (let start = 0; start < entries.length; start += 1) {
+    if (!entries[start].text.includes(parts[0])) continue;
+
+    let cursor = start;
+    let ok = true;
+    for (let partIndex = 1; partIndex < parts.length; partIndex += 1) {
+      const next = entries.findIndex((entry, entryIndex) => entryIndex > cursor && entry.text.includes(parts[partIndex]));
+      if (next < 0) {
+        ok = false;
+        break;
+      }
+      cursor = next;
+    }
+
+    if (ok) {
+      return {
+        startIndex: entries[start].index,
+        endIndex: entries[cursor].index,
+      };
+    }
+  }
+
+  return null;
+}
+
+function plainTextToDocxParagraphs(value: string): ProseMirrorNode[] {
+  const normalized = String(value ?? "").replace(/\r\n?/g, "\n").trim();
+  if (!normalized) return [];
+  return normalized
+    .split(/\n{2,}|\n/g)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => ({
+      type: "paragraph",
+      content: [{ type: "text", text: line }],
+    }));
+}
+
+type DocxEditOperation = {
+  type?: unknown;
+  matchText?: unknown;
+  insertText?: unknown;
+};
+
+async function editDocxByTextInsertions(resolved: ResolvedWorkspacePath, rawOperations: unknown): Promise<{ base64: string; insertions: number }> {
+  if (!isDocxPath(resolved.relativePath)) {
+    throw new Error("edit_docx only supports existing .docx files.");
+  }
+  if (!Array.isArray(rawOperations) || rawOperations.length === 0) {
+    throw new Error("operations array is required and must not be empty.");
+  }
+
+  const parsed = await parseDocxBase64(await readFileBinary(resolved.absolutePath));
+  const docJson: ProseMirrorNode = {
+    ...parsed.docJson,
+    content: [...(parsed.docJson.content ?? [])],
+  };
+  let insertions = 0;
+
+  for (const operation of rawOperations as DocxEditOperation[]) {
+    const type = String(operation?.type ?? "").trim();
+    const matchText = String(operation?.matchText ?? "");
+    const normalizedMatchText = normalizeMatchText(matchText);
+    const insertParagraphs = plainTextToDocxParagraphs(String(operation?.insertText ?? ""));
+    if (!["append_after_text", "insert_before_text"].includes(type)) {
+      throw new Error(`Unsupported edit_docx operation type: ${type || "(empty)"}`);
+    }
+    if (!normalizedMatchText) {
+      throw new Error("matchText is required for edit_docx operations.");
+    }
+    if (insertParagraphs.length === 0) {
+      throw new Error("insertText must contain at least one non-empty paragraph.");
+    }
+
+    const range = findDocxMatchRange(docJson.content ?? [], matchText);
+    if (!range) {
+      throw new Error(`Match text not found in ${resolved.relativePath}: ${normalizedMatchText.slice(0, 120)}`);
+    }
+
+    const insertionIndex = type === "append_after_text" ? range.endIndex + 1 : range.startIndex;
+    docJson.content = [
+      ...(docJson.content ?? []).slice(0, insertionIndex),
+      ...insertParagraphs,
+      ...(docJson.content ?? []).slice(insertionIndex),
+    ];
+    insertions += insertParagraphs.length;
+  }
+
+  return {
+    base64: await serializeDocxBase64(docJson, parsed.packageState),
+    insertions,
+  };
+}
+
 async function readWorkspaceFileContent(resolved: ResolvedWorkspacePath): Promise<string> {
   if (isDocxPath(resolved.relativePath)) {
     const parsed = await parseDocxBase64(await readFileBinary(resolved.absolutePath));
@@ -367,7 +579,7 @@ export async function runLocalTool(
   options?: { enableWebSearch?: boolean; searchCount?: number; searchLimit?: number; agentSubMode?: "plan" | "build" }
 ): Promise<McpToolResult> {
   try {
-    if ((toolName === "edit_file" || toolName === "create_file") && options?.agentSubMode === "plan") {
+    if ((toolName === "edit_file" || toolName === "edit_docx" || toolName === "create_file") && options?.agentSubMode === "plan") {
       return { toolName, result: `Error: ${toolName} is not available in Plan mode. Switch to Build mode to make edits.` };
     }
 
@@ -624,6 +836,33 @@ export async function runLocalTool(
           return { toolName, result: `Error editing file: ${error instanceof Error ? error.message : String(error)}` };
         }
       }
+      case "edit_docx": {
+        let resolved: ResolvedWorkspacePath;
+        try {
+          resolved = resolveWorkspacePath(workspaceRoot, args.path as string);
+        } catch (error) {
+          return { toolName, result: `Error: ${error instanceof Error ? error.message : String(error)}` };
+        }
+
+        try {
+          const { base64, insertions } = await editDocxByTextInsertions(resolved, args.operations);
+          await writeFileBinary(resolved.absolutePath, base64);
+          return {
+            toolName,
+            result: makeWriteSuccess({
+              ok: true,
+              action: "edit_docx",
+              relativePath: resolved.relativePath,
+              absolutePath: resolved.absolutePath,
+              fileType: "docx",
+              insertions,
+              bytes: base64.length,
+            }),
+          };
+        } catch (error) {
+          return { toolName, result: `Error editing DOCX: ${error instanceof Error ? error.message : String(error)}` };
+        }
+      }
       case "create_file": {
         let resolved: ResolvedWorkspacePath;
         try {
@@ -644,6 +883,7 @@ export async function runLocalTool(
         console.log("[create_file] content length:", content.length);
         console.log("[create_file] content preview:", content.substring(0, 100));
         const isDocx = isDocxPath(resolved.relativePath);
+        const contentForWrite = isDocx ? sanitizeContentForDocxCreate(content) : content;
 
         const tryReadFile = async (path: string): Promise<string> => {
           try {
@@ -683,13 +923,19 @@ export async function runLocalTool(
             if (errorMsg.includes("already exists")) {
               existed = true;
               console.log("[create_file] File already exists, skipping creation");
+              if (isDocx) {
+                return {
+                  toolName,
+                  result: `Error: ${resolved.relativePath} already exists. Do not overwrite an existing DOCX with create_file; use edit_docx for local DOCX changes.`,
+                };
+              }
             } else {
               throw createError;
             }
           }
 
           if (isDocx) {
-            const docxBase64 = await createDocxBase64FromPlainText(content);
+            const docxBase64 = await createDocxBase64FromPlainText(contentForWrite);
             await writeFileBinary(resolved.absolutePath, docxBase64);
             console.log("[create_file] writeFileBinary DOCX succeeded");
             return {

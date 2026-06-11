@@ -110,7 +110,7 @@ const FONT_FAMILIES = [
 ];
 
 const FONT_SIZES = [
-  { labelKey: "editor.fontSizes.default", label: "", value: "" },
+  { label: "", value: "" },
   { label: "12", value: "12px" },
   { label: "14", value: "14px" },
   { label: "16", value: "16px" },
@@ -175,6 +175,10 @@ export const EditorToolbar = memo(function EditorToolbar({
   const [isTableMenuOpen, setIsTableMenuOpen] = useState(false);
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const [fontSizeInput, setFontSizeInput] = useState("");
+
+  useEffect(() => {
+    setFontSizeInput(activeFormats.fontSize.replace(/px$/i, ""));
+  }, [activeFormats.fontSize]);
 
   const closeAllDropdowns = useCallback(() => {
     setIsColorPickerOpen(false);
@@ -342,9 +346,9 @@ export const EditorToolbar = memo(function EditorToolbar({
                 ))}
               </select>
             </div>
-            <div className="toolbar-control-wrap font-size-control">
+            <div className="toolbar-control-wrap font-size-combo">
               <input
-                className="toolbar-number-input"
+                className="toolbar-number-input font-size-combo-input"
                 type="number"
                 min={1}
                 max={200}
@@ -357,9 +361,8 @@ export const EditorToolbar = memo(function EditorToolbar({
                 title={t("editor.toolbar.fontSize")}
                 disabled={disabled}
               />
-              <span className="toolbar-unit">px</span>
               <select
-                className="toolbar-select font-size-preset-select"
+                className="toolbar-select font-size-combo-select"
                 defaultValue=""
                 onChange={(event) => {
                   handleFontSizePreset(event.target.value);
@@ -370,7 +373,7 @@ export const EditorToolbar = memo(function EditorToolbar({
               >
                 {FONT_SIZES.map((s) => (
                   <option key={s.value || "default"} value={s.value}>
-                    {s.labelKey ? t(s.labelKey) : s.label}
+                    {s.label}
                   </option>
                 ))}
               </select>

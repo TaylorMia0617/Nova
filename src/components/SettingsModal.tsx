@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 import type { CSSProperties, ChangeEvent } from "react";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useTranslation } from "../hooks/useTranslation";
-import type { ModelProfile } from "../types/ai";
+import type { ModelProfile, ModelTransportType } from "../types/ai";
 import { testMcpConnection } from "../services/mcpService";
 import "./SettingsModal.css";
 
@@ -15,17 +15,39 @@ type Props = {
 
 type SettingsTab = "models" | "search" | "basic";
 
+const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
+const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
+
 const createDraftProfile = (): ModelProfile => ({
   id: `model-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
   label: "New Model",
   model: "",
   apiKey: "",
-  baseUrl: "https://api.openai.com/v1/responses",
-  transportType: "sse-http",
+  baseUrl: OPENAI_RESPONSES_URL,
+  transportType: "openai-responses",
   mcpServerUrl: "",
   headers: [],
   rememberSecrets: true,
 });
+
+const TRANSPORT_OPTIONS: Array<{ value: ModelTransportType; labelKey: string }> = [
+  { value: "openai-responses", labelKey: "settings.transportOpenAIResponses" },
+  { value: "openai-chat-completions", labelKey: "settings.transportOpenAIChat" },
+  { value: "anthropic-messages", labelKey: "settings.transportAnthropicMessages" },
+  { value: "openai-compatible", labelKey: "settings.transportOpenAICompatible" },
+];
+
+const inferDraftTransport = (draft: ModelProfile, patch: Partial<ModelProfile>): ModelTransportType | null => {
+  if (patch.transportType) return patch.transportType;
+  const baseUrl = (patch.baseUrl ?? draft.baseUrl).trim().toLowerCase();
+  const model = (patch.model ?? draft.model).trim().toLowerCase();
+  if (baseUrl.includes("anthropic.com") || model.startsWith("claude-")) {
+    return "anthropic-messages";
+  }
+  if (/\/responses\/?$/i.test(baseUrl)) return "openai-responses";
+  if (/\/chat\/completions\/?$/i.test(baseUrl)) return "openai-chat-completions";
+  return null;
+};
 
 const AUTO_SAVE_DELAY = 5000;
 const MAX_BACKGROUND_IMAGE_SIZE = 5 * 1024 * 1024;
@@ -39,6 +61,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     modelProfiles,
     defaultChatModelId,
     defaultSelectionModelId,
+    defaultEditReviewModelId,
     selectionPromptTemplates,
     contextMaxLength,
     tavilyApiKey,
@@ -53,6 +76,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     removeModelProfile,
     setDefaultChatModelId,
     setDefaultSelectionModelId,
+    setDefaultEditReviewModelId,
     setSelectionPromptTemplate,
     setContextMaxLength,
     setTavilyApiKey,
@@ -162,7 +186,18 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const updateDraft = (patch: Partial<ModelProfile>) => {
     setProfileDraft((current) => {
       if (!current) return current;
-      const next = { ...current, ...patch };
+      const inferredTransport = inferDraftTransport(current, patch);
+      const nextTransport = inferredTransport ?? current.transportType;
+      const shouldUseAnthropicDefault =
+        nextTransport === "anthropic-messages" &&
+        patch.baseUrl === undefined &&
+        (current.baseUrl === OPENAI_RESPONSES_URL || current.baseUrl.trim() === "");
+      const next = {
+        ...current,
+        ...patch,
+        ...(inferredTransport ? { transportType: inferredTransport } : {}),
+        ...(shouldUseAnthropicDefault ? { baseUrl: ANTHROPIC_MESSAGES_URL } : {}),
+      };
       scheduleAutoSave(next);
       return next;
     });
@@ -295,6 +330,19 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
               />
             </label>
             <label>
+              <span>{t("settings.transportType")}</span>
+              <select
+                value={profileDraft.transportType === "sse-http" ? "openai-compatible" : profileDraft.transportType}
+                onChange={(event) => updateDraft({ transportType: event.target.value as ModelTransportType })}
+              >
+                {TRANSPORT_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {t(option.labelKey)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
               <span>{t("settings.mcpServerUrl")}</span>
               <input
                 type="text"
@@ -339,6 +387,19 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
               <select
                 value={defaultSelectionModelId}
                 onChange={(event) => setDefaultSelectionModelId(event.target.value)}
+              >
+                {modelProfiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>
+                    {profile.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>{t("settings.defaultEditReviewModel")}</span>
+              <select
+                value={defaultEditReviewModelId}
+                onChange={(event) => setDefaultEditReviewModelId(event.target.value)}
               >
                 {modelProfiles.map((profile) => (
                   <option key={profile.id} value={profile.id}>

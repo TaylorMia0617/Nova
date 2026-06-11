@@ -210,6 +210,7 @@ export default function BlueprintEditor({ blueprintId }: Props) {
   const { t } = useTranslation();
   const {
     blueprints,
+    hasLoadedBlueprints,
     templates,
     focusedNodeByBlueprintId,
     templateErrorMessage,
@@ -355,8 +356,27 @@ export default function BlueprintEditor({ blueprintId }: Props) {
   };
 
   useEffect(() => {
-    if (!blueprint) void loadBlueprints();
-  }, [blueprint, loadBlueprints]);
+    if (!hasLoadedBlueprints && !blueprint) void loadBlueprints();
+  }, [blueprint, hasLoadedBlueprints, loadBlueprints]);
+
+  useEffect(() => {
+    if (blueprint || !hasLoadedBlueprints) return;
+    setSelectedNodeIds([]);
+    setSelectedEdgeId(null);
+    setInputManager({ mode: "idle" });
+    setConnectionHoverNodeId(null);
+    setMinimapDrag(null);
+    setConnectMode(false);
+    setContextMenu(null);
+    setIsCreateMenuOpen(false);
+    setCreateMenuPosition(null);
+    setEdgeInsertCandidate(null);
+    setPendingConnectionCreate(null);
+    setIsTemplateModalOpen(false);
+    setActiveSuggestionInput(null);
+    setActiveChildNodeId(null);
+    focusNode(blueprintId, null);
+  }, [blueprint, blueprintId, focusNode, hasLoadedBlueprints]);
 
   useEffect(() => {
     void loadTemplates();
@@ -1685,7 +1705,11 @@ export default function BlueprintEditor({ blueprintId }: Props) {
   };
 
   if (!blueprint) {
-    return <div className="blueprint-editor-empty">{t("blueprint.loading")}</div>;
+    return (
+      <div className="blueprint-editor-empty">
+        {hasLoadedBlueprints ? t("blueprint.deletedOrMissing") : t("blueprint.loading")}
+      </div>
+    );
   }
 
   const drawEdge = (from: BlueprintNode, toX: number, toY: number) => {
@@ -1944,7 +1968,7 @@ export default function BlueprintEditor({ blueprintId }: Props) {
       if (!name || unique.has(name)) continue;
       const lower = name.toLowerCase();
       if (!query || lower.includes(query)) {
-        unique.set(name, entry.description ?? entry.sourceList ?? "");
+        unique.set(name, [entry.description ?? entry.sourceList ?? "", entry.body ? "含结构数据" : ""].filter(Boolean).join(" · "));
       }
     }
     return [...unique.entries()]

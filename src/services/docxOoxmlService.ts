@@ -94,6 +94,22 @@ function twipsToEm(twips: string | null) {
   return Math.max(0, Math.round(value / 480));
 }
 
+function halfPointsToPx(halfPoints: number) {
+  const points = halfPoints / 2;
+  return Math.max(1, Math.round(points * (96 / 72)));
+}
+
+function fontSizeToHalfPoints(value: unknown) {
+  const match = String(value ?? "").match(/([\d.]+)\s*(px|pt)?/i);
+  if (!match) return null;
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  const unit = (match[2] ?? "pt").toLowerCase();
+  const points = unit === "px" ? amount * (72 / 96) : amount;
+  const halfPoints = Math.round(points * 2);
+  return halfPoints > 0 ? halfPoints : null;
+}
+
 function parseParagraphAttrs(paragraph: Element) {
   const props = firstChildByName(paragraph, "pPr");
   const style = styleValue(firstChildByName(props ?? paragraph, "pStyle"));
@@ -144,7 +160,7 @@ function parseRunMarks(run: Element) {
   const color = normalizeHexColor(styleValue(firstChildByName(props, "color")));
   if (color) textStyle.color = color;
   const size = Number(styleValue(firstChildByName(props, "sz")));
-  if (Number.isFinite(size) && size > 0) textStyle.fontSize = `${size / 2}pt`;
+  if (Number.isFinite(size) && size > 0) textStyle.fontSize = `${halfPointsToPx(size)}px`;
   const fonts = firstChildByName(props, "rFonts");
   const fontFamily =
     fonts?.getAttribute("w:ascii") ??
@@ -313,10 +329,10 @@ function runPropsFromMarks(marks: ProseMirrorNode["marks"] = []) {
     if (mark.type === "strike") props.push("<w:strike/>");
     if (mark.type === "textStyle") {
       const color = stripHash(mark.attrs?.color);
-      const fontSize = String(mark.attrs?.fontSize ?? "").match(/[\d.]+/)?.[0];
+      const fontSize = fontSizeToHalfPoints(mark.attrs?.fontSize);
       const fontFamily = mark.attrs?.fontFamily;
       if (color) props.push(`<w:color w:val="${escapeXml(color)}"/>`);
-      if (fontSize) props.push(`<w:sz w:val="${Math.round(Number(fontSize) * 2)}"/>`);
+      if (fontSize) props.push(`<w:sz w:val="${fontSize}"/>`);
       if (fontFamily) props.push(`<w:rFonts w:ascii="${escapeXml(fontFamily)}" w:eastAsia="${escapeXml(fontFamily)}"/>`);
     }
     if (mark.type === "highlight" && mark.attrs?.color) {

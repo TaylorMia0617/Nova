@@ -423,6 +423,7 @@ interface BlueprintState {
   focusedNodeByBlueprintId: Record<string, string | null>;
   undoStacks: Record<string, BlueprintDocument[]>;
   isLoading: boolean;
+  hasLoadedBlueprints: boolean;
   errorMessage: string | null;
   templateErrorMessage: string | null;
   resetBlueprints: () => void;
@@ -454,6 +455,7 @@ export const useBlueprintStore = create<BlueprintState>((set, get) => ({
   focusedNodeByBlueprintId: {},
   undoStacks: {},
   isLoading: false,
+  hasLoadedBlueprints: false,
   errorMessage: null,
   templateErrorMessage: null,
   resetBlueprints: () => {
@@ -465,6 +467,7 @@ export const useBlueprintStore = create<BlueprintState>((set, get) => ({
       focusedNodeByBlueprintId: {},
       undoStacks: {},
       isLoading: false,
+      hasLoadedBlueprints: false,
       errorMessage: null,
       templateErrorMessage: null,
     });
@@ -478,10 +481,11 @@ export const useBlueprintStore = create<BlueprintState>((set, get) => ({
       set({
         blueprints: blueprints.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
         isLoading: false,
+        hasLoadedBlueprints: true,
       });
     } catch (error) {
       if (requestId !== blueprintLoadRequestId) return;
-      set({ isLoading: false, errorMessage: error instanceof Error ? error.message : "Failed to load blueprints." });
+      set({ isLoading: false, hasLoadedBlueprints: true, errorMessage: error instanceof Error ? error.message : "Failed to load blueprints." });
     }
   },
   loadTemplates: async () => {
@@ -499,30 +503,43 @@ export const useBlueprintStore = create<BlueprintState>((set, get) => ({
     }
   },
   createBlueprint: async (name = "新蓝图") => {
+    blueprintLoadRequestId++;
     const blueprint = createEmptyBlueprint(name);
     const saved = normalizeBlueprint(await saveBlueprintOnDisk(blueprint));
     set((state) => ({
       blueprints: [saved, ...state.blueprints],
+      hasLoadedBlueprints: true,
       errorMessage: null,
     }));
     return saved;
   },
   saveBlueprint: async (blueprint) => {
+    blueprintLoadRequestId++;
     const next = normalizeBlueprint({ ...blueprint, updatedAt: new Date().toISOString() });
     const saved = normalizeBlueprint(await saveBlueprintOnDisk(next));
     set((state) => ({
       blueprints: state.blueprints.some((item) => item.id === saved.id)
         ? state.blueprints.map((item) => (item.id === saved.id ? saved : item))
         : [saved, ...state.blueprints],
+      hasLoadedBlueprints: true,
       errorMessage: null,
     }));
   },
   deleteBlueprint: async (id) => {
+    blueprintLoadRequestId++;
     const blueprints = (await deleteBlueprintFromDisk(id)).map(normalizeBlueprint);
     set((state) => {
       const nextFocused = { ...state.focusedNodeByBlueprintId };
+      const nextUndoStacks = { ...state.undoStacks };
       delete nextFocused[id];
-      return { blueprints, focusedNodeByBlueprintId: nextFocused, errorMessage: null };
+      delete nextUndoStacks[id];
+      return {
+        blueprints,
+        focusedNodeByBlueprintId: nextFocused,
+        undoStacks: nextUndoStacks,
+        hasLoadedBlueprints: true,
+        errorMessage: null,
+      };
     });
   },
   renameBlueprint: async (id, name) => {

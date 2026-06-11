@@ -62,6 +62,7 @@ export interface OpenFileTab {
 export interface ReferenceEntry {
   name: string;
   description?: string;
+  body?: string;
   sourceList?: string;
 }
 
@@ -219,6 +220,7 @@ interface FileState {
   trackFileChange: (path: string, oldContent: string, newContent: string) => void;
   getFileChanges: (path: string) => FileChange[];
   clearFileChanges: (path: string) => void;
+  recordExternalFileSnapshot: (path: string, reason?: VersionSnapshotReason) => Promise<void>;
   restoreVersionSnapshot: (snapshot: VersionSnapshot) => Promise<void>;
   openHistorySnapshotPreview: (snapshot: VersionSnapshot) => Promise<void>;
   openHistorySnapshotCompare: (snapshot: VersionSnapshot) => Promise<void>;
@@ -541,6 +543,7 @@ function buildReferenceEntriesFromLists(lists: ReferenceListData[]): ReferenceEn
       entries.push({
         name: item.key,
         description: item.value,
+        body: item.body,
         sourceList: list.name,
       });
     }
@@ -721,6 +724,19 @@ export const useFileStore = create<FileState>()((set, get) => ({
       newMap.delete(path);
       return { fileChanges: newMap };
     });
+  },
+  recordExternalFileSnapshot: async (path, reason = "manual") => {
+    const name = path.split(/[/\\]/).pop() ?? path;
+    const mode = getFileMode(name);
+    if (mode === "docx") {
+      const base64 = await readFileBinary(path);
+      await recordBinarySnapshot(get().rootPath, path, base64, reason);
+      const parsed = await parseDocxBase64(base64);
+      rememberSnapshotContent(path, JSON.stringify(parsed.docJson));
+      return;
+    }
+    const content = await readFile(path);
+    await recordTextSnapshot(get().rootPath, path, content, reason);
   },
   restoreVersionSnapshot: async (snapshot) => {
     if (!snapshot.isContentStored || snapshot.content === undefined) {
@@ -1090,6 +1106,10 @@ export const useFileStore = create<FileState>()((set, get) => ({
     const targetGroupId = groupId ?? get().activeGroupId;
     const targetGroup = get().editorGroups.find((g) => g.id === targetGroupId);
     if (!targetGroup) return;
+    if (!rootPathAtStart || !isSameOrDescendantPath(path, rootPathAtStart)) {
+      set({ errorMessage: "文件不属于当前工作区，请重新打开对应工作区。" });
+      return;
+    }
 
     const existingTab = targetGroup.tabs.find((tab) => tab.path === path);
     if (existingTab) {
@@ -1163,8 +1183,11 @@ export const useFileStore = create<FileState>()((set, get) => ({
       });
     } catch (error) {
       if (requestId !== openFileRequestId || rootPathAtStart !== get().rootPath) return;
+      const message = error instanceof Error ? error.message : "Failed to open file.";
       set({
-        errorMessage: error instanceof Error ? error.message : "Failed to open file.",
+        errorMessage: /outside the current workspace|not part of the current workspace/i.test(message)
+          ? "文件不属于当前工作区，请重新打开对应工作区。"
+          : message,
       });
     }
   },

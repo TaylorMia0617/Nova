@@ -1,4 +1,9 @@
-export type ModelTransportType = "sse-http";
+export type ModelTransportType =
+  | "openai-responses"
+  | "openai-chat-completions"
+  | "anthropic-messages"
+  | "openai-compatible"
+  | "sse-http";
 
 export interface ModelProfile {
   id: string;
@@ -27,6 +32,47 @@ export interface ConversationMessage {
   skills?: ChatSkills;
   searchCount?: number;
   workItems?: ConversationWorkItem[];
+  promptDebug?: PromptDebugBreakdown;
+  editReviewDebug?: EditReviewDebug;
+  clarificationAnswers?: ClarificationAnswer[];
+}
+
+export interface PromptDebugEntry {
+  label: string;
+  chars: number;
+  rawChars?: number;
+  sentChars?: number;
+  estimatedTokens: number;
+  dynamic: boolean;
+  cacheFriendly: "high" | "medium" | "low";
+  strategy?: "none" | "metadata" | "history-delta" | "snippet" | "full" | "structured" | "stable" | "summary" | "omitted";
+  reason?: string;
+  fromWorkingSet?: boolean;
+}
+
+export interface PromptDebugBreakdown {
+  createdAt: string;
+  totalChars: number;
+  totalEstimatedTokens: number;
+  dynamicChars: number;
+  entries: PromptDebugEntry[];
+}
+
+export interface EditReviewDebug {
+  createdAt: string;
+  enabled: boolean;
+  triggered: boolean;
+  modelLabel?: string;
+  modelId?: string;
+  filePath?: string;
+  editCount: number;
+  reviewedCount: number;
+  skippedCount: number;
+  originalChars: number;
+  reviewedChars: number;
+  durationMs: number;
+  skipReasons: string[];
+  fallbackReasons: string[];
 }
 
 export interface ConversationWorkItem {
@@ -64,12 +110,27 @@ export interface ConversationRecord extends ConversationSummary {
   contextFilePath?: string | null;
   lastInsertedText?: string | null;
   boundFileCaches?: FileContentCache[];
+  workingSet?: WorkingSetEntry[];
   chatSkills?: ChatSkills;
   pendingPlan?: PendingPlanConfirmation | null;
   pendingClarification?: PendingClarification | null;
 }
 
-export type AgentMode = "quick" | "smart" | "architect";
+export interface WorkingSetEntry {
+  filePath: string;
+  fileName: string;
+  contentHash: string;
+  charCount: number;
+  wordCount: number;
+  lineCount: number;
+  snippet: string;
+  summary: string;
+  source: "active" | "tool" | "write";
+  updatedAt: string;
+  lastUsedAt: string;
+}
+
+export type AgentMode = "writer" | "editor";
 
 export interface PendingPlanConfirmation {
   planMessageId: string;
@@ -85,6 +146,22 @@ export interface PendingClarification {
   promptContent: string;
   agentMode: AgentMode;
   createdAt: string;
+  questions?: ClarificationQuestion[];
+  currentIndex?: number;
+  answers?: ClarificationAnswer[];
+}
+
+export interface ClarificationQuestion {
+  id: string;
+  question: string;
+  options: string[];
+  allowCustom: boolean;
+}
+
+export interface ClarificationAnswer {
+  questionId: string;
+  question: string;
+  answer: string;
 }
 
 export interface ChatSkills {
@@ -92,6 +169,7 @@ export interface ChatSkills {
   agentMode: AgentMode;
   agentSubMode: "plan" | "build";
   forcePlanMode: boolean;
+  enableEditReview: boolean;
 }
 
 export type AiTaskType = "chat" | "polish" | "correct" | "stylize";

@@ -112,25 +112,13 @@ Supported attachment types are text-oriented files only, including:
 - `txt`
 - `md`
 - `json`
-- `csv`
-- `yaml`
-- `yml`
-- `xml`
-- `html`
-- `js`
-- `ts`
-- `py`
-- `rs`
-- `java`
-- `c`
-- `cpp`
+- `.docx`
 
 Rules:
 
 - Attachments are read locally by Electron.
 - The app stores attachment metadata and text content in conversation history.
 - Attachments are added to the prompt as supplemental context.
-- PDF / DOCX attachments are not parsed in the current version.
 
 ### 6. Request troubleshooting
 

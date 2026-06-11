@@ -4,10 +4,13 @@ const fsSync = require("fs");
 const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
+const { AsyncLocalStorage } = require("async_hooks");
 let compareNodeNames = null;
 
 const isDev = !app.isPackaged;
 const workspaceWatchers = new Map();
+const workspaceRootsByWebContents = new Map();
+const workspaceRootStorage = new AsyncLocalStorage();
 let currentWorkspaceRoot = null;
 const TEXT_ATTACHMENT_EXTENSIONS = new Set([
   ".txt",
@@ -239,12 +242,31 @@ function normalizePath(filePath) {
   return path.normalize(filePath);
 }
 
+function getWebContentsId(event) {
+  return event?.sender?.id ?? null;
+}
+
+function getWorkspaceRootForEvent(event) {
+  const webContentsId = getWebContentsId(event);
+  return webContentsId ? workspaceRootsByWebContents.get(webContentsId) ?? currentWorkspaceRoot : currentWorkspaceRoot;
+}
+
+function getActiveWorkspaceRoot() {
+  return workspaceRootStorage.getStore() ?? currentWorkspaceRoot;
+}
+
+function runWithWorkspaceRoot(event, fn) {
+  const root = getWorkspaceRootForEvent(event);
+  return workspaceRootStorage.run(root ?? null, fn);
+}
+
 function getWorkspaceAppDataPaths() {
-  if (!currentWorkspaceRoot) {
+  const workspaceRoot = getActiveWorkspaceRoot();
+  if (!workspaceRoot) {
     throw new Error("No workspace is open. Please open a workspace first.");
   }
 
-  const dataPath = path.join(currentWorkspaceRoot, ".novel-assistance");
+  const dataPath = path.join(workspaceRoot, ".novel-assistance");
   const conversationsPath = path.join(dataPath, "conversations");
   const indexPath = path.join(conversationsPath, "index.json");
   const referenceDataPath = path.join(dataPath, "data");
@@ -260,7 +282,7 @@ function getWorkspaceAppDataPaths() {
   const cacheIndexPath = path.join(cachePath, "index.json");
 
   return {
-    rootPath: currentWorkspaceRoot,
+    rootPath: workspaceRoot,
     dataPath,
     conversationsPath,
     indexPath,
@@ -757,27 +779,35 @@ async function readAttachmentText(filePath) {
   };
 }
 
-function setCurrentWorkspaceRoot(rootPath) {
-  currentWorkspaceRoot = normalizePath(rootPath);
+function setCurrentWorkspaceRoot(rootPath, event = null) {
+  const normalizedRoot = normalizePath(rootPath);
+  currentWorkspaceRoot = normalizedRoot;
+  const webContentsId = getWebContentsId(event);
+  if (webContentsId) {
+    workspaceRootsByWebContents.set(webContentsId, normalizedRoot);
+  }
+  return normalizedRoot;
 }
 
 function isPathInsideWorkspace(targetPath) {
-  if (!currentWorkspaceRoot) return false;
+  const workspaceRoot = getActiveWorkspaceRoot();
+  if (!workspaceRoot) return false;
 
   const normalizedTarget = normalizePath(targetPath);
-  const relative = path.relative(currentWorkspaceRoot, normalizedTarget);
+  const relative = path.relative(workspaceRoot, normalizedTarget);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 function assertWorkspacePath(targetPath) {
   const normalizedTarget = normalizePath(targetPath);
+  const workspaceRoot = getActiveWorkspaceRoot();
 
-  if (!currentWorkspaceRoot) {
+  if (!workspaceRoot) {
     throw new Error("No workspace is open. Please open a workspace first.");
   }
 
   if (!isPathInsideWorkspace(normalizedTarget)) {
-    throw new Error("This path is outside the current workspace and cannot be accessed.");
+    throw new Error("This file is not part of the current workspace. Please reopen the matching workspace.");
   }
 
   return normalizedTarget;
@@ -908,9 +938,15 @@ async function createWindow() {
   });
 
   windows.add(win);
+  const webContentsId = win.webContents.id;
 
   win.on("closed", () => {
-    windows.delete(win);
+    try {
+      windows.delete(win);
+      workspaceRootsByWebContents.delete(webContentsId);
+    } catch {
+      // The window is already gone; shutdown cleanup must never surface as a main-process error.
+    }
   });
 
   if (isDev) {
@@ -988,7 +1024,7 @@ ipcMain.handle("window:createNew", () => {
   createWindow();
 });
 
-ipcMain.handle("fs:pickWorkspace", async () => {
+ipcMain.handle("fs:pickWorkspace", async (event) => {
   const result = await dialog.showOpenDialog({
     properties: ["openDirectory"],
   });
@@ -998,42 +1034,52 @@ ipcMain.handle("fs:pickWorkspace", async () => {
   }
 
   const rootPath = normalizePath(result.filePaths[0]);
-  setCurrentWorkspaceRoot(rootPath);
+  setCurrentWorkspaceRoot(rootPath, event);
   return rootPath;
 });
 
-ipcMain.handle("fs:loadWorkspace", async (_event, rootPath, options = {}) => {
+ipcMain.handle("fs:loadWorkspace", async (event, rootPath, options = {}) => {
   const normalizedRoot = normalizePath(rootPath);
-  setCurrentWorkspaceRoot(normalizedRoot);
-  const recursive = Boolean(options.recursive);
-  return {
-    rootPath: normalizedRoot,
-    rootName: path.basename(normalizedRoot),
-    nodes: await buildTree(assertWorkspacePath(normalizedRoot), recursive),
-  };
+  setCurrentWorkspaceRoot(normalizedRoot, event);
+  return runWithWorkspaceRoot(event, async () => {
+    const recursive = Boolean(options.recursive);
+    return {
+      rootPath: normalizedRoot,
+      rootName: path.basename(normalizedRoot),
+      nodes: await buildTree(assertWorkspacePath(normalizedRoot), recursive),
+    };
+  });
 });
 
-ipcMain.handle("fs:readDirectory", async (_event, directoryPath, options = {}) => {
-  const normalizedPath = assertWorkspacePath(directoryPath);
-  const recursive = Boolean(options.recursive);
-  return buildTree(normalizedPath, recursive);
+ipcMain.handle("fs:readDirectory", async (event, directoryPath, options = {}) => {
+  return runWithWorkspaceRoot(event, async () => {
+    const normalizedPath = assertWorkspacePath(directoryPath);
+    const recursive = Boolean(options.recursive);
+    return buildTree(normalizedPath, recursive);
+  });
 });
 
-ipcMain.handle("fs:readFile", async (_event, filePath) => {
-  return fs.readFile(assertWorkspacePath(filePath), "utf8");
+ipcMain.handle("fs:readFile", async (event, filePath) => {
+  return runWithWorkspaceRoot(event, async () => fs.readFile(assertWorkspacePath(filePath), "utf8"));
 });
 
-ipcMain.handle("fs:writeFile", async (_event, filePath, content) => {
-  await fs.writeFile(assertWorkspacePath(filePath), content, "utf8");
+ipcMain.handle("fs:writeFile", async (event, filePath, content) => {
+  return runWithWorkspaceRoot(event, async () => {
+    await fs.writeFile(assertWorkspacePath(filePath), content, "utf8");
+  });
 });
 
-ipcMain.handle("fs:readFileBinary", async (_event, filePath) => {
-  const buffer = await fs.readFile(assertWorkspacePath(filePath));
-  return buffer.toString("base64");
+ipcMain.handle("fs:readFileBinary", async (event, filePath) => {
+  return runWithWorkspaceRoot(event, async () => {
+    const buffer = await fs.readFile(assertWorkspacePath(filePath));
+    return buffer.toString("base64");
+  });
 });
 
-ipcMain.handle("fs:writeFileBinary", async (_event, filePath, base64Content) => {
-  await fs.writeFile(assertWorkspacePath(filePath), Buffer.from(base64Content, "base64"));
+ipcMain.handle("fs:writeFileBinary", async (event, filePath, base64Content) => {
+  return runWithWorkspaceRoot(event, async () => {
+    await fs.writeFile(assertWorkspacePath(filePath), Buffer.from(base64Content, "base64"));
+  });
 });
 
 async function writeWithRetry(filePath, content, maxRetries = 3, delay = 200) {
@@ -1096,41 +1142,41 @@ ipcMain.handle("memory:writeGlobalHabits", async (_event, content) => {
   await writeWithRetry(habitsPath, String(content ?? ""));
 });
 
-ipcMain.handle("memory:ensureWorkspaceHabits", async () => {
+ipcMain.handle("memory:ensureWorkspaceHabits", async (event) => runWithWorkspaceRoot(event, async () => {
   return ensureWorkspaceHabits();
-});
+}));
 
-ipcMain.handle("memory:readProjectImportant", async () => {
+ipcMain.handle("memory:readProjectImportant", async (event) => runWithWorkspaceRoot(event, async () => {
   const paths = await ensureWorkspaceHabits();
   return fs.readFile(paths.importantsPath, "utf8");
-});
+}));
 
-ipcMain.handle("memory:writeProjectImportant", async (_event, content) => {
+ipcMain.handle("memory:writeProjectImportant", async (event, content) => runWithWorkspaceRoot(event, async () => {
   const paths = await ensureWorkspaceHabits();
   await writeWithRetry(paths.importantsPath, String(content ?? ""));
-});
+}));
 
-ipcMain.handle("memory:readProjectSnapshot", async () => {
+ipcMain.handle("memory:readProjectSnapshot", async (event) => runWithWorkspaceRoot(event, async () => {
   const paths = await ensureWorkspaceHabits();
   return fs.readFile(paths.snapshotPath, "utf8");
-});
+}));
 
-ipcMain.handle("memory:writeProjectSnapshot", async (_event, content) => {
+ipcMain.handle("memory:writeProjectSnapshot", async (event, content) => runWithWorkspaceRoot(event, async () => {
   const paths = await ensureWorkspaceHabits();
   await writeWithRetry(paths.snapshotPath, String(content ?? ""));
-});
+}));
 
-ipcMain.handle("memory:readProjectCacheMemory", async () => {
+ipcMain.handle("memory:readProjectCacheMemory", async (event) => runWithWorkspaceRoot(event, async () => {
   const paths = await ensureWorkspaceHabits();
   return fs.readFile(paths.cacheMemoryPath, "utf8");
-});
+}));
 
-ipcMain.handle("memory:writeProjectCacheMemory", async (_event, content) => {
+ipcMain.handle("memory:writeProjectCacheMemory", async (event, content) => runWithWorkspaceRoot(event, async () => {
   const paths = await ensureWorkspaceHabits();
   await writeWithRetry(paths.cacheMemoryPath, String(content ?? ""));
-});
+}));
 
-ipcMain.handle("cache:get", async (_event, request) => {
+ipcMain.handle("cache:get", async (event, request) => runWithWorkspaceRoot(event, async () => {
   const { blobsPath } = getGlobalContentCachePaths();
   const { contentHash, cacheKey } = buildContentCacheKey(request ?? {});
   const blobPath = path.join(blobsPath, `${cacheKey}.json`);
@@ -1142,9 +1188,9 @@ ipcMain.handle("cache:get", async (_event, request) => {
   } catch {
     return { hit: false, contentHash, cacheKey };
   }
-});
+}));
 
-ipcMain.handle("cache:put", async (_event, request) => {
+ipcMain.handle("cache:put", async (event, request) => runWithWorkspaceRoot(event, async () => {
   const { blobsPath } = getGlobalContentCachePaths();
   await fs.mkdir(blobsPath, { recursive: true });
   const { contentHash, cacheKey } = buildContentCacheKey(request ?? {});
@@ -1172,41 +1218,41 @@ ipcMain.handle("cache:put", async (_event, request) => {
   };
   await writeProjectCacheIndex(index);
   return { hit: true, contentHash, cacheKey, value: blob };
-});
+}));
 
-ipcMain.handle("cache:index", async () => {
+ipcMain.handle("cache:index", async (event) => runWithWorkspaceRoot(event, async () => {
   return readProjectCacheIndex();
-});
+}));
 
-ipcMain.handle("reference:getLists", async () => {
+ipcMain.handle("reference:getLists", async (event) => runWithWorkspaceRoot(event, async () => {
   return readReferenceListsIndex();
-});
+}));
 
-ipcMain.handle("reference:getList", async (_event, listId) => {
+ipcMain.handle("reference:getList", async (event, listId) => runWithWorkspaceRoot(event, async () => {
   return readReferenceList(listId);
-});
+}));
 
-ipcMain.handle("reference:saveList", async (_event, list) => {
+ipcMain.handle("reference:saveList", async (event, list) => runWithWorkspaceRoot(event, async () => {
   return writeReferenceList(list);
-});
+}));
 
-ipcMain.handle("reference:deleteList", async (_event, listId) => {
+ipcMain.handle("reference:deleteList", async (event, listId) => runWithWorkspaceRoot(event, async () => {
   return deleteReferenceList(listId);
-});
+}));
 
-ipcMain.handle("history:listSnapshots", async () => {
+ipcMain.handle("history:listSnapshots", async (event) => runWithWorkspaceRoot(event, async () => {
   const snapshots = await readVersionSnapshots();
   await writeVersionSnapshots(snapshots);
   return snapshots;
-});
+}));
 
-ipcMain.handle("history:appendSnapshot", async (_event, snapshot) => {
+ipcMain.handle("history:appendSnapshot", async (event, snapshot) => runWithWorkspaceRoot(event, async () => {
   const snapshots = await readVersionSnapshots();
   snapshots.push(snapshot);
   return writeVersionSnapshots(snapshots);
-});
+}));
 
-ipcMain.handle("history:updateSnapshotPaths", async (_event, oldPath, newPath) => {
+ipcMain.handle("history:updateSnapshotPaths", async (event, oldPath, newPath) => runWithWorkspaceRoot(event, async () => {
   const snapshots = await readVersionSnapshots();
   const updated = snapshots.map((snapshot) => {
     if (snapshot.path !== oldPath && !snapshot.path.startsWith(`${oldPath}${path.sep}`)) {
@@ -1216,70 +1262,70 @@ ipcMain.handle("history:updateSnapshotPaths", async (_event, oldPath, newPath) =
     return {
       ...snapshot,
       path: nextPath,
-      relativePath: currentWorkspaceRoot ? path.relative(currentWorkspaceRoot, nextPath) : snapshot.relativePath,
+      relativePath: getActiveWorkspaceRoot() ? path.relative(getActiveWorkspaceRoot(), nextPath) : snapshot.relativePath,
     };
   });
   return writeVersionSnapshots(updated);
-});
+}));
 
-ipcMain.handle("history:pruneSnapshots", async () => {
+ipcMain.handle("history:pruneSnapshots", async (event) => runWithWorkspaceRoot(event, async () => {
   return writeVersionSnapshots(await readVersionSnapshots());
-});
+}));
 
-ipcMain.handle("blueprint:list", async () => {
+ipcMain.handle("blueprint:list", async (event) => runWithWorkspaceRoot(event, async () => {
   return readBlueprints();
-});
+}));
 
-ipcMain.handle("blueprint:save", async (_event, blueprint) => {
+ipcMain.handle("blueprint:save", async (event, blueprint) => runWithWorkspaceRoot(event, async () => {
   return saveBlueprint(blueprint);
-});
+}));
 
-ipcMain.handle("blueprint:delete", async (_event, blueprintId) => {
+ipcMain.handle("blueprint:delete", async (event, blueprintId) => runWithWorkspaceRoot(event, async () => {
   return deleteBlueprint(blueprintId);
-});
+}));
 
-ipcMain.handle("blueprint:rename", async (_event, blueprintId, name) => {
+ipcMain.handle("blueprint:rename", async (event, blueprintId, name) => runWithWorkspaceRoot(event, async () => {
   return renameBlueprint(blueprintId, name);
-});
+}));
 
-ipcMain.handle("blueprintTemplate:list", async () => {
+ipcMain.handle("blueprintTemplate:list", async (event) => runWithWorkspaceRoot(event, async () => {
   return readBlueprintTemplates();
-});
+}));
 
-ipcMain.handle("blueprintTemplate:save", async (_event, template) => {
+ipcMain.handle("blueprintTemplate:save", async (event, template) => runWithWorkspaceRoot(event, async () => {
   return saveBlueprintTemplate(template);
-});
+}));
 
-ipcMain.handle("blueprintTemplate:delete", async (_event, templateId) => {
+ipcMain.handle("blueprintTemplate:delete", async (event, templateId) => runWithWorkspaceRoot(event, async () => {
   return deleteBlueprintTemplate(templateId);
-});
+}));
 
-ipcMain.handle("fs:createFile", async (_event, filePath) => {
+ipcMain.handle("fs:createFile", async (event, filePath) => runWithWorkspaceRoot(event, async () => {
   const { normalizedPath } = getValidatedEntryName(filePath);
   const handle = await fs.open(normalizedPath, "w");
   await handle.close();
-});
+}));
 
-ipcMain.handle("fs:createFolder", async (_event, folderPath) => {
+ipcMain.handle("fs:createFolder", async (event, folderPath) => runWithWorkspaceRoot(event, async () => {
   const { normalizedPath } = getValidatedEntryName(folderPath);
   if (await pathExists(normalizedPath)) {
     throw new Error("A file or folder with that name already exists.");
   }
   await fs.mkdir(normalizedPath);
-});
+}));
 
-ipcMain.handle("fs:renamePath", async (_event, currentPath, newName) => {
+ipcMain.handle("fs:renamePath", async (event, currentPath, newName) => runWithWorkspaceRoot(event, async () => {
   const normalizedPath = assertWorkspacePath(currentPath);
   const nextPath = assertWorkspacePath(path.join(path.dirname(normalizedPath), newName));
   await fs.rename(normalizedPath, nextPath);
   return nextPath;
-});
+}));
 
-ipcMain.handle("fs:deletePath", async (_event, targetPath) => {
+ipcMain.handle("fs:deletePath", async (event, targetPath) => runWithWorkspaceRoot(event, async () => {
   await fs.rm(assertWorkspacePath(targetPath), { recursive: true, force: true });
-});
+}));
 
-ipcMain.handle("fs:duplicateFile", async (_event, sourcePath) => {
+ipcMain.handle("fs:duplicateFile", async (event, sourcePath) => runWithWorkspaceRoot(event, async () => {
   const normalizedSource = assertWorkspacePath(sourcePath);
   const directory = path.dirname(normalizedSource);
   const extension = path.extname(normalizedSource);
@@ -1295,39 +1341,39 @@ ipcMain.handle("fs:duplicateFile", async (_event, sourcePath) => {
   }
 
   throw new Error("Could not create a duplicate file name.");
-});
+}));
 
-ipcMain.handle("fs:movePath", async (_event, sourcePath, destinationFolderPath) => {
+ipcMain.handle("fs:movePath", async (event, sourcePath, destinationFolderPath) => runWithWorkspaceRoot(event, async () => {
   const normalizedSource = assertWorkspacePath(sourcePath);
   const normalizedDestination = assertWorkspacePath(destinationFolderPath);
   const nextPath = assertWorkspacePath(path.join(normalizedDestination, path.basename(normalizedSource)));
   await fs.rename(normalizedSource, nextPath);
   return nextPath;
-});
+}));
 
-ipcMain.handle("ai:ensureWorkspaceAppData", async () => {
+ipcMain.handle("ai:ensureWorkspaceAppData", async (event) => runWithWorkspaceRoot(event, async () => {
   const paths = await ensureWorkspaceAppData();
   return {
     rootPath: paths.rootPath,
     dataPath: paths.dataPath,
     conversationsPath: paths.conversationsPath,
   };
-});
+}));
 
-ipcMain.handle("ai:listConversationSummaries", async () => {
+ipcMain.handle("ai:listConversationSummaries", async (event) => runWithWorkspaceRoot(event, async () => {
   return readConversationIndex();
-});
+}));
 
-ipcMain.handle("ai:readConversation", async (_event, conversationId) => {
+ipcMain.handle("ai:readConversation", async (event, conversationId) => runWithWorkspaceRoot(event, async () => {
   const filePath = getConversationFilePath(conversationId);
   if (!(await pathExists(filePath))) {
     return null;
   }
   const content = await fs.readFile(filePath, "utf8");
   return JSON.parse(content);
-});
+}));
 
-ipcMain.handle("ai:writeConversation", async (_event, record) => {
+ipcMain.handle("ai:writeConversation", async (event, record) => runWithWorkspaceRoot(event, async () => {
   await ensureWorkspaceAppData();
   const filePath = getConversationFilePath(record.id);
   await fs.writeFile(filePath, JSON.stringify(record, null, 2), "utf8");
@@ -1345,9 +1391,9 @@ ipcMain.handle("ai:writeConversation", async (_event, record) => {
   );
 
   return writeConversationIndex(nextIndex);
-});
+}));
 
-ipcMain.handle("ai:deleteConversation", async (_event, conversationId) => {
+ipcMain.handle("ai:deleteConversation", async (event, conversationId) => runWithWorkspaceRoot(event, async () => {
   await ensureWorkspaceAppData();
   const filePath = getConversationFilePath(conversationId);
   try {
@@ -1362,7 +1408,7 @@ ipcMain.handle("ai:deleteConversation", async (_event, conversationId) => {
   const currentIndex = await readConversationIndex();
   const nextIndex = currentIndex.filter((item) => item.id !== conversationId);
   return writeConversationIndex(nextIndex);
-});
+}));
 
 ipcMain.handle("ai:testMcpConnection", async (_event, profile) => {
   return testMcpConnection(profile);
@@ -1380,12 +1426,16 @@ ipcMain.handle("ai:readAttachmentText", async (_event, filePath) => {
   return readAttachmentText(filePath);
 });
 
-ipcMain.handle("workspace:watch", async (_event, rootPath) => {
-  await watchWorkspace(rootPath);
+ipcMain.handle("workspace:watch", async (event, rootPath) => {
+  return runWithWorkspaceRoot(event, async () => {
+    await watchWorkspace(rootPath);
+  });
 });
 
-ipcMain.handle("workspace:unwatch", async (_event, rootPath) => {
-  await closeWorkspaceWatcher(rootPath);
+ipcMain.handle("workspace:unwatch", async (event, rootPath) => {
+  return runWithWorkspaceRoot(event, async () => {
+    await closeWorkspaceWatcher(rootPath);
+  });
 });
 
 

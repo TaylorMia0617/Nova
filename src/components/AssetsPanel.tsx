@@ -31,11 +31,39 @@ type CreateDialogState =
 type CreateFileExtension = ".docx" | ".txt" | ".md";
 
 const CREATE_FILE_EXTENSIONS: CreateFileExtension[] = [".docx", ".txt", ".md"];
+const CHARACTER_REFERENCE_BODY_TEMPLATE = `{basic}
+[name]:
+[age]:
+[identity]:
+
+{appearance}
+  [hair]:
+  [eyes]:
+
+{personality}
+  [surface]:
+  {core_belief}:
+  [desire]:
+  [fear]:
+
+{history}
+  [events]:
+
+{behavior}
+  [danger]:
+  [pressure]:
+  [conflict]:
+
+{relationships}
+
+{arc}
+  [start]:
+  [end]:`;
 
 const createDraftList = (): ReferenceListData => ({
   id: `list-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
   name: "New List",
-  items: [{ key: "", value: "" }],
+  items: [{ key: "", value: "", body: "" }],
 });
 
 const AssetsPanel: React.FC = () => {
@@ -231,7 +259,7 @@ const AssetsPanel: React.FC = () => {
     if (!referenceListDraft) return;
     setReferenceListDraft({
       ...referenceListDraft,
-      items: [...referenceListDraft.items, { key: "", value: "" }],
+      items: [...referenceListDraft.items, { key: "", value: "", body: "" }],
     });
   };
 
@@ -240,11 +268,11 @@ const AssetsPanel: React.FC = () => {
     const newItems = referenceListDraft.items.filter((_, i) => i !== index);
     setReferenceListDraft({
       ...referenceListDraft,
-      items: newItems.length > 0 ? newItems : [{ key: "", value: "" }],
+      items: newItems.length > 0 ? newItems : [{ key: "", value: "", body: "" }],
     });
   };
 
-  const handleUpdateRow = (index: number, field: "key" | "value", value: string) => {
+  const handleUpdateRow = (index: number, field: "key" | "value" | "body", value: string) => {
     if (!referenceListDraft) return;
     const newItems = [...referenceListDraft.items];
     newItems[index] = { ...newItems[index], [field]: value };
@@ -252,6 +280,14 @@ const AssetsPanel: React.FC = () => {
       ...referenceListDraft,
       items: newItems,
     });
+  };
+
+  const handleUseCharacterTemplate = (index: number) => {
+    if (!referenceListDraft) return;
+    const item = referenceListDraft.items[index];
+    if (!item) return;
+    const nextBody = item.body?.trim() ? `${item.body.trim()}\n\n${CHARACTER_REFERENCE_BODY_TEMPLATE}` : CHARACTER_REFERENCE_BODY_TEMPLATE;
+    handleUpdateRow(index, "body", nextBody);
   };
 
   const handleImportTxt = async () => {
@@ -267,18 +303,20 @@ const AssetsPanel: React.FC = () => {
       for (const file of files) {
         const content = await file.text();
         const items = content
-          .split(/\r?\n/)
-          .map(line => line.trim())
+          .split(/(?=^\{\{.+?\}\})/m)
+          .map(block => block.trim())
           .filter(Boolean)
-          .map(line => {
-            const match = line.match(/^\{\{(.+?)\}\}(?:\s+(.+))?$/);
+          .map(block => {
+            const [head = "", ...bodyLines] = block.split(/\r?\n/);
+            const match = head.match(/^\{\{(.+?)\}\}(?:\s+(.+))?$/);
             if (!match) return null;
             return {
               key: match[1].trim(),
-              value: (match[2] ?? "").trim(),
+              value: (match[2] ?? "").trim().replace(/^["“]|["”]$/g, ""),
+              body: bodyLines.join("\n").trim(),
             };
           })
-          .filter((item): item is { key: string; value: string } => item !== null);
+          .filter((item): item is { key: string; value: string; body: string } => item !== null);
 
         // 去重
         const uniqueItems = items.filter((item, index, self) =>
@@ -310,7 +348,10 @@ const AssetsPanel: React.FC = () => {
 
     const content = referenceListDraft.items
       .filter(item => item.key.trim())
-      .map(item => `{{${item.key}}}${item.value ? ` ${item.value}` : ""}`)
+      .map(item => {
+        const head = `{{${item.key}}}${item.value ? ` "${item.value}"` : ""}`;
+        return item.body?.trim() ? `${head}\n${item.body.trim()}` : head;
+      })
       .join("\n");
 
     const blob = new Blob([content], { type: "text/plain" });
@@ -812,33 +853,55 @@ const AssetsPanel: React.FC = () => {
                       </label>
                     </div>
                     <div className="reference-dialog-section reference-dialog-table-section">
-                      <div className="reference-table-header">
-                        <span className="reference-table-key">{t("reference.key")}</span>
-                        <span className="reference-table-value">{t("reference.value")}</span>
-                        <span className="reference-table-action"></span>
-                      </div>
                       <div className="reference-table-body">
                         {referenceListDraft.items.map((item, index) => (
-                          <div key={index} className="reference-table-row">
-                            <input
-                              className="reference-table-key"
-                              value={item.key}
-                              onChange={(event) => handleUpdateRow(index, "key", event.target.value)}
-                              placeholder={t("reference.keyPlaceholder")}
-                            />
-                            <input
-                              className="reference-table-value"
-                              value={item.value}
-                              onChange={(event) => handleUpdateRow(index, "value", event.target.value)}
-                              placeholder={t("reference.valuePlaceholder")}
-                            />
-                            <button
-                              className="reference-table-delete"
-                              onClick={() => handleRemoveRow(index)}
-                              type="button"
-                            >
-                              <X size={14} />
-                            </button>
+                          <div key={index} className="reference-entry-card">
+                            <div className="reference-entry-head">
+                              <label className="reference-entry-key">
+                                <span>{"{{Key}}"}</span>
+                                <input
+                                  className="reference-table-key"
+                                  value={item.key}
+                                  onChange={(event) => handleUpdateRow(index, "key", event.target.value)}
+                                  placeholder={t("reference.keyPlaceholder")}
+                                />
+                              </label>
+                              <label className="reference-entry-note">
+                                <span>注释</span>
+                                <input
+                                  className="reference-table-value"
+                                  value={item.value}
+                                  onChange={(event) => handleUpdateRow(index, "value", event.target.value)}
+                                  placeholder={t("reference.valuePlaceholder")}
+                                />
+                              </label>
+                              <button
+                                className="reference-table-delete"
+                                onClick={() => handleRemoveRow(index)}
+                                type="button"
+                              >
+                                <X size={14} />
+                              </button>
+                            </div>
+                            <label className="reference-entry-body">
+                              <span>结构正文</span>
+                              <textarea
+                                className="reference-table-body-field"
+                                value={item.body ?? ""}
+                                onChange={(event) => handleUpdateRow(index, "body", event.target.value)}
+                                placeholder={"{basic}\n  [name]:\n  [age]:\n{personality}\n  [surface]:\n  [desire]:"}
+                                spellCheck={false}
+                              />
+                            </label>
+                            <div className="reference-entry-card-actions">
+                              <button
+                                className="reference-table-template"
+                                onClick={() => handleUseCharacterTemplate(index)}
+                                type="button"
+                              >
+                                插入模板
+                              </button>
+                            </div>
                           </div>
                         ))}
                       </div>

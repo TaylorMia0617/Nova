@@ -6,7 +6,7 @@ import { useSettingsStore } from "../stores/settingsStore";
 import { useFileStore } from "../stores/fileStore";
 import { useBlueprintStore } from "../stores/blueprintStore";
 import { useTranslation } from "../hooks/useTranslation";
-import { callAI, reviewEditFileContent } from "../services/aiService";
+import { callAI, callEditorRoleReview, reviewEditFileContent } from "../services/aiService";
 import {
   deleteConversation,
   ensureWorkspaceConversationStore,
@@ -25,9 +25,9 @@ import {
   loadMemoryContext,
   stripMemoryCandidate,
 } from "../services/memoryService";
-import { readFile, type WorkspaceNode } from "../services/fileSystemService";
+import { readFile, type ReferenceListData, type WorkspaceNode } from "../services/fileSystemService";
 import { calculateTextStats } from "../utils/textStats";
-import type { AgentMode, ChatSkills, ConversationAttachment, ConversationMessage, ConversationRecord, ConversationSummary, ConversationWorkItem, FileChange, FileContentCache, MultiFileContext } from "../types/ai";
+import type { AgentMode, ChatSkills, ConversationAttachment, ConversationMessage, ConversationRecord, ConversationSummary, ConversationWorkItem, EditReviewDebug, FileChange, FileContentCache, MultiFileContext, PromptDebugBreakdown, PromptDebugEntry } from "../types/ai";
 import "./CopilotPanel.css";
 
 // 构建目录结构字符串（隐藏 .novel-assistance/conversations/）
@@ -70,10 +70,30 @@ function createId(prefix: string) {
 
 const DEFAULT_CHAT_SKILLS: ChatSkills = {
   enableWebSearch: false,
-  agentMode: "smart",
+  agentMode: "writer",
   agentSubMode: "plan",
   forcePlanMode: false,
+  enableEditReview: true,
 };
+
+function serializeReferenceListsForReview(lists: ReferenceListData[], maxLength = 16000) {
+  const content = lists
+    .map((list) => {
+      const items = list.items
+        .filter((item) => item.key.trim())
+        .map((item) => {
+          const head = `{{${item.key.trim()}}}${item.value?.trim() ? ` "${item.value.trim()}"` : ""}`;
+          return item.body?.trim() ? `${head}\n${item.body.trim()}` : head;
+        })
+        .join("\n\n");
+      return items ? `# ${list.name}\n${items}` : "";
+    })
+    .filter(Boolean)
+    .join("\n\n");
+  return content.length > maxLength
+    ? `${content.slice(0, maxLength)}\n\n...[reference/config database truncated]...`
+    : content;
+}
 
 const PLAN_REQUIRED_PATTERNS = [
   /先.*(计划|方案|大纲|确认)|制定.*(计划|方案|大纲)|输出.*(计划|方案|大纲)|计划.*确认|确认.*计划/i,
@@ -98,9 +118,12 @@ const CHAPTER_DRAFT_PATTERNS = [
 ];
 
 function normalizeChatSkills(skills?: Partial<ChatSkills> | null): ChatSkills {
+  const rawMode = skills?.agentMode as unknown;
+  const agentMode: AgentMode = rawMode === "editor" ? "editor" : "writer";
   return {
     ...DEFAULT_CHAT_SKILLS,
     ...skills,
+    agentMode,
   };
 }
 
@@ -128,17 +151,81 @@ function shouldNeedPlan(content: string, mode: AgentMode): boolean {
   if (shouldForceCreateFile(trimmed)) return false;
   if (PLAN_REQUIRED_PATTERNS.some((pattern) => pattern.test(trimmed))) return true;
   if (trimmed.length > 3000) return true;
-  if (mode === "architect") {
-    return trimmed.length > 1200 && isProjectMemoryRelevant(trimmed);
-  }
-  if (mode === "smart") {
+  if (mode === "writer") {
     return trimmed.length > 1800 && isProjectMemoryRelevant(trimmed);
   }
   return false;
 }
 
 function isClarificationResponse(content: string): boolean {
-  return /(^|\n)##\s*Clarification Needed\b/i.test(content);
+  return /(^|\n)##\s*Clarification Needed\b/i.test(content) || parseClarificationQuestions(content).length > 0;
+}
+
+function extractClarificationJson(content: string): string | null {
+  const fenced = content.match(/```(?:json)?\s*\n([\s\S]*?)\n```/i);
+  if (fenced?.[1] && /"questions"\s*:/.test(fenced[1])) return fenced[1].trim();
+  const trimmed = content.trim();
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) return trimmed;
+
+  for (let start = trimmed.indexOf("{"); start !== -1; start = trimmed.indexOf("{", start + 1)) {
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let index = start; index < trimmed.length; index++) {
+      const char = trimmed[index];
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (char === "\\") {
+        escape = true;
+        continue;
+      }
+      if (char === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (inString) continue;
+      if (char === "{") depth += 1;
+      if (char === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          const candidate = trimmed.slice(start, index + 1);
+          if (/"questions"\s*:/.test(candidate)) return candidate;
+          break;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function parseClarificationQuestions(content: string): Array<{ id: string; question: string; options: string[]; allowCustom: boolean }> {
+  const json = extractClarificationJson(content);
+  if (!json) return [];
+  try {
+    const parsed = JSON.parse(json) as {
+      questions?: Array<{
+        id?: unknown;
+        question?: unknown;
+        options?: unknown;
+        allow_custom?: unknown;
+        allowCustom?: unknown;
+      }>;
+    };
+    if (!Array.isArray(parsed.questions)) return [];
+    return parsed.questions
+      .map((item, index) => ({
+        id: typeof item.id === "string" && item.id.trim() ? item.id.trim() : `q${index + 1}`,
+        question: typeof item.question === "string" ? item.question.trim() : "",
+        options: Array.isArray(item.options) ? item.options.filter((option): option is string => typeof option === "string") : [],
+        allowCustom: Boolean(item.allow_custom ?? item.allowCustom),
+      }))
+      .filter((item) => item.question);
+  } catch {
+    return [];
+  }
 }
 
 function createConversation(modelId: string | null, contextFilePath?: string | null): ConversationRecord {
@@ -163,12 +250,23 @@ function buildTitleFromMessage(content: string) {
 
 type WriteToolMetadata = {
   ok?: boolean;
-  action?: "create_file" | "edit_file";
+  action?: "create_file" | "edit_file" | "edit_docx";
   relativePath?: string;
   absolutePath?: string;
   fileType?: "text" | "docx";
   bytes?: number;
   edits?: number;
+};
+
+type ContextStrategy = "none" | "metadata" | "history-delta" | "snippet" | "full" | "structured";
+
+type PlannedDocumentContext = {
+  content: string;
+  strategy: ContextStrategy;
+  reason: string;
+  rawChars: number;
+  sentChars: number;
+  promptDebug: PromptDebugBreakdown;
 };
 
 function normalizeWorkspacePath(path: string) {
@@ -246,6 +344,65 @@ function summarizeToolResult(result: string) {
   return result.replace(/\s+/g, " ").slice(0, 220);
 }
 
+function createEditReviewDebug(enabled: boolean): EditReviewDebug {
+  return {
+    createdAt: new Date().toISOString(),
+    enabled,
+    triggered: false,
+    editCount: 0,
+    reviewedCount: 0,
+    skippedCount: 0,
+    originalChars: 0,
+    reviewedChars: 0,
+    durationMs: 0,
+    skipReasons: [],
+    fallbackReasons: [],
+  };
+}
+
+function addEditReviewDebugReason(items: string[], reason: string) {
+  if (!items.includes(reason)) items.push(reason);
+}
+
+function estimatePromptTokens(chars: number) {
+  return Math.ceil(chars / 3.2);
+}
+
+function truncateContextText(content: string, maxLength: number) {
+  if (content.length <= maxLength) return content;
+  const headLength = Math.floor(maxLength * 0.45);
+  const tailLength = Math.max(0, maxLength - headLength - 90);
+  return `${content.slice(0, headLength)}\n\n...[context truncated: ${content.length - maxLength} chars omitted]...\n\n${content.slice(-tailLength)}`;
+}
+
+function buildLocalSnippet(content: string, maxLength = 2400) {
+  return truncateContextText(content, maxLength);
+}
+
+function summarizeFileChanges(changes: FileChange[], maxChanges = 5) {
+  return changes.slice(-maxChanges).map((change, index) => {
+    const oldPart = truncateContextText(change.oldContent || "(empty)", 500);
+    const newPart = truncateContextText(change.newContent || "(empty)", 700);
+    return `Change ${index + 1} at ${change.timestamp}\nLines ${change.startLine}-${change.endLine}\nBefore:\n${oldPart}\nAfter:\n${newPart}`;
+  }).join("\n\n");
+}
+
+function hasExplicitFullContextRequest(content: string) {
+  return /全文|整章|全章|完整章节|完整上下文|完整续写参考|全文分析|整章结构|检查整章|生成蓝图|蓝图|全文检查|full\s+chapter|whole\s+chapter|entire\s+chapter|blueprint|complete\s+context/i.test(content);
+}
+
+function createPromptDebugBreakdown(entries: PromptDebugEntry[]): PromptDebugBreakdown {
+  const totalChars = entries.reduce((sum, entry) => sum + entry.chars, 0);
+  const dynamicChars = entries.filter((entry) => entry.dynamic).reduce((sum, entry) => sum + entry.chars, 0);
+  return {
+    createdAt: new Date().toISOString(),
+    totalChars,
+    totalEstimatedTokens: estimatePromptTokens(totalChars),
+    dynamicChars,
+    entries,
+  };
+}
+
 const CopilotActiveFileContextLabel = React.memo(function CopilotActiveFileContextLabel() {
   const activeFileName = useFileStore((state) => state.activeFile?.name ?? null);
   const { t } = useTranslation();
@@ -258,9 +415,10 @@ const CopilotActiveFileContextLabel = React.memo(function CopilotActiveFileConte
 
 const CopilotPanel: React.FC = () => {
   const rootPath = useFileStore((state) => state.rootPath);
+  const referenceLists = useFileStore((state) => state.referenceLists);
   const refreshLoadedWorkspace = useFileStore((state) => state.refreshLoadedWorkspace);
   const { loadBlueprints } = useBlueprintStore();
-  const { modelProfiles, defaultChatModelId, getModelProfileById, chatMaxTokens, setChatMaxTokens, contextMaxLength, webSearchLimit } = useSettingsStore();
+  const { modelProfiles, defaultChatModelId, defaultEditReviewModelId, getModelProfileById, chatMaxTokens, setChatMaxTokens, contextMaxLength, webSearchLimit } = useSettingsStore();
   const { t } = useTranslation();
   const [conversationSummaries, setConversationSummaries] = useState<ConversationSummary[]>([]);
   const [activeConversation, setActiveConversation] = useState<ConversationRecord | null>(null);
@@ -280,6 +438,8 @@ const CopilotPanel: React.FC = () => {
   const [, setWebSearchCount] = useState(0);
   const [currentAssistantText, setCurrentAssistantText] = useState("");
   const [currentAssistantWorkItems, setCurrentAssistantWorkItems] = useState<ConversationWorkItem[]>([]);
+  const [clarificationDraftAnswers, setClarificationDraftAnswers] = useState<Record<string, string>>({});
+  const [submittedClarificationIds, setSubmittedClarificationIds] = useState<Set<string>>(new Set());
   const [agentTodo, setAgentTodo] = useState<{
     tool: string;
     path: string;
@@ -296,6 +456,11 @@ const CopilotPanel: React.FC = () => {
     () => getModelProfileById(activeConversation?.modelId || defaultChatModelId),
     [activeConversation?.modelId, defaultChatModelId, getModelProfileById, modelProfiles]
   );
+  const editReviewModel = useMemo(
+    () => getModelProfileById(defaultEditReviewModelId) || getModelProfileById(defaultChatModelId),
+    [defaultChatModelId, defaultEditReviewModelId, getModelProfileById, modelProfiles]
+  );
+  const activeInputModel = chatSkills.agentMode === "editor" ? editReviewModel : currentModel;
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -391,9 +556,11 @@ const CopilotPanel: React.FC = () => {
     const activeFileCache = fileCachesRef.current.get(activeFile.path);
     const activeCachedContent = activeFileCache?.content ?? null;
 
-    const activeChanges = activeCachedContent
+    const cacheChanges = activeCachedContent
       ? calculateChanges(activeCachedContent, currentContent)
       : [];
+    const trackedChanges = useFileStore.getState().getFileChanges(activeFile.path);
+    const activeChanges = [...trackedChanges, ...cacheChanges].slice(-8);
 
     // 同步更新缓存
     updateFileCache(activeFile.path, currentContent);
@@ -415,7 +582,10 @@ const CopilotPanel: React.FC = () => {
             lineCount: tabStats.lines,
             wordCount: tabStats.words,
           },
-          recentChanges: calculateChanges(cache.content, tabContent),
+          recentChanges: [
+            ...useFileStore.getState().getFileChanges(path),
+            ...calculateChanges(cache.content, tabContent),
+          ].slice(-8),
         };
       });
 
@@ -452,13 +622,121 @@ const CopilotPanel: React.FC = () => {
     };
   };
 
+  const buildPlannedDocumentContext = (
+    requestContent: string,
+    multiFileContext: MultiFileContext | undefined,
+    conversationHistory: ConversationMessage[],
+    forceFull = false
+  ): PlannedDocumentContext => {
+    const active = multiFileContext?.activeFile;
+    const rawContent = active?.content ?? "";
+    const recentTurns = conversationHistory
+      .slice(-5)
+      .map((message) => `${message.role}: ${truncateContextText(message.content, 500)}`)
+      .join("\n\n");
+    const recentTurnsBlock = recentTurns ? `\n\n## Recent Short History\n${recentTurns}` : "";
+
+    let strategy: ContextStrategy = "none";
+    let reason = "No active document context.";
+    let body = "";
+
+    if (active) {
+      const metaBlock = `## Current File Metadata\nFile: ${active.meta.fileName}\nPath: ${active.meta.filePath}\nStats: ${active.meta.charCount} chars, ${active.meta.lineCount} lines, ${active.meta.wordCount} words`;
+      const fullRequested = forceFull || hasExplicitFullContextRequest(requestContent);
+      if (fullRequested) {
+        strategy = "full";
+        reason = forceFull ? "Plan or workflow explicitly requested full context." : "User explicitly requested full-chapter or blueprint-level context.";
+        body = `${metaBlock}\n\n## Full Current File\n${rawContent}`;
+      } else if (active.recentChanges.length > 0) {
+        strategy = "history-delta";
+        reason = "Ordinary follow-up uses recent History deltas instead of the full document.";
+        body = `${metaBlock}\n\n## Current File History Delta\n${summarizeFileChanges(active.recentChanges)}`;
+        const snippet = buildLocalSnippet(rawContent, 1600);
+        if (snippet.trim()) {
+          body += `\n\n## Local Snippet\n${snippet}`;
+        }
+      } else if (rawContent.trim()) {
+        strategy = "snippet";
+        reason = "No recent History delta is available, so a bounded snippet is used.";
+        body = `${metaBlock}\n\n## Current File Snippet\n${buildLocalSnippet(rawContent)}`;
+      } else {
+        strategy = "metadata";
+        reason = "The active file is empty or unavailable; only metadata is useful.";
+        body = metaBlock;
+      }
+    }
+
+    const content = `${body}${recentTurnsBlock}`.trim();
+    const sentChars = content.length;
+    const entries: PromptDebugEntry[] = [
+      {
+        label: "Stable system / workflow rules",
+        chars: 0,
+        sentChars: 0,
+        estimatedTokens: 0,
+        dynamic: false,
+        cacheFriendly: "high",
+        strategy: "stable",
+      },
+    ];
+
+    if (active) {
+      entries.push({
+        label: active.meta.fileName,
+        chars: sentChars,
+        rawChars: rawContent.length,
+        sentChars,
+        estimatedTokens: estimatePromptTokens(sentChars),
+        dynamic: true,
+        cacheFriendly: strategy === "full" ? "low" : strategy === "history-delta" ? "medium" : "high",
+        strategy,
+        reason,
+      });
+    } else {
+      entries.push({
+        label: "Current file",
+        chars: 0,
+        rawChars: 0,
+        sentChars: 0,
+        estimatedTokens: 0,
+        dynamic: true,
+        cacheFriendly: "high",
+        strategy,
+        reason,
+      });
+    }
+
+    if (recentTurnsBlock) {
+      entries.push({
+        label: "Recent 5 turns",
+        chars: recentTurnsBlock.length,
+        sentChars: recentTurnsBlock.length,
+        estimatedTokens: estimatePromptTokens(recentTurnsBlock.length),
+        dynamic: true,
+        cacheFriendly: "medium",
+        strategy: "structured",
+      });
+    }
+
+    return {
+      content,
+      strategy,
+      reason,
+      rawChars: rawContent.length,
+      sentChars,
+      promptDebug: createPromptDebugBreakdown(entries),
+    };
+  };
+
   const loadConversation = async (conversationId: string, expectedRootPath = rootPath) => {
     const record = await readConversation(conversationId);
     if (expectedRootPath !== useFileStore.getState().rootPath) return;
     if (!record) return;
-    setActiveConversation(record);
-    setInput(record.draftInput || "");
-    setDraftAttachments([]);
+        setActiveConversation(record);
+        setInput(record.draftInput || "");
+        setDraftAttachments([]);
+        setClarificationDraftAnswers({});
+        setSubmittedClarificationIds(new Set());
   };
 
   const persistConversation = async (record: ConversationRecord) => {
@@ -506,6 +784,8 @@ const CopilotPanel: React.FC = () => {
     setDraftAttachments([]);
     setCurrentAssistantText("");
     setCurrentAssistantWorkItems([]);
+    setClarificationDraftAnswers({});
+    setSubmittedClarificationIds(new Set());
     setAgentTodo(null);
     setIsLoading(false);
     setIsAgentModeMenuOpen(false);
@@ -647,6 +927,10 @@ const CopilotPanel: React.FC = () => {
     attachments?: ConversationAttachment[];
     skills?: ChatSkills;
     clearPendingPlan?: boolean;
+    answeredClarification?: {
+      messageId: string;
+      answers: Array<{ questionId: string; question: string; answer: string }>;
+    };
   }) => {
     const messageContent = (override?.content ?? input).trim();
     const requestAttachments = override?.attachments ?? draftAttachments;
@@ -655,15 +939,18 @@ const CopilotPanel: React.FC = () => {
     const defaultChapterToDocx = shouldDefaultChapterToDocx(messageContent);
     if (!override) {
       const hasPendingClarification = Boolean(activeConversation?.pendingClarification);
-      const needPlan = shouldNeedPlan(messageContent, requestSkills.agentMode);
+      const needPlan = requestSkills.agentMode === "editor" ? false : shouldNeedPlan(messageContent, requestSkills.agentMode);
       requestSkills = {
         ...requestSkills,
-        agentSubMode: requestSkills.forcePlanMode || hasPendingClarification
+        agentSubMode: requestSkills.agentMode === "editor"
+          ? "build"
+          : requestSkills.forcePlanMode || hasPendingClarification
           ? "plan"
           : forceCreateFile ? "build" : needPlan ? "plan" : "build",
       };
     }
-    if (!messageContent || !activeConversation || !currentModel || isLoading) return;
+    const requestModel = requestSkills.agentMode === "editor" ? editReviewModel : currentModel;
+    if (!messageContent || !activeConversation || !requestModel || isLoading) return;
     const rootPathAtStart = rootPath;
     const isWorkspaceCurrent = () => rootPathAtStart === useFileStore.getState().rootPath;
 
@@ -679,8 +966,21 @@ const CopilotPanel: React.FC = () => {
       skills: requestSkills,
     };
 
-    const nextMessages = [...activeConversation.messages, userMessage];
-    const pendingClarification = !override ? activeConversation.pendingClarification ?? null : null;
+    const baseMessages = override?.answeredClarification
+      ? activeConversation.messages.map((message) => message.id === override.answeredClarification?.messageId
+          ? { ...message, clarificationAnswers: override.answeredClarification.answers }
+          : message)
+      : activeConversation.messages;
+    const nextMessages = [...baseMessages, userMessage];
+    const pendingClarification = !override || override.answeredClarification
+      ? activeConversation.pendingClarification ?? null
+      : null;
+    const nextPendingClarification = activeConversation.pendingClarification && override?.answeredClarification?.messageId === activeConversation.pendingClarification.messageId
+      ? {
+          ...activeConversation.pendingClarification,
+          answers: override.answeredClarification.answers,
+        }
+      : activeConversation.pendingClarification ?? null;
     const draftRecord: ConversationRecord = {
       ...activeConversation,
       title: activeConversation.messages.length === 0 ? buildTitleFromMessage(userMessage.content) : activeConversation.title,
@@ -689,7 +989,7 @@ const CopilotPanel: React.FC = () => {
       messages: nextMessages,
       draftInput: "",
       pendingPlan: override?.clearPendingPlan ? null : activeConversation.pendingPlan ?? null,
-      pendingClarification: activeConversation.pendingClarification ?? null,
+      pendingClarification: nextPendingClarification,
     };
 
     if (!override) {
@@ -731,13 +1031,55 @@ const CopilotPanel: React.FC = () => {
         setStatusText(fileSizeWarning);
       }
 
-      // 更新文件缓存
-      if (activeFileAtStart) {
-        updateFileCache(activeFileAtStart.path, activeFileAtStart.content);
+      if (requestSkills.agentMode === "editor") {
+        const referenceContext = serializeReferenceListsForReview(referenceLists);
+        const targetContent = activeFileAtStart?.content || getEditorContent() || "";
+        const startedAt = performance.now();
+        setStatusText("AI编辑审核中...");
+        const editorResponse = await callEditorRoleReview({
+          modelProfile: requestModel,
+          userInstruction: userMessage.content,
+          targetContent,
+          filePath: activeFileAtStart?.path,
+          referenceContext,
+          maxTokens: Math.min(Math.max(chatMaxTokens, 1024), 4096),
+        });
+        if (!isWorkspaceCurrent()) return;
+        const assistantMessage: ConversationMessage = {
+          id: createId("msg"),
+          role: "assistant",
+          content: editorResponse || "编辑审核未返回内容。",
+          createdAt: new Date().toISOString(),
+          editReviewDebug: {
+            ...createEditReviewDebug(true),
+            triggered: true,
+            modelLabel: requestModel.label,
+            modelId: requestModel.id,
+            filePath: activeFileAtStart?.path,
+            editCount: 1,
+            reviewedCount: 1,
+            originalChars: targetContent.length,
+            reviewedChars: editorResponse.length,
+            durationMs: Math.round(performance.now() - startedAt),
+          },
+        };
+        const finalRecord: ConversationRecord = {
+          ...draftRecord,
+          updatedAt: new Date().toISOString(),
+          messages: [...draftRecord.messages, assistantMessage],
+          chatSkills: requestSkills,
+          pendingPlan: null,
+        };
+        await persistConversation(finalRecord);
+        return;
       }
-      if (!isWorkspaceCurrent()) return;
 
       const multiFileContext = buildMultiFileContext();
+      const plannedContext = buildPlannedDocumentContext(
+        userMessage.content,
+        multiFileContext,
+        nextMessages.slice(-6, -1)
+      );
 
       // 构建目录结构字符串
       const directoryTree = buildDirectoryTreeString(filesAtStart);
@@ -758,15 +1100,13 @@ const CopilotPanel: React.FC = () => {
         const basePlanRequest = pendingClarification
           ? `The user is answering a previous clarification question. Continue planning from the original request and the new answer.\n\n## Original Request\n${pendingClarification.userMessage.content}\n\n## Clarification Question\n${pendingClarification.promptContent}\n\n## User Answer\n${userMessage.content}\n\nNow produce the formal plan if enough information is available. If information is still missing, output a new "## Clarification Needed" section and ask only the missing questions.`
           : userMessage.content;
-        const planRequest = requestSkills.agentMode === "architect"
-          ? `${basePlanRequest}\n\nNeedPlan 已触发。请先输出执行计划，并额外进行一次 Plan Review：检查故事逻辑、伏笔、风险、缺失信息和验证方式。现在不要写文件、不要生成正文。\n\nIf essential information is missing, do not pretend this is a plan. Output exactly a "## Clarification Needed" section with the questions instead.`
-          : `${basePlanRequest}\n\nNeedPlan 已触发。请先输出执行计划，等待用户确认后再生成蓝图、正文或修改文件。现在不要写文件。\n\nIf essential information is missing, do not pretend this is a plan. Output exactly a "## Clarification Needed" section with the questions instead.`;
+        const planRequest = `${basePlanRequest}\n\nNeedPlan 已触发。请先输出执行计划，等待用户确认后再生成蓝图、正文或修改文件。现在不要写文件。\n\nIf essential information is missing, do not pretend this is a plan. Output exactly a "## Clarification Needed" section with the questions instead.`;
 
         const planResponse = await callAI({
-          modelProfile: currentModel,
+          modelProfile: requestModel,
           taskType: "chat",
           userMessage: planRequest,
-          documentContext: multiFileContext?.activeFile.content || activeFileAtStart?.content || getEditorContent() || "",
+          documentContext: plannedContext.content,
           documentFileName: activeFileAtStart?.name,
           maxTokens: chatMaxTokens,
           conversationHistory: nextMessages.slice(-6, -1),
@@ -785,13 +1125,21 @@ const CopilotPanel: React.FC = () => {
           role: "assistant",
           content: stripToolCalls(planResponse),
           createdAt: new Date().toISOString(),
+          promptDebug: plannedContext.promptDebug,
         };
         const isClarification = isClarificationResponse(assistantMessage.content);
+        const clarificationQuestions = parseClarificationQuestions(assistantMessage.content);
+        const finalPlanSkills: ChatSkills = isClarification
+          ? planSkills
+          : {
+              ...planSkills,
+              forcePlanMode: false,
+            };
         const finalRecord: ConversationRecord = {
           ...draftRecord,
           updatedAt: new Date().toISOString(),
           messages: [...draftRecord.messages, assistantMessage],
-          chatSkills: planSkills,
+          chatSkills: finalPlanSkills,
           pendingClarification: isClarification
             ? {
                 messageId: assistantMessage.id,
@@ -799,6 +1147,9 @@ const CopilotPanel: React.FC = () => {
                 promptContent: assistantMessage.content,
                 agentMode: requestSkills.agentMode,
                 createdAt: new Date().toISOString(),
+                questions: clarificationQuestions,
+                currentIndex: 0,
+                answers: [],
               }
             : null,
           pendingPlan: isClarification
@@ -812,6 +1163,7 @@ const CopilotPanel: React.FC = () => {
               },
         };
         await persistConversation(finalRecord);
+        setChatSkills(finalPlanSkills);
         return;
       }
 
@@ -821,12 +1173,12 @@ const CopilotPanel: React.FC = () => {
       };
 
       let response = await callAI({
-        modelProfile: currentModel,
+        modelProfile: requestModel,
         taskType: "chat",
         userMessage: override?.clearPendingPlan
-          ? `用户已确认以下计划，请按计划执行。先生成或更新蓝图，再生成正文或完成必要文件操作${activeConversation.pendingPlan?.agentMode === "architect" ? "，然后进行一致性检查并根据检查结果做必要精修" : ""}，最后输出 Memory Candidate。\n\n## 原始需求\n${activeConversation.pendingPlan?.userMessage.content ?? userMessage.content}\n\n## 已确认计划\n${activeConversation.pendingPlan?.planContent ?? ""}\n\n## 本次指令\n${userMessage.content}`
+          ? `用户已确认以下计划，请直接按计划执行，不要重新制定计划。若计划已经给出明确文件、位置和插入文本，请优先调用对应写入工具，不要为了重复确认而重读全文。执行完成后简要说明结果；只有项目状态确实变化时才输出 Memory Candidate。\n\n## 原始需求\n${activeConversation.pendingPlan?.userMessage.content ?? userMessage.content}\n\n## 已确认计划\n${activeConversation.pendingPlan?.planContent ?? ""}\n\n## 本次指令\n${userMessage.content}`
           : withCreateFileDirective(userMessage.content),
-        documentContext: multiFileContext?.activeFile.content || activeFileAtStart?.content || getEditorContent() || "",
+        documentContext: plannedContext.content,
         documentFileName: activeFileAtStart?.name,
         maxTokens: undefined,
         conversationHistory: nextMessages.slice(-6, -1),
@@ -843,7 +1195,7 @@ const CopilotPanel: React.FC = () => {
       // 实现多轮工具调用循环
       let currentResponse = response;
       const maxIterations = 100;
-      const WRITE_TOOLS = new Set(["edit_file", "create_file", "create_blueprint"]);
+      const WRITE_TOOLS = new Set(["edit_file", "edit_docx", "create_file", "create_blueprint"]);
       let hasSuccessfulCreateFile = false;
       let createFileRecoveryAttempted = false;
 
@@ -1008,13 +1360,23 @@ const CopilotPanel: React.FC = () => {
         const relativePath = metadata?.relativePath ?? normalizeWorkspacePath(fallbackPath);
         const absolutePath = metadata?.absolutePath ?? (rootPath && relativePath ? joinWorkspacePath(rootPath, relativePath) : "");
         if (!relativePath || !absolutePath) return;
+        const previousContent = fileCachesRef.current.get(absolutePath)?.content
+          ?? (activeFileAtStart?.path === absolutePath ? activeFileAtStart.content : "");
 
         await refreshLoadedWorkspace(absolutePath);
 
         const latestStore = useFileStore.getState();
+        await latestStore.recordExternalFileSnapshot(absolutePath, "manual").catch(() => undefined);
         const node = findWorkspaceNode(latestStore.files, absolutePath);
         if (node?.type === "file") {
           await latestStore.openFile(absolutePath, latestStore.activeGroupId);
+          const openedTab = useFileStore.getState().getOpenTabs().find((tab) => tab.path === absolutePath);
+          if (openedTab) {
+            if (previousContent !== openedTab.content) {
+              useFileStore.getState().trackFileChange(absolutePath, previousContent, openedTab.content);
+            }
+            updateFileCache(absolutePath, openedTab.content);
+          }
           setStatusText(`${name === "create_file" ? "已创建" : "已更新"}：${relativePath}`);
           return;
         }
@@ -1023,16 +1385,42 @@ const CopilotPanel: React.FC = () => {
       };
 
       const MAX_EDIT_REVIEW_CONTENT_LENGTH = 8000;
+      const editReviewDebug = createEditReviewDebug(requestSkills.enableEditReview);
+      if (requestSkills.agentSubMode === "plan") {
+        addEditReviewDebugReason(editReviewDebug.skipReasons, "Plan mode skips edit_file auto review.");
+      }
       const reviewEditFileArgs = async (args: Record<string, unknown>): Promise<Record<string, unknown>> => {
-        if (requestSkills.agentSubMode === "plan") return args;
+        const startedAt = performance.now();
+        if (requestSkills.agentSubMode === "plan") {
+          addEditReviewDebugReason(editReviewDebug.skipReasons, "Plan mode skips edit_file auto review.");
+          return args;
+        }
+        if (!requestSkills.enableEditReview) {
+          addEditReviewDebugReason(editReviewDebug.skipReasons, "Auto review is disabled.");
+          return args;
+        }
         const path = typeof args.path === "string" ? args.path : "";
         const edits = args.edits;
-        if (!path || !Array.isArray(edits) || edits.length === 0 || !rootPath || !currentModel) return args;
+        if (!path || !Array.isArray(edits) || edits.length === 0) {
+          addEditReviewDebugReason(editReviewDebug.skipReasons, "edit_file args are missing path or edits.");
+          return args;
+        }
+        editReviewDebug.editCount += edits.length;
+        editReviewDebug.filePath = path;
+        editReviewDebug.modelLabel = editReviewModel?.label;
+        editReviewDebug.modelId = editReviewModel?.id;
+        if (!rootPath || !editReviewModel) {
+          addEditReviewDebugReason(editReviewDebug.skipReasons, "Workspace or edit review model is unavailable.");
+          editReviewDebug.skippedCount += edits.length;
+          return args;
+        }
 
         let originalContent = "";
         try {
           originalContent = await readFile(joinWorkspacePath(rootPath, path));
         } catch {
+          addEditReviewDebugReason(editReviewDebug.skipReasons, "Could not read original file content.");
+          editReviewDebug.skippedCount += edits.length;
           return args;
         }
         if (!isWorkspaceCurrent()) return args;
@@ -1049,6 +1437,8 @@ const CopilotPanel: React.FC = () => {
           const typedEdit = edit as { startLine?: unknown; endLine?: unknown; newContent?: unknown };
           const newContent = typeof typedEdit.newContent === "string" ? typedEdit.newContent : "";
           if (!newContent.trim() || newContent.length > MAX_EDIT_REVIEW_CONTENT_LENGTH) {
+            addEditReviewDebugReason(editReviewDebug.skipReasons, !newContent.trim() ? "Empty edit content skipped." : "Edit content exceeds auto review length limit.");
+            editReviewDebug.skippedCount += 1;
             reviewedEdits.push(edit);
             continue;
           }
@@ -1060,23 +1450,32 @@ const CopilotPanel: React.FC = () => {
             : "";
 
           try {
+            editReviewDebug.triggered = true;
+            editReviewDebug.originalChars += newContent.length;
             setStatusText(`AI编辑审核中：${path}`);
             const reviewedContent = await reviewEditFileContent({
-              modelProfile: currentModel,
+              modelProfile: editReviewModel,
               filePath: path,
               originalContent: originalSnippet,
               proposedContent: newContent,
+              referenceContext: serializeReferenceListsForReview(referenceLists),
               maxTokens: Math.min(Math.max(chatMaxTokens, 1024), 4096),
             });
             if (!isWorkspaceCurrent()) return args;
+            const finalContent = reviewedContent.trim() ? reviewedContent : newContent;
             reviewedEdits.push({
               ...typedEdit,
-              newContent: reviewedContent.trim() ? reviewedContent : newContent,
+              newContent: finalContent,
             });
+            editReviewDebug.reviewedCount += 1;
+            editReviewDebug.reviewedChars += finalContent.length;
           } catch {
+            addEditReviewDebugReason(editReviewDebug.fallbackReasons, "Review model failed; original edit content was used.");
+            editReviewDebug.skippedCount += 1;
             reviewedEdits.push(edit);
           }
         }
+        editReviewDebug.durationMs += Math.round(performance.now() - startedAt);
 
         return {
           ...args,
@@ -1097,10 +1496,10 @@ const CopilotPanel: React.FC = () => {
             createFileRecoveryAttempted = true;
             setStatusText("需要实际创建文件，正在要求 AI 补充 create_file...");
             currentResponse = await callAI({
-              modelProfile: currentModel,
+              modelProfile: requestModel,
               taskType: "chat",
               userMessage: withCreateFileDirective(`用户要求实际创建或保存文件，但你上一轮没有调用 create_file。请现在只输出必要的 create_file 工具调用，path 使用工作区相对路径，content 使用完整正文纯文本。${defaultChapterToDocx ? "这是章节正文文件，除非用户明确指定其他扩展名，否则必须使用 .docx。" : ""}`),
-              documentContext: multiFileContext?.activeFile.content || activeFileAtStart?.content || getEditorContent() || "",
+              documentContext: plannedContext.content,
               documentFileName: activeFileAtStart?.name,
               maxTokens: undefined,
               conversationHistory: nextMessages.slice(-6, -1),
@@ -1181,10 +1580,10 @@ const CopilotPanel: React.FC = () => {
               setAgentTodo(prev => prev ? { ...prev, status: "continuing" } : null);
 
               currentResponse = await callAI({
-                modelProfile: currentModel,
+                modelProfile: requestModel,
                 taskType: "chat",
                 userMessage: `Your previous edit_file response was truncated. Here's your progress:\n\n${JSON.stringify(todoInfo, null, 2)}\n\nPlease continue the edit_file operation for "${partial.path}". Apply only the remaining edits that were not completed.`,
-                documentContext: multiFileContext?.activeFile.content || activeFileAtStart?.content || getEditorContent() || "",
+                documentContext: plannedContext.content,
                 documentFileName: activeFileAtStart?.name,
                 maxTokens: undefined,
                 conversationHistory: nextMessages.slice(-6, -1),
@@ -1290,10 +1689,10 @@ const CopilotPanel: React.FC = () => {
           }
 
           currentResponse = await callAI({
-            modelProfile: currentModel,
+            modelProfile: requestModel,
             taskType: "chat",
             userMessage: `Tool Results:\n\n${toolContext}\n\nContinue the user's TODO workflow. If the next TODO needs a tool, output only valid fenced tool_call JSON blocks in this response. Do not stop at a prose statement that you will use a tool. If you have enough information, provide the final answer. For blueprint creation, use create_blueprint before summarizing, and do not limit the blueprint to a fixed number of nodes; create the content-derived nodes and edges the source actually needs.`,
-            documentContext: multiFileContext?.activeFile.content || activeFileAtStart?.content || getEditorContent() || "",
+            documentContext: plannedContext.content,
             documentFileName: activeFileAtStart?.name,
             maxTokens: undefined,
             conversationHistory: nextMessages.slice(-6, -1),
@@ -1345,6 +1744,9 @@ const CopilotPanel: React.FC = () => {
       await persistFileCaches();
       if (!isWorkspaceCurrent()) return;
 
+      if (editReviewDebug.enabled && editReviewDebug.editCount === 0 && requestSkills.agentSubMode !== "plan") {
+        addEditReviewDebugReason(editReviewDebug.skipReasons, "No edit_file tool call was executed.");
+      }
       const assistantMessage: ConversationMessage = {
         id: createId("msg"),
         role: "assistant",
@@ -1352,12 +1754,34 @@ const CopilotPanel: React.FC = () => {
         createdAt: new Date().toISOString(),
         searchCount: requestSearchCount > 0 ? requestSearchCount : undefined,
         workItems: workItems.length > 0 ? workItems : undefined,
+        promptDebug: plannedContext.promptDebug,
+        editReviewDebug: editReviewDebug.enabled || editReviewDebug.editCount > 0 ? editReviewDebug : undefined,
       };
+      const finalClarificationQuestions = parseClarificationQuestions(assistantMessage.content);
+      const isFinalClarification = finalClarificationQuestions.length > 0;
       const finalRecord: ConversationRecord = {
         ...draftRecord,
         updatedAt: new Date().toISOString(),
         messages: [...draftRecord.messages, assistantMessage],
-        chatSkills: requestSkills,
+        chatSkills: isFinalClarification
+          ? {
+              ...requestSkills,
+              agentSubMode: "plan",
+              forcePlanMode: true,
+            }
+          : requestSkills,
+        pendingClarification: isFinalClarification
+          ? {
+              messageId: assistantMessage.id,
+              userMessage,
+              promptContent: assistantMessage.content,
+              agentMode: requestSkills.agentMode,
+              createdAt: new Date().toISOString(),
+              questions: finalClarificationQuestions,
+              currentIndex: 0,
+              answers: [],
+            }
+          : null,
         pendingPlan: null,
       };
       await persistConversation(finalRecord);
@@ -1400,8 +1824,9 @@ const CopilotPanel: React.FC = () => {
 
     const buildSkills: ChatSkills = {
       ...normalizeChatSkills(activeConversation?.chatSkills ?? chatSkills),
-      agentMode: pendingPlan.agentMode,
+      agentMode: pendingPlan.agentMode === "editor" ? "editor" : "writer",
       agentSubMode: "build",
+      forcePlanMode: false,
     };
 
     await handleSendMessage({
@@ -1409,6 +1834,69 @@ const CopilotPanel: React.FC = () => {
       attachments: pendingPlan.userMessage.attachments ?? [],
       skills: buildSkills,
       clearPendingPlan: true,
+    });
+  };
+
+  const handleSubmitClarificationAnswers = async (source?: {
+    messageId: string;
+    promptContent: string;
+    questions: Array<{ id: string; question: string; options: string[]; allowCustom: boolean }>;
+  }) => {
+    if (!activeConversation) return;
+    const pendingClarification = activeConversation.pendingClarification;
+    const sourceMessage = source
+      ? activeConversation.messages.find((message) => message.id === source.messageId)
+      : null;
+    const messageId = pendingClarification?.messageId ?? source?.messageId;
+    if (!messageId) return;
+    if (submittedClarificationIds.has(messageId) || (pendingClarification?.answers?.length ?? 0) > 0 || (sourceMessage?.clarificationAnswers?.length ?? 0) > 0) {
+      setStatusText("这组问题已经提交过答案。");
+      return;
+    }
+    const questions = pendingClarification?.questions?.length
+      ? pendingClarification.questions
+      : source?.questions?.length
+        ? source.questions
+        : parseClarificationQuestions(source?.promptContent ?? pendingClarification?.promptContent ?? "");
+    if (questions.length === 0) return;
+
+    const missing = questions.find((question) => !clarificationDraftAnswers[question.id]?.trim());
+    if (missing) {
+      setStatusText(`请先回答：${missing.question}`);
+      return;
+    }
+
+    const answers = questions.map((question) => ({
+      questionId: question.id,
+      question: question.question,
+      answer: clarificationDraftAnswers[question.id].trim(),
+    }));
+    const answerText = answers
+      .map((answer) => `- ${answer.questionId} ${answer.question}\n  答：${answer.answer}`)
+      .join("\n");
+    const previousUserMessage = pendingClarification?.userMessage
+      ?? [...activeConversation.messages].reverse().find((message) => message.role === "user")
+      ?? {
+        id: createId("msg"),
+        role: "user" as const,
+        content: "",
+        createdAt: new Date().toISOString(),
+      };
+    setSubmittedClarificationIds((current) => new Set(current).add(messageId));
+    setClarificationDraftAnswers({});
+    await handleSendMessage({
+      content: `以下是对澄清问题的回答：\n${answerText}`,
+      attachments: previousUserMessage.attachments ?? [],
+      skills: {
+        ...normalizeChatSkills(activeConversation?.chatSkills ?? chatSkills),
+        agentMode: pendingClarification?.agentMode === "editor" ? "editor" : "writer",
+        agentSubMode: "plan",
+        forcePlanMode: true,
+      },
+      answeredClarification: {
+        messageId,
+        answers,
+      },
     });
   };
 
@@ -1522,9 +2010,100 @@ const CopilotPanel: React.FC = () => {
                     </div>
                   </details>
                 )}
-                <div className="message-text">
-                  <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
-                </div>
+                {(() => {
+                  const clarificationQuestions = msg.role === "assistant" ? parseClarificationQuestions(msg.content) : [];
+                  const isActiveClarification = activeConversation?.pendingClarification?.messageId === msg.id && clarificationQuestions.length > 0;
+                  const latestClarificationMessageId = [...(activeConversation?.messages ?? [])]
+                    .reverse()
+                    .find((message) => message.role === "assistant" && parseClarificationQuestions(message.content).length > 0)?.id;
+                  const isRecoverableClarification = !activeConversation?.pendingClarification
+                    && latestClarificationMessageId === msg.id
+                    && clarificationQuestions.length > 0
+                    && !msg.clarificationAnswers?.length;
+                  if (clarificationQuestions.length === 0) {
+                    return (
+                      <div className="message-text">
+                        <Markdown remarkPlugins={[remarkGfm]}>{msg.content}</Markdown>
+                      </div>
+                    );
+                  }
+                  const savedAnswers = msg.clarificationAnswers
+                    ?? (isActiveClarification ? activeConversation?.pendingClarification?.answers : undefined)
+                    ?? [];
+                  const isAnsweredClarification = savedAnswers.length > 0 || submittedClarificationIds.has(msg.id);
+                  const canSubmitClarification = (isActiveClarification || isRecoverableClarification) && !isAnsweredClarification;
+                  return (
+                    <div className={`clarification-card ${isAnsweredClarification ? "answered" : !isActiveClarification ? "inactive" : ""}`}>
+                      <div className="clarification-title">
+                        {isAnsweredClarification ? "已提交的补充信息" : isActiveClarification ? "需要补充几个选择" : "历史澄清问题"}
+                      </div>
+                      {clarificationQuestions.map((question, questionIndex) => (
+                        <div key={question.id} className="clarification-question">
+                          <div className="clarification-question-title">
+                            {questionIndex + 1}. {question.question}
+                          </div>
+                          {isAnsweredClarification && (
+                            <div className="clarification-answer">
+                              {savedAnswers.find((answer) => answer.questionId === question.id)?.answer || "已提交"}
+                            </div>
+                          )}
+                          {question.options.length > 0 && (
+                            <div className="clarification-options">
+                              {question.options.map((option) => (
+                                <button
+                                  key={option}
+                                  type="button"
+                                  className={[
+                                    clarificationDraftAnswers[question.id] === option ? "active" : "",
+                                    savedAnswers.find((answer) => answer.questionId === question.id)?.answer === option ? "answered" : "",
+                                  ].filter(Boolean).join(" ")}
+                                  onClick={() => setClarificationDraftAnswers((current) => ({
+                                    ...current,
+                                    [question.id]: option,
+                                  }))}
+                                  disabled={isLoading || !canSubmitClarification}
+                                >
+                                  {option}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                          {question.allowCustom && canSubmitClarification && (
+                            <input
+                              className="clarification-custom-input"
+                              value={clarificationDraftAnswers[question.id] ?? ""}
+                              onChange={(event) => setClarificationDraftAnswers((current) => ({
+                                ...current,
+                                [question.id]: event.target.value,
+                              }))}
+                              placeholder="也可以直接输入自定义答案"
+                              disabled={isLoading}
+                            />
+                          )}
+                        </div>
+                      ))}
+                      {canSubmitClarification ? (
+                        <div className="clarification-actions">
+                          <button
+                            className="plan-confirm-button"
+                            onClick={() => void handleSubmitClarificationAnswers({
+                              messageId: msg.id,
+                              promptContent: msg.content,
+                              questions: clarificationQuestions,
+                            })}
+                            disabled={isLoading || clarificationQuestions.some((question) => !clarificationDraftAnswers[question.id]?.trim())}
+                          >
+                            提交回答并继续
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="clarification-note">
+                          {isAnsweredClarification ? "这组问题已经提交过答案。" : "这组历史问题已不再等待提交。"}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
                 {msg.attachments && msg.attachments.length > 0 && (
                   <div className="message-attachments">
                     {msg.attachments.map((attachment) => (
@@ -1550,6 +2129,58 @@ const CopilotPanel: React.FC = () => {
                   <div className="message-search-count">
                     {t("copilot.searchCount", { count: msg.searchCount, limit: webSearchLimit })}
                   </div>
+                )}
+                {msg.role === "assistant" && msg.promptDebug && (
+                  <details className="prompt-debug">
+                    <summary>
+                      上下文调试：{msg.promptDebug.totalChars.toLocaleString()} chars / ~{msg.promptDebug.totalEstimatedTokens.toLocaleString()} tokens
+                    </summary>
+                    <div className="prompt-debug-list">
+                      {msg.promptDebug.entries.map((entry, index) => (
+                        <div key={`${msg.id}-prompt-${index}`} className={`prompt-debug-row ${entry.cacheFriendly === "low" ? "high" : entry.cacheFriendly === "medium" ? "medium" : "low"}`}>
+                          <span>{entry.label}</span>
+                          <strong>{entry.strategy || "structured"}</strong>
+                          <small>
+                            raw {entry.rawChars?.toLocaleString() ?? "-"} / sent {(entry.sentChars ?? entry.chars).toLocaleString()} chars
+                            {" · "}
+                            ~{entry.estimatedTokens.toLocaleString()} tokens
+                            {entry.reason ? ` · ${entry.reason}` : ""}
+                          </small>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
+                {msg.role === "assistant" && msg.editReviewDebug && (
+                  <details className="prompt-debug edit-review-debug">
+                    <summary>
+                      自动审核调试：{msg.editReviewDebug.triggered ? "已触发" : "未触发"}
+                      {msg.editReviewDebug.durationMs > 0 ? `，${msg.editReviewDebug.durationMs}ms` : ""}
+                    </summary>
+                    <div className="prompt-debug-list">
+                      <div className={`prompt-debug-row ${msg.editReviewDebug.triggered ? "high" : "medium"}`}>
+                        <span>{msg.editReviewDebug.filePath || "本轮请求"}</span>
+                        <strong>{msg.editReviewDebug.reviewedCount}/{msg.editReviewDebug.editCount} 段</strong>
+                        <small>
+                          模型：{msg.editReviewDebug.modelLabel || "未使用"}
+                          {" · "}
+                          字符：{msg.editReviewDebug.originalChars.toLocaleString()} → {msg.editReviewDebug.reviewedChars.toLocaleString()}
+                        </small>
+                      </div>
+                      {msg.editReviewDebug.skipReasons.map((reason) => (
+                        <div key={`${msg.id}-skip-${reason}`} className="prompt-debug-row medium">
+                          <span>跳过原因</span>
+                          <small>{reason}</small>
+                        </div>
+                      ))}
+                      {msg.editReviewDebug.fallbackReasons.map((reason) => (
+                        <div key={`${msg.id}-fallback-${reason}`} className="prompt-debug-row low">
+                          <span>回退原因</span>
+                          <small>{reason}</small>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
                 )}
               </div>
             </div>
@@ -1665,8 +2296,8 @@ const CopilotPanel: React.FC = () => {
                 }
               }}
               onKeyDown={handleKeyPress}
-              placeholder={currentModel ? t("copilot.askAI") : t("copilot.configureModel")}
-              disabled={!currentModel || isLoading}
+                placeholder={activeInputModel ? t("copilot.askAI") : t("copilot.configureModel")}
+                disabled={!activeInputModel || isLoading}
               rows={4}
             />
             {draftAttachments.length > 0 && (
@@ -1743,11 +2374,22 @@ const CopilotPanel: React.FC = () => {
                 {t("copilot.planMode")}
               </button>
 
+              <button
+                type="button"
+                className={`skill-pill ${chatSkills.enableEditReview ? "active" : ""}`}
+                onClick={() => updateChatSkills(prev => ({
+                  ...prev,
+                  enableEditReview: !prev.enableEditReview,
+                }))}
+              >
+                {t("copilot.autoReview")}
+              </button>
+
             </div>
 
             <button
               onClick={() => void handleSendMessage()}
-              disabled={!input.trim() || !currentModel || isLoading}
+                disabled={!input.trim() || !activeInputModel || isLoading}
               className="send-button"
             >
               <Send size={16} />
@@ -1763,7 +2405,7 @@ const CopilotPanel: React.FC = () => {
               }}
               role="menu"
             >
-              {(["quick", "smart", "architect"] as const).map((mode) => (
+              {(["writer", "editor"] as const).map((mode) => (
                 <button
                   key={mode}
                   type="button"
@@ -1772,7 +2414,7 @@ const CopilotPanel: React.FC = () => {
                     updateChatSkills(prev => ({
                       ...prev,
                       agentMode: mode,
-                      agentSubMode: mode === "quick" ? "build" : prev.agentSubMode,
+                      agentSubMode: mode === "editor" ? "build" : prev.agentSubMode,
                     }));
                     setIsAgentModeMenuOpen(false);
                   }}
@@ -1875,3 +2517,4 @@ const CopilotPanel: React.FC = () => {
 };
 
 export default CopilotPanel;
+

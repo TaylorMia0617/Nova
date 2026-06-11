@@ -38,8 +38,15 @@ export default function BlueprintPanel() {
 
   const handleDelete = async (id: string) => {
     if (!window.confirm(t("blueprint.deleteConfirm"))) return;
-    await deleteBlueprint(id);
+    setSelectedBlueprintId((current) => (current === id ? null : current));
+    setRenamingId((current) => (current === id ? null : current));
+    setRenameValue("");
     closeBlueprintTabs(id);
+    try {
+      await deleteBlueprint(id);
+    } catch {
+      await loadBlueprints();
+    }
   };
 
   return (

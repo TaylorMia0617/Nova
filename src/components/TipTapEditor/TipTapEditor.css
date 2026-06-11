@@ -281,6 +281,11 @@
   cursor: col-resize;
 }
 
+.tiptap-editor-content .cached-selection-highlight {
+  background: rgba(226, 232, 240, 0.38);
+  color: inherit;
+}
+
 .reference-suggestion-popover {
   position: absolute;
   z-index: 40;

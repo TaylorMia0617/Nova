@@ -107,6 +107,7 @@ export interface ReferenceListData {
   items: Array<{
     key: string;
     value: string;
+    body?: string;
   }>;
 }
 
