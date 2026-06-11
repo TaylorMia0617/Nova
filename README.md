@@ -1,4 +1,4 @@
-# NovelAssistance
+# NOVA
 
 Local-first desktop writing workspace for novel drafting, reference management, and AI-assisted writing.
 
