@@ -1,175 +1,218 @@
-# NovelAssistance
+# Nova
 
-Local-first desktop writing workspace for novel drafting, reference management, and AI-assisted writing.
+Nova is a local-first desktop workspace for long-form fiction writing. It combines a file editor, reference database, version history, blueprint planning, and AI copilot roles designed for novel creation.
 
-## Current Runtime
+The project currently ships as an Electron app. The old `src-tauri/` directory is legacy exploration material, not the active runtime.
 
-This project currently ships on `Electron`.
+## Why Use Nova
 
-- `src-tauri/` is legacy exploration material and is not the active desktop runtime.
-- Development, packaging, and file access currently run through the Electron app.
-- Tauri migration is being evaluated; see `docs/tauri-migration-assessment.md`.
+Most AI writing tools are good at producing text, but weak at remembering the shape of a novel. Nova is built around the opposite assumption: a novel is not one prompt, it is a living workspace.
 
-## Features
+Nova helps with:
 
-- Three-column desktop layout:
-  Explorer, editor, and AI copilot
-- Real workspace file management:
-  open, create, rename, duplicate, move, and delete files/folders
-- Monaco-based editor with Markdown-focused formatting
-- Local reference files for characters, places, items, skills, and world notes
-- BYOK AI support for OpenAI-compatible endpoints and remote MCP-assisted workflows
+- Keeping worldbuilding, characters, chapter files, blueprints, reference entries, and history in one local workspace.
+- Letting AI write with project memory instead of repeatedly pasting the whole novel into chat.
+- Preserving character continuity through structured reference entries, especially current desire, fear, emotion, and bias.
+- Separating roles: architect for diagnosis and planning, writer for prose, editor for review.
+- Creating real files, including `.docx`, instead of leaving generated content trapped in chat.
+- Working BYOK: you choose the OpenAI-compatible endpoint and model profile.
 
-## Security and Data Behavior
+Your workspace remains local. Project conversations and memory live under `.novel-assistance/` inside the selected workspace.
 
-- Workspace file operations are restricted to the currently opened workspace root.
-- API keys are session-only by default.
-- Users can explicitly enable local API key persistence on the current device.
-- Copilot conversations are stored per-workspace inside `.novel-assistance/conversations/`.
+## How To Use
 
-## AI Request Rules
+1. Open a novel workspace.
+2. Configure an AI model profile in settings.
+3. Create or open your project files.
+4. Use the Copilot panel with the role that matches the task:
+   - `Architect`: diagnose, rebuild, plan, extract author voice, design worldbuilding and character systems.
+   - `Writer`: write scenes, continue chapters, create files, update reference entries.
+   - `Editor`: review prose for continuity, OOC behavior, dialogue density, pacing, and AI-like structure.
+5. Use reference entries for characters and setting facts.
+6. Let History and memory carry recent changes instead of constantly resending the whole chapter.
 
-### 1. Supported AI API styles
+Nova uses several memory files inside `.novel-assistance/habits/`:
 
-The app currently supports two OpenAI-compatible request styles:
+- `Importants.md`: cross-conversation project ledger, progress, confirmed decisions, major canon changes.
+- `AuthorVoice.md`: author habits, disliked patterns, recurring quirks.
+- `Obsessions.md`: durable themes and philosophical fixations.
+- `Snapshot.md`: short-term project/session state.
+- `Cache.md`: volatile runtime memory and summaries.
 
-- `Responses API`
-  Example endpoint:
-  `https://api.openai.com/v1/responses`
-- `Chat Completions API`
-  Example endpoint:
-  `https://api.deepseek.com/v1/chat/completions`
+Character sheets should be stored in the reference database first, usually in the `人物` list, with a readable `.md` copy when useful.
 
-The app automatically chooses the request format based on the `AI Base URL`:
+## Recommended Workflow
 
-- If the URL ends with `/v1/responses`, the app sends:
-  `model + instructions + input + max_output_tokens`
-- If the URL ends with `/v1/chat/completions`, the app sends:
-  `model + messages + max_tokens`
+### If Your Novel Starts From Zero
 
-Important:
+Use:
 
-- `AI Base URL` must be a full request endpoint, not only a service root.
-- Example of correct values:
-  `https://api.openai.com/v1/responses`
-  `https://api.deepseek.com/v1/chat/completions`
-- Example of incorrect values:
-  `https://api.deepseek.com`
-  `https://api.openai.com`
+`Architect -> Writer -> Writer`
 
-### 2. Model profile fields
+1. Start with Architect.
+   Ask it to identify the intended novel type, author obsessions, themes, tone, worldbuilding direction, and character system. If the direction is unclear, Architect should ask questions before inventing the world.
 
-Each model profile contains:
+2. Confirm the plan.
+   The first useful output should be a change plan or creation plan, not immediate prose.
 
-- `Name`
-- `Model ID`
-- `AI Base URL`
-- `API Key`
-- `MCP Server URL` (optional)
-- `Remember secrets on this device`
+3. Move to Writer.
+   Let Writer create the first structured files and reference entries: world notes, character database entries, readable character `.md` files, and chapter drafts.
 
-Rules:
+4. Continue with Writer.
+   Generate scenes in smaller blocks. Let character desire, fear, emotion, and bias shape action and dialogue.
 
-- `Model ID` must match the target provider's actual model name.
-- `API Key` is always sent as:
-  `Authorization: Bearer <your-key>`
-- If your provider needs extra custom headers, the current UI does not yet expose them.
-- Anthropic-style endpoints are not currently supported unless they also expose an OpenAI-compatible path.
+### If You Already Have Draft Text
 
-### 3. MCP behavior
+Use:
 
-`MCP Server URL` is optional.
+`Architect -> Editor -> Writer`
 
-- Leave it empty if you only want direct AI chat.
-- Fill it only when you have a remote MCP server endpoint.
+Architect can analyze existing prose for author voice and project direction. Editor can then check whether the current draft has characters who are too cooperative, dialogue that carries too much setting information, or conflicts that resolve too cleanly. Writer should make targeted changes after that.
 
-Important distinction:
+### If You Only Need A Chapter
 
-- `AI Base URL` is the model request endpoint.
-- `MCP Server URL` is the remote MCP tool server endpoint.
+Use:
 
-They are not the same thing.
+`Writer`
 
-When `MCP Server URL` is configured:
+Ask for a scene or chapter file directly. Chapter prose defaults to `.docx` unless you specify another format.
 
-- the app first attempts a minimal MCP tool lookup / call flow
-- returned MCP text context is appended to the final AI prompt
-- if MCP fails during chat requests, the request fails with the returned error
+## AI Roles
 
-### 4. Conversation and context rules
+### Architect
 
-- Copilot memory is stored per workspace in:
-  `.novel-assistance/conversations/`
-- The current editor file content is included as document context.
-- Recent chat history is included in the AI request.
-- Attached text files are converted into plain-text context and appended to the prompt.
-- Attachments are not uploaded as binary files and do not use multimodal file APIs.
+Architect is for diagnosis, structure, and rebuilding. It should prioritize:
 
-### 5. Attachment rules
+- Author profile.
+- Theme and premise.
+- Narrative texture.
+- Worldbuilding principles.
+- Character system.
+- What to keep or discard.
+- Memory candidates for project facts, author voice, and obsessions.
 
-Supported attachment types are text-oriented files only, including:
+Architect should not write chapter prose unless explicitly asked.
 
-- `txt`
-- `md`
-- `json`
-- `.docx`
+### Writer
 
-Rules:
+Writer is for drafting and file creation. It should:
 
-- Attachments are read locally by Electron.
-- The app stores attachment metadata and text content in conversation history.
-- Attachments are added to the prompt as supplemental context.
+- Write chapters and scenes.
+- Create `.docx` chapter files.
+- Create `.md` setting files.
+- Upsert character entries into the reference database.
+- Respect current desire, fear, emotion, and bias.
+- Avoid template-like repetition and repeated sentence structures.
 
-### 6. Request troubleshooting
+### Editor
 
-If a request fails:
+Editor is for review. It should focus on:
 
-- `401 Unauthorized`
-  Usually means the API key is invalid, rejected by an upstream gateway, or the endpoint does not accept the current auth style.
-- `No response text`
-  Usually means the endpoint is not actually compatible with the request format implied by the URL.
-- MCP errors
-  Usually mean the `MCP Server URL` is not a valid remote MCP endpoint, or its tool contract differs from the minimal integration used here.
+- Character continuity.
+- OOC behavior.
+- Dialogue information density.
+- Emotional transitions.
+- Too-smooth conflict resolution.
+- AI-like over-structure.
 
-Recommended checks:
+Editor should not treat unusual worldbuilding as an error by itself.
 
-1. Confirm `AI Base URL` is a full endpoint.
-2. Confirm the endpoint is either `responses`-compatible or `chat/completions`-compatible.
-3. Confirm the `Model ID` matches the provider.
-4. Confirm the same key and endpoint work in `curl`.
-5. If `curl` works but the app does not, compare headers and request body format.
+## Data And Security
 
-## Development
+- File operations are restricted to the opened workspace root.
+- Conversations are stored per workspace in `.novel-assistance/conversations/`.
+- Project memory is stored per workspace in `.novel-assistance/habits/`.
+- Reference entries are stored in `.novel-assistance/data/`.
+- API keys are session-only by default unless local persistence is enabled.
+- Attachments are read locally and converted into text prompt context.
 
-### Prerequisites
+## AI Endpoint Setup
+
+Nova supports OpenAI-compatible endpoints.
+
+Examples:
+
+- Responses API: `https://api.openai.com/v1/responses`
+- Chat Completions API: `https://api.deepseek.com/v1/chat/completions`
+
+The `AI Base URL` should be the full request endpoint, not only the service root.
+
+Correct:
+
+```text
+https://api.openai.com/v1/responses
+https://api.deepseek.com/v1/chat/completions
+```
+
+Incorrect:
+
+```text
+https://api.openai.com
+https://api.deepseek.com
+```
+
+## Development Guide
+
+### Requirements
 
 - Node.js 18+
 - npm
 
-### Install
+For reproducible local setup, prefer `npm ci` when `package-lock.json` is present. `npm install` is still widely supported by npm, but `npm ci` is better for clean installs from the lockfile.
+
+### Install Dependencies
+
+```bash
+npm ci
+```
+
+If you intentionally need to update dependency versions and rewrite the lockfile, use:
 
 ```bash
 npm install
 ```
 
-### Run the desktop app
+### Run The Desktop App
 
 ```bash
 npm run desktop:dev
 ```
 
-This starts Vite and then launches Electron against the local renderer.
+This starts Vite and launches Electron against the local renderer.
 
-### Build the desktop app
+### Build Renderer
+
+```bash
+npm run build
+```
+
+### Build Desktop Package
 
 ```bash
 npm run desktop:build
 ```
 
-## Project Notes
+## Project Structure
 
-- The workspace `settings` folder stores built-in reference text files used by editor suggestions.
-- External workspace edits are refreshed through workspace change events and window focus recovery instead of fixed polling.
+```text
+electron/                 Electron main process and preload bridge
+src/components/           React UI panels
+src/services/             AI, local tools, filesystem, memory, MCP services
+src/stores/               Workspace, settings, and blueprint state
+src/types/                Shared TypeScript types
+shared/                   Shared runtime helpers
+docs/                     Design notes and migration research
+```
+
+## Development Notes
+
+- Active desktop runtime is Electron.
+- `src-tauri/` is not the current app runtime.
+- Local tools must use workspace-relative paths.
+- `.docx` creation uses real DOCX package writing.
+- Character generation should write reference database entries first, then optional readable `.md` files.
+- `Importants.md` is a project ledger, not a full character database.
+- Large file reads should be summarized before entering later chat history.
 
 ## License
 

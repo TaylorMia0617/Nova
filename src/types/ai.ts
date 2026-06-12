@@ -130,7 +130,7 @@ export interface WorkingSetEntry {
   lastUsedAt: string;
 }
 
-export type AgentMode = "writer" | "editor";
+export type AgentMode = "writer" | "editor" | "architect";
 
 export interface PendingPlanConfirmation {
   planMessageId: string;

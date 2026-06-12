@@ -276,6 +276,8 @@ function getWorkspaceAppDataPaths() {
   const blueprintTemplatesPath = path.join(referenceDataPath, "blueprint-templates.json");
   const habitsPath = path.join(dataPath, "habits");
   const importantsPath = path.join(habitsPath, "Importants.md");
+  const authorVoicePath = path.join(habitsPath, "AuthorVoice.md");
+  const obsessionsPath = path.join(habitsPath, "Obsessions.md");
   const snapshotPath = path.join(habitsPath, "Snapshot.md");
   const cacheMemoryPath = path.join(habitsPath, "Cache.md");
   const cachePath = path.join(dataPath, "cache");
@@ -293,6 +295,8 @@ function getWorkspaceAppDataPaths() {
     blueprintTemplatesPath,
     habitsPath,
     importantsPath,
+    authorVoicePath,
+    obsessionsPath,
     snapshotPath,
     cacheMemoryPath,
     cachePath,
@@ -353,6 +357,12 @@ async function ensureWorkspaceHabits() {
   if (!(await pathExists(paths.snapshotPath))) {
     await fs.writeFile(paths.snapshotPath, "# Snapshot\n\n当前短期状态：\n\n", "utf8");
   }
+  if (!(await pathExists(paths.authorVoicePath))) {
+    await fs.writeFile(paths.authorVoicePath, "# AuthorVoice\n\n作者偏好、坏习惯、叙事执念、反感项：\n\n", "utf8");
+  }
+  if (!(await pathExists(paths.obsessionsPath))) {
+    await fs.writeFile(paths.obsessionsPath, "# Obsessions\n\n长期主题执念：\n\n", "utf8");
+  }
   if (!(await pathExists(paths.cacheMemoryPath))) {
     await fs.writeFile(paths.cacheMemoryPath, "# Cache\n\n内容寻址缓存摘要：\n\n", "utf8");
   }
@@ -360,6 +370,8 @@ async function ensureWorkspaceHabits() {
     rootPath: paths.rootPath,
     habitsPath: paths.habitsPath,
     importantsPath: paths.importantsPath,
+    authorVoicePath: paths.authorVoicePath,
+    obsessionsPath: paths.obsessionsPath,
     snapshotPath: paths.snapshotPath,
     cacheMemoryPath: paths.cacheMemoryPath,
   };
@@ -1154,6 +1166,26 @@ ipcMain.handle("memory:readProjectImportant", async (event) => runWithWorkspaceR
 ipcMain.handle("memory:writeProjectImportant", async (event, content) => runWithWorkspaceRoot(event, async () => {
   const paths = await ensureWorkspaceHabits();
   await writeWithRetry(paths.importantsPath, String(content ?? ""));
+}));
+
+ipcMain.handle("memory:readProjectAuthorVoice", async (event) => runWithWorkspaceRoot(event, async () => {
+  const paths = await ensureWorkspaceHabits();
+  return fs.readFile(paths.authorVoicePath, "utf8");
+}));
+
+ipcMain.handle("memory:writeProjectAuthorVoice", async (event, content) => runWithWorkspaceRoot(event, async () => {
+  const paths = await ensureWorkspaceHabits();
+  await writeWithRetry(paths.authorVoicePath, String(content ?? ""));
+}));
+
+ipcMain.handle("memory:readProjectObsessions", async (event) => runWithWorkspaceRoot(event, async () => {
+  const paths = await ensureWorkspaceHabits();
+  return fs.readFile(paths.obsessionsPath, "utf8");
+}));
+
+ipcMain.handle("memory:writeProjectObsessions", async (event, content) => runWithWorkspaceRoot(event, async () => {
+  const paths = await ensureWorkspaceHabits();
+  await writeWithRetry(paths.obsessionsPath, String(content ?? ""));
 }));
 
 ipcMain.handle("memory:readProjectSnapshot", async (event) => runWithWorkspaceRoot(event, async () => {

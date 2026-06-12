@@ -80,6 +80,10 @@ interface NovelHostApi {
   ensureWorkspaceHabits?: () => Promise<WorkspaceHabitsPaths>;
   readProjectImportant?: () => Promise<string>;
   writeProjectImportant?: (content: string) => Promise<void>;
+  readProjectAuthorVoice?: () => Promise<string>;
+  writeProjectAuthorVoice?: (content: string) => Promise<void>;
+  readProjectObsessions?: () => Promise<string>;
+  writeProjectObsessions?: (content: string) => Promise<void>;
   readProjectSnapshot?: () => Promise<string>;
   writeProjectSnapshot?: (content: string) => Promise<void>;
   readProjectCacheMemory?: () => Promise<string>;
@@ -141,6 +145,8 @@ export interface WorkspaceHabitsPaths {
   rootPath: string;
   habitsPath: string;
   importantsPath: string;
+  authorVoicePath?: string;
+  obsessionsPath?: string;
   snapshotPath?: string;
   cacheMemoryPath?: string;
 }
@@ -750,6 +756,36 @@ export async function writeProjectImportant(content: string): Promise<void> {
   const host = getHostApi();
   if (host?.writeProjectImportant) {
     await host.writeProjectImportant(content);
+  }
+}
+
+export async function readProjectAuthorVoice(): Promise<string | null> {
+  const host = getHostApi();
+  if (host?.readProjectAuthorVoice) {
+    return host.readProjectAuthorVoice();
+  }
+  return null;
+}
+
+export async function writeProjectAuthorVoice(content: string): Promise<void> {
+  const host = getHostApi();
+  if (host?.writeProjectAuthorVoice) {
+    await host.writeProjectAuthorVoice(content);
+  }
+}
+
+export async function readProjectObsessions(): Promise<string | null> {
+  const host = getHostApi();
+  if (host?.readProjectObsessions) {
+    return host.readProjectObsessions();
+  }
+  return null;
+}
+
+export async function writeProjectObsessions(content: string): Promise<void> {
+  const host = getHostApi();
+  if (host?.writeProjectObsessions) {
+    await host.writeProjectObsessions(content);
   }
 }
 

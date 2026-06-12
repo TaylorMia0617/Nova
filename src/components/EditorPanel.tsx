@@ -553,6 +553,10 @@ const EditorPanel: React.FC = () => {
         return { startLineNumber: 0, startColumn: 0, endLineNumber: 0, endColumn: 0, from, to } as any;
       },
       getContent: () => handle.getMarkdown(),
+      getSerializedContent: () => {
+        const format = getEditorContentFormat(activeFile.fileMode);
+        return format === "docx" ? JSON.stringify(handle.getJSON()) : handle.getMarkdown();
+      },
       applyText: ({ mode, text }) => {
         if (mode === "replaceSelection") {
           handle.replaceSelection(text);

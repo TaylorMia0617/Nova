@@ -15,15 +15,15 @@ import {
   writeConversation,
 } from "../services/conversationService";
 import { selectTextAttachments } from "../services/attachmentService";
-import { getEditorContent, insertTextIntoEditor } from "../services/editorInsertionService";
+import { getEditorContent, getEditorSerializedContent, insertTextIntoEditor } from "../services/editorInsertionService";
 import { runLocalTool } from "../services/mcpService";
 import {
-  applyMemoryCandidate,
+  applyMemoryCandidates,
   buildMemoryPrompt,
   ensureMemoryFiles,
-  extractMemoryCandidate,
+  extractMemoryCandidates,
   loadMemoryContext,
-  stripMemoryCandidate,
+  stripMemoryCandidates,
 } from "../services/memoryService";
 import { readFile, type ReferenceListData, type WorkspaceNode } from "../services/fileSystemService";
 import { calculateTextStats } from "../utils/textStats";
@@ -95,6 +95,49 @@ function serializeReferenceListsForReview(lists: ReferenceListData[], maxLength 
     : content;
 }
 
+function buildRelevantReferenceContext(
+  lists: ReferenceListData[],
+  requestContent: string,
+  documentContext: string,
+  maxLength = 8000
+) {
+  const haystack = `${requestContent}\n${documentContext}`.toLowerCase();
+  const scoredEntries: Array<{ listName: string; key: string; value: string; body: string; score: number }> = [];
+  for (const list of lists) {
+    const isCharacterList = /^(人物|characters?)$/i.test(list.name.trim());
+    for (const item of list.items) {
+      const key = item.key.trim();
+      if (!key) continue;
+      const keyHit = haystack.includes(key.toLowerCase());
+      const dynamicHit = /current_desire|current_fear|current_emotion|current_bias|当前欲望|当前恐惧|当前情绪|当前偏见/i.test(item.body ?? "");
+      const score = (keyHit ? 10 : 0) + (isCharacterList ? 2 : 0) + (dynamicHit ? 1 : 0);
+      if (score <= 0) continue;
+      scoredEntries.push({
+        listName: list.name,
+        key,
+        value: item.value?.trim() ?? "",
+        body: item.body?.trim() ?? "",
+        score,
+      });
+    }
+  }
+
+  const selected = scoredEntries
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 10);
+  if (selected.length === 0) return "";
+
+  const content = selected
+    .map((item) => {
+      const head = `## ${item.listName} / ${item.key}${item.value ? ` - ${item.value}` : ""}`;
+      return item.body ? `${head}\n${truncateContextText(item.body, 900)}` : head;
+    })
+    .join("\n\n");
+  return content.length > maxLength
+    ? `${content.slice(0, maxLength)}\n\n...[relevant reference entries truncated]...`
+    : content;
+}
+
 const PLAN_REQUIRED_PATTERNS = [
   /先.*(计划|方案|大纲|确认)|制定.*(计划|方案|大纲)|输出.*(计划|方案|大纲)|计划.*确认|确认.*计划/i,
   /长篇规划|世界观|角色弧|主线|伏笔|多文件|结构性重写|重构.*结构|蓝图方案/i,
@@ -105,6 +148,21 @@ const PLAN_REQUIRED_PATTERNS = [
 const PROJECT_MEMORY_PATTERNS = [
   /小说|写作|剧情|蓝图|大纲|章节|正文|伏笔|主线|设定|世界观|角色|人物|创作|故事|幕|卷/i,
   /novel|story|plot|blueprint|outline|chapter|draft|character|worldbuilding|foreshadow/i,
+];
+
+const PROJECT_FOLLOWUP_PATTERNS = [
+  /继续写|接着|续写|修改这里|按刚才|再调整|刚才|下一段|下一章|继续修改|继续调整|这里/i,
+  /continue|keep going|follow up|same as before|next scene|next chapter|revise this|adjust this/i,
+];
+
+const ARCHITECT_PLAN_PATTERNS = [
+  /世界观|人设|人物设定|角色设定|立意|主题|作者风格|作者画像|作者偏好|作者偏执|写作习惯|叙事习惯|主题执念|反感项|小说方向|故事方向|重构|重新设计|架构/i,
+  /worldbuilding|character\s+design|character\s+setting|theme|premise|author\s+voice|author\s+profile|author\s+habit|obsession|rebuild|redesign|rework/i,
+];
+
+const ARCHITECT_REBUILD_PATTERNS = [
+  /推倒重来|全部推翻|全部重写|不要旧设定|不要沿用旧设定|从零开始|换方向|重构世界观|重做人设|重新做人设|重新设计|彻底重构/i,
+  /start\s+over|from\s+scratch|throw\s+.*away|rebuild\s+from\s+zero|full\s+rebuild|do\s+not\s+keep\s+old/i,
 ];
 
 const FILE_CREATION_PATTERNS = [
@@ -119,7 +177,7 @@ const CHAPTER_DRAFT_PATTERNS = [
 
 function normalizeChatSkills(skills?: Partial<ChatSkills> | null): ChatSkills {
   const rawMode = skills?.agentMode as unknown;
-  const agentMode: AgentMode = rawMode === "editor" ? "editor" : "writer";
+  const agentMode: AgentMode = rawMode === "editor" || rawMode === "architect" ? rawMode : "writer";
   return {
     ...DEFAULT_CHAT_SKILLS,
     ...skills,
@@ -129,6 +187,19 @@ function normalizeChatSkills(skills?: Partial<ChatSkills> | null): ChatSkills {
 
 function isProjectMemoryRelevant(content: string): boolean {
   return PROJECT_MEMORY_PATTERNS.some((pattern) => pattern.test(content));
+}
+
+function isProjectFollowupRequest(content: string): boolean {
+  return PROJECT_FOLLOWUP_PATTERNS.some((pattern) => pattern.test(content));
+}
+
+function isArchitectPlanRelevant(content: string): boolean {
+  return ARCHITECT_PLAN_PATTERNS.some((pattern) => pattern.test(content))
+    || ARCHITECT_REBUILD_PATTERNS.some((pattern) => pattern.test(content));
+}
+
+function isArchitectRebuildRequest(content: string): boolean {
+  return ARCHITECT_REBUILD_PATTERNS.some((pattern) => pattern.test(content));
 }
 
 function shouldForceCreateFile(content: string): boolean {
@@ -145,14 +216,30 @@ function shouldDefaultChapterToDocx(content: string): boolean {
   return shouldForceCreateFile(trimmed) && CHAPTER_DRAFT_PATTERNS.some((pattern) => pattern.test(trimmed));
 }
 
+function isCharacterSheetRequest(content: string): boolean {
+  return /人设|人物设定|角色设定|角色档案|人物档案|生成人物|创建人物|创建角色|重新做人设|设计人物|设计角色|男主|女主|主角|配角|反派|character\s+(?:sheet|profile|design|setting)|persona/i.test(content);
+}
+
+function isCharacterSheetPath(path: string): boolean {
+  const normalized = path.replace(/\\/g, "/");
+  const fileName = normalized.split("/").pop() ?? normalized;
+  return /人设|人物|角色|男主|女主|主角|配角|反派|character|persona/i.test(normalized)
+    || /^角色[-_]/i.test(fileName)
+    || /^人物[-_]/i.test(fileName);
+}
+
 function shouldNeedPlan(content: string, mode: AgentMode): boolean {
   const trimmed = content.trim();
   if (!trimmed) return false;
+  if (mode === "architect" && isArchitectPlanRelevant(trimmed)) return true;
   if (shouldForceCreateFile(trimmed)) return false;
   if (PLAN_REQUIRED_PATTERNS.some((pattern) => pattern.test(trimmed))) return true;
   if (trimmed.length > 3000) return true;
   if (mode === "writer") {
     return trimmed.length > 1800 && isProjectMemoryRelevant(trimmed);
+  }
+  if (mode === "architect") {
+    return trimmed.length > 600 || isProjectMemoryRelevant(trimmed);
   }
   return false;
 }
@@ -307,23 +394,89 @@ function parseWriteToolMetadata(result: string): WriteToolMetadata | null {
   return null;
 }
 
+type ExtractedToolCall = { fullMatch: string; json: string; index: number };
+
+function scanJsonObjectAt(text: string, start: number): string | null {
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let index = start; index < text.length; index++) {
+    const char = text[index];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (char === "\\") {
+      escape = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, index + 1);
+    }
+  }
+  return null;
+}
+
+function extractToolCallsFromText(text: string): ExtractedToolCall[] {
+  const results: ExtractedToolCall[] = [];
+  const occupied: Array<{ start: number; end: number }> = [];
+  const addCall = (start: number, fullMatch: string, json: string) => {
+    if (!/"(?:name|tool)"\s*:/.test(json)) return;
+    if (!/"(?:name|tool)"\s*:\s*"(?:create_file|edit_file|edit_docx|create_blueprint|upsert_reference_entries|read_file|list_directory|web_search|list_blueprints|read_blueprint)"/.test(json)) return;
+    const end = start + fullMatch.length;
+    if (occupied.some((range) => start < range.end && end > range.start)) return;
+    occupied.push({ start, end });
+    results.push({ fullMatch, json: json.trim(), index: start });
+  };
+
+  const fencedPattern = /```(?:tool[_-]?call|json)\s*\n/g;
+  let startMatch: RegExpExecArray | null;
+  while ((startMatch = fencedPattern.exec(text)) !== null) {
+    const jsonStart = startMatch.index + startMatch[0].length;
+    const endMarker = text.indexOf("\n```", jsonStart);
+    if (endMarker === -1) break;
+    const json = text.slice(jsonStart, endMarker);
+    addCall(startMatch.index, text.slice(startMatch.index, endMarker + 4), json);
+  }
+
+  for (let start = text.indexOf("{"); start !== -1; start = text.indexOf("{", start + 1)) {
+    const json = scanJsonObjectAt(text, start);
+    if (!json) continue;
+    addCall(start, json, json);
+  }
+
+  return results.sort((a, b) => a.index - b.index);
+}
+
 function stripToolCalls(content: string) {
-  return content.replace(/```tool_?call\s*\n[\s\S]*?\n```/g, "").trim();
+  const stripped = extractToolCallsFromText(content)
+    .reduceRight((text, call) => text.slice(0, call.index) + text.slice(call.index + call.fullMatch.length), content)
+    .replace(/```(?:tool[_-]?call|json)\s*\n[\s\S]*"name"\s*:\s*"(?:create_file|edit_file|edit_docx|create_blueprint|upsert_reference_entries|read_file|list_directory|web_search|list_blueprints|read_blueprint)"[\s\S]*$/i, "")
+    .replace(/\{\s*"name"\s*:\s*"(?:create_file|edit_file|edit_docx|create_blueprint|upsert_reference_entries|read_file|list_directory|web_search|list_blueprints|read_blueprint)"[\s\S]*$/i, "");
+  return stripped.trim();
 }
 
 function getToolWorkKind(toolName: string): ConversationWorkItem["kind"] {
   if (toolName === "web_search") return "search";
   if (toolName.includes("blueprint")) return "blueprint";
   if (toolName === "read_file" || toolName === "list_directory") return "file";
-  if (toolName === "edit_file" || toolName === "create_file" || toolName === "create_blueprint") return "write";
+  if (toolName === "edit_file" || toolName === "edit_docx" || toolName === "create_file" || toolName === "create_blueprint" || toolName === "upsert_reference_entries") return "write";
   return "tool";
 }
 
 function summarizeToolArgs(toolName: string, args: Record<string, unknown>) {
   if (toolName === "web_search") return String(args.query ?? "");
-  if (toolName === "read_file" || toolName === "list_directory" || toolName === "edit_file" || toolName === "create_file") {
+  if (toolName === "read_file" || toolName === "list_directory" || toolName === "edit_file" || toolName === "edit_docx" || toolName === "create_file") {
     return String(args.path ?? "workspace");
   }
+  if (toolName === "upsert_reference_entries") return String(args.listName ?? "人物");
   if (toolName === "read_blueprint") return String(args.name ?? args.id ?? "blueprint");
   if (toolName === "create_blueprint") return String(args.name ?? (args.blueprint as { name?: string } | undefined)?.name ?? "blueprint");
   return toolName;
@@ -342,6 +495,29 @@ function summarizeToolResult(result: string) {
     // Plain text tool results are summarized below.
   }
   return result.replace(/\s+/g, " ").slice(0, 220);
+}
+
+function summarizeToolResultForModel(name: string, result: string) {
+  if (name !== "read_file" || result.startsWith("Error")) return result;
+  const compact = result.trim();
+  if (!compact) {
+    return JSON.stringify({
+      ok: true,
+      tool: "read_file",
+      empty: true,
+      chars: 0,
+      content: "",
+    }, null, 2);
+  }
+  if (compact.length <= 2400) return compact;
+  return JSON.stringify({
+    ok: true,
+    tool: "read_file",
+    chars: result.length,
+    summary: "Large file content was read successfully. Full text is not repeated in tool history; use the provided head/tail snippets and request a targeted read if exact lines are needed.",
+    head: compact.slice(0, 1200),
+    tail: compact.slice(-900),
+  }, null, 2);
 }
 
 function createEditReviewDebug(enabled: boolean): EditReviewDebug {
@@ -379,10 +555,43 @@ function buildLocalSnippet(content: string, maxLength = 2400) {
   return truncateContextText(content, maxLength);
 }
 
+type ProseMirrorJsonNode = {
+  type?: string;
+  text?: string;
+  content?: ProseMirrorJsonNode[];
+};
+
+function proseMirrorJsonToText(node: ProseMirrorJsonNode | null | undefined): string {
+  if (!node) return "";
+  if (node.type === "text") return node.text ?? "";
+  const childText = (node.content ?? []).map(proseMirrorJsonToText).join("");
+  if (["paragraph", "heading", "blockquote", "listItem"].includes(node.type ?? "")) {
+    return `${childText.trim()}\n`;
+  }
+  if (["bulletList", "orderedList", "doc"].includes(node.type ?? "")) {
+    return (node.content ?? []).map(proseMirrorJsonToText).join("\n");
+  }
+  return childText;
+}
+
+function contentToAiReadableText(content: string): string {
+  const trimmed = content.trim();
+  if (!trimmed.startsWith("{")) return content;
+  try {
+    const parsed = JSON.parse(trimmed) as ProseMirrorJsonNode;
+    if (!parsed || parsed.type !== "doc") return content;
+    return proseMirrorJsonToText(parsed)
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  } catch {
+    return content;
+  }
+}
+
 function summarizeFileChanges(changes: FileChange[], maxChanges = 5) {
   return changes.slice(-maxChanges).map((change, index) => {
-    const oldPart = truncateContextText(change.oldContent || "(empty)", 500);
-    const newPart = truncateContextText(change.newContent || "(empty)", 700);
+    const oldPart = truncateContextText(contentToAiReadableText(change.oldContent) || "(empty)", 500);
+    const newPart = truncateContextText(contentToAiReadableText(change.newContent) || "(empty)", 700);
     return `Change ${index + 1} at ${change.timestamp}\nLines ${change.startLine}-${change.endLine}\nBefore:\n${oldPart}\nAfter:\n${newPart}`;
   }).join("\n\n");
 }
@@ -403,6 +612,30 @@ function createPromptDebugBreakdown(entries: PromptDebugEntry[]): PromptDebugBre
   };
 }
 
+function addMemoryDebugEntry(
+  entries: PromptDebugEntry[],
+  label: string,
+  rawContent: string,
+  maxSentChars: number,
+  strategy: "stable" | "summary",
+  reason: string
+) {
+  const rawChars = rawContent.length;
+  const sentChars = Math.min(rawChars, maxSentChars);
+  if (rawChars === 0 && label !== "Nova.md") return;
+  entries.push({
+    label,
+    chars: sentChars,
+    rawChars,
+    sentChars,
+    estimatedTokens: estimatePromptTokens(sentChars),
+    dynamic: strategy !== "stable",
+    cacheFriendly: strategy === "stable" ? "high" : "medium",
+    strategy,
+    reason,
+  });
+}
+
 const CopilotActiveFileContextLabel = React.memo(function CopilotActiveFileContextLabel() {
   const activeFileName = useFileStore((state) => state.activeFile?.name ?? null);
   const { t } = useTranslation();
@@ -416,6 +649,7 @@ const CopilotActiveFileContextLabel = React.memo(function CopilotActiveFileConte
 const CopilotPanel: React.FC = () => {
   const rootPath = useFileStore((state) => state.rootPath);
   const referenceLists = useFileStore((state) => state.referenceLists);
+  const loadReferenceLists = useFileStore((state) => state.loadReferenceLists);
   const refreshLoadedWorkspace = useFileStore((state) => state.refreshLoadedWorkspace);
   const { loadBlueprints } = useBlueprintStore();
   const { modelProfiles, defaultChatModelId, defaultEditReviewModelId, getModelProfileById, chatMaxTokens, setChatMaxTokens, contextMaxLength, webSearchLimit } = useSettingsStore();
@@ -526,11 +760,21 @@ const CopilotPanel: React.FC = () => {
     return changes;
   };
 
+  const syncActiveEditorContentForRequest = () => {
+    const store = useFileStore.getState();
+    const activeFile = store.activeFile;
+    if (!activeFile || activeFile.isReadOnly) return store;
+    const serializedContent = getEditorSerializedContent();
+    if (!serializedContent || serializedContent === activeFile.content) return store;
+    store.updateFileContent(activeFile.path, serializedContent);
+    return useFileStore.getState();
+  };
+
   const buildMultiFileContext = (): MultiFileContext | undefined => {
     const { activeFile, getOpenTabs } = useFileStore.getState();
     if (!activeFile) return undefined;
 
-    const currentContent = activeFile.content;
+    const currentContent = contentToAiReadableText(activeFile.content);
     const currentStats = calculateTextStats(currentContent);
 
     if (!shouldCacheFile(currentContent)) {
@@ -554,7 +798,7 @@ const CopilotPanel: React.FC = () => {
 
     // 使用 ref 获取最新的缓存
     const activeFileCache = fileCachesRef.current.get(activeFile.path);
-    const activeCachedContent = activeFileCache?.content ?? null;
+    const activeCachedContent = activeFileCache ? contentToAiReadableText(activeFileCache.content) : null;
 
     const cacheChanges = activeCachedContent
       ? calculateChanges(activeCachedContent, currentContent)
@@ -571,7 +815,7 @@ const CopilotPanel: React.FC = () => {
       .slice(0, 5)
       .map(([path, cache]) => {
         const tab = getOpenTabs().find(t => t.path === path);
-        const tabContent = tab?.content ?? cache.content;
+        const tabContent = contentToAiReadableText(tab?.content ?? cache.content);
         const tabStats = calculateTextStats(tabContent);
 
         return {
@@ -584,14 +828,14 @@ const CopilotPanel: React.FC = () => {
           },
           recentChanges: [
             ...useFileStore.getState().getFileChanges(path),
-            ...calculateChanges(cache.content, tabContent),
+            ...calculateChanges(contentToAiReadableText(cache.content), tabContent),
           ].slice(-8),
         };
       });
 
     // 使用 ref 构建 allBoundFiles
     const allBoundFiles = Array.from(fileCachesRef.current.values()).map(cache => {
-      const cacheStats = calculateTextStats(cache.content);
+      const cacheStats = calculateTextStats(contentToAiReadableText(cache.content));
       return {
         meta: {
           fileName: cache.filePath.split(/[/\\]/).pop() || cache.filePath,
@@ -981,11 +1225,12 @@ const CopilotPanel: React.FC = () => {
           answers: override.answeredClarification.answers,
         }
       : activeConversation.pendingClarification ?? null;
+    const requestFileSnapshot = syncActiveEditorContentForRequest();
     const draftRecord: ConversationRecord = {
       ...activeConversation,
       title: activeConversation.messages.length === 0 ? buildTitleFromMessage(userMessage.content) : activeConversation.title,
       updatedAt: new Date().toISOString(),
-      contextFilePath: useFileStore.getState().activeFile?.path ?? activeConversation.contextFilePath ?? null,
+      contextFilePath: requestFileSnapshot.activeFile?.path ?? activeConversation.contextFilePath ?? null,
       messages: nextMessages,
       draftInput: "",
       pendingPlan: override?.clearPendingPlan ? null : activeConversation.pendingPlan ?? null,
@@ -1000,7 +1245,7 @@ const CopilotPanel: React.FC = () => {
     setStatusText("");
     setCurrentAssistantText("");
     setCurrentAssistantWorkItems([]);
-    const fileSnapshotAtStart = useFileStore.getState();
+    const fileSnapshotAtStart = requestFileSnapshot;
     const activeFileAtStart = fileSnapshotAtStart.activeFile;
     const filesAtStart = fileSnapshotAtStart.files;
     await persistConversation(draftRecord);
@@ -1032,8 +1277,17 @@ const CopilotPanel: React.FC = () => {
       }
 
       if (requestSkills.agentMode === "editor") {
-        const referenceContext = serializeReferenceListsForReview(referenceLists);
-        const targetContent = activeFileAtStart?.content || getEditorContent() || "";
+        const editorMemoryContext = await loadMemoryContext({
+          includeStableProjectMemory: true,
+          includeAuthorProjectMemory: true,
+          includeShortTermMemory: true,
+          includeCacheMemory: true,
+        });
+        const referenceContext = [
+          buildMemoryPrompt(editorMemoryContext),
+          serializeReferenceListsForReview(referenceLists),
+        ].filter(Boolean).join("\n\n");
+        const targetContent = getEditorContent() || (activeFileAtStart ? contentToAiReadableText(activeFileAtStart.content) : "");
         const startedAt = performance.now();
         setStatusText("AI编辑审核中...");
         const editorResponse = await callEditorRoleReview({
@@ -1086,11 +1340,87 @@ const CopilotPanel: React.FC = () => {
       const shouldRequestPlan =
         !override && requestSkills.agentSubMode === "plan";
       const shouldIncludeProjectMemory =
-        shouldRequestPlan || override?.clearPendingPlan || isProjectMemoryRelevant(userMessage.content);
-      const memoryPrompt = buildMemoryPrompt(await loadMemoryContext({
-        includeProjectImportant: shouldIncludeProjectMemory,
-        includeProjectSnapshot: shouldIncludeProjectMemory,
-      }));
+        shouldRequestPlan
+        || override?.clearPendingPlan
+        || isProjectMemoryRelevant(userMessage.content)
+        || isProjectFollowupRequest(userMessage.content)
+        || (requestSkills.agentMode === "architect" && isArchitectPlanRelevant(userMessage.content));
+      const shouldIncludeWritingMemory =
+        shouldIncludeProjectMemory
+        || requestSkills.agentMode === "architect";
+      const memoryContext = await loadMemoryContext({
+        includeStableProjectMemory: true,
+        includeAuthorProjectMemory: shouldIncludeWritingMemory,
+        includeShortTermMemory: shouldIncludeWritingMemory,
+        includeCacheMemory: shouldIncludeWritingMemory,
+      });
+      const memoryPrompt = buildMemoryPrompt(memoryContext);
+      const relevantReferenceContext = buildRelevantReferenceContext(referenceLists, userMessage.content, plannedContext.content);
+      const runtimeContext = [
+        memoryPrompt,
+        relevantReferenceContext ? `## Relevant Reference Entries\n${relevantReferenceContext}` : "",
+      ].filter(Boolean).join("\n\n");
+      addMemoryDebugEntry(
+        plannedContext.promptDebug.entries,
+        "Nova.md",
+        memoryContext.globalHabits,
+        memoryContext.globalHabits.length,
+        "stable",
+        "Durable global user preferences."
+      );
+      addMemoryDebugEntry(
+        plannedContext.promptDebug.entries,
+        "Importants.md",
+        memoryContext.projectImportant,
+        5200,
+        "stable",
+        "Cross-conversation project ledger and confirmed state."
+      );
+      addMemoryDebugEntry(
+        plannedContext.promptDebug.entries,
+        "AuthorVoice.md",
+        memoryContext.projectAuthorVoice,
+        3600,
+        "stable",
+        "Author voice and disliked writing patterns for project requests."
+      );
+      addMemoryDebugEntry(
+        plannedContext.promptDebug.entries,
+        "Obsessions.md",
+        memoryContext.projectObsessions,
+        2800,
+        "stable",
+        "Recurring project themes and obsessions."
+      );
+      addMemoryDebugEntry(
+        plannedContext.promptDebug.entries,
+        "Snapshot.md",
+        memoryContext.projectSnapshot,
+        2600,
+        "summary",
+        "Short-term project/session state for follow-up requests."
+      );
+      addMemoryDebugEntry(
+        plannedContext.promptDebug.entries,
+        "Cache.md",
+        memoryContext.projectCache,
+        2200,
+        "summary",
+        "Volatile runtime memory summarized for follow-up requests."
+      );
+      if (relevantReferenceContext) {
+        plannedContext.promptDebug.entries.push({
+          label: "Relevant reference entries",
+          chars: relevantReferenceContext.length,
+          sentChars: relevantReferenceContext.length,
+          estimatedTokens: estimatePromptTokens(relevantReferenceContext.length),
+          dynamic: true,
+          cacheFriendly: "medium",
+          strategy: "structured",
+          reason: "Matched reference database entries for this request/document.",
+        });
+      }
+      plannedContext.promptDebug = createPromptDebugBreakdown(plannedContext.promptDebug.entries);
 
       if (shouldRequestPlan) {
         const planSkills: ChatSkills = {
@@ -1100,7 +1430,10 @@ const CopilotPanel: React.FC = () => {
         const basePlanRequest = pendingClarification
           ? `The user is answering a previous clarification question. Continue planning from the original request and the new answer.\n\n## Original Request\n${pendingClarification.userMessage.content}\n\n## Clarification Question\n${pendingClarification.promptContent}\n\n## User Answer\n${userMessage.content}\n\nNow produce the formal plan if enough information is available. If information is still missing, output a new "## Clarification Needed" section and ask only the missing questions.`
           : userMessage.content;
-        const planRequest = `${basePlanRequest}\n\nNeedPlan 已触发。请先输出执行计划，等待用户确认后再生成蓝图、正文或修改文件。现在不要写文件。\n\nIf essential information is missing, do not pretend this is a plan. Output exactly a "## Clarification Needed" section with the questions instead.`;
+        const architectPlanRequest = requestSkills.agentMode === "architect"
+          ? `\n\n## Architect Plan Protocol\n- First diagnose the author profile: recurring obsessions, author habits, intended premise, narrative texture, disliked patterns, character handling, and theme direction.\n- If the author profile, premise, or rebuild direction is not clear enough, output exactly "## Clarification Needed" followed by the supported JSON questions object. Do not output a plan in the same message.\n- If this is a rebuild/start-over request (${isArchitectRebuildRequest(basePlanRequest) ? "yes" : "no"}), do not preserve old worldbuilding by default. Ask again what to keep or discard, the new core genre/direction, protagonist vs ensemble preference, theme/premise, and desired narrative texture.\n- Once enough answers exist, output a change plan with: 作者画像判断, 当前信息缺口, 旧设定保留/废弃清单, 新方向设计原则, 分阶段改动计划, and suggested Memory Candidate targets.\n- Do not write chapter prose or modify files in Architect plan mode.`
+          : "";
+        const planRequest = `${basePlanRequest}\n\nNeedPlan 已触发。请先输出执行计划，等待用户确认后再生成蓝图、正文或修改文件。现在不要写文件。\n\nIf essential information is missing, do not pretend this is a plan. Output exactly a "## Clarification Needed" section with the questions instead.${architectPlanRequest}`;
 
         const planResponse = await callAI({
           modelProfile: requestModel,
@@ -1116,7 +1449,7 @@ const CopilotPanel: React.FC = () => {
           skills: planSkills,
           workspaceRoot: rootPath ?? undefined,
           directoryTree,
-          memoryContext: memoryPrompt,
+          memoryContext: runtimeContext,
         });
         if (!isWorkspaceCurrent()) return;
 
@@ -1171,13 +1504,17 @@ const CopilotPanel: React.FC = () => {
         if (!forceCreateFile) return content;
         return `${content}\n\n## 文件创建强制要求\n用户这次要求实际创建/保存文件。你必须在本轮输出 create_file 工具调用，不能只输出正文，不能只说“我会创建”。${defaultChapterToDocx ? "这是章节正文创建请求；如果用户没有明确指定 .md/.txt/.docx，文件路径必须使用 .docx。" : ""}如果之前已经写出正文但没有创建文件，本轮优先补 create_file。`;
       };
+      const withCharacterDualWriteDirective = (content: string) => {
+        if (!isCharacterSheetRequest(content)) return content;
+        return `${content}\n\n## 人设双写强制要求\n这次涉及创建或更新人物/角色/人设。你必须同时完成两类写入：\n1. 先调用 upsert_reference_entries，listName 必须使用 "人物"，body 必须包含 current_desire/current_fear/current_emotion/current_bias。\n2. 再调用 create_file 或 edit_file 写入人类可读的 .md 人设档案。\n不能只写 .md，也不能只写参考条目数据库。`;
+      };
 
       let response = await callAI({
         modelProfile: requestModel,
         taskType: "chat",
         userMessage: override?.clearPendingPlan
-          ? `用户已确认以下计划，请直接按计划执行，不要重新制定计划。若计划已经给出明确文件、位置和插入文本，请优先调用对应写入工具，不要为了重复确认而重读全文。执行完成后简要说明结果；只有项目状态确实变化时才输出 Memory Candidate。\n\n## 原始需求\n${activeConversation.pendingPlan?.userMessage.content ?? userMessage.content}\n\n## 已确认计划\n${activeConversation.pendingPlan?.planContent ?? ""}\n\n## 本次指令\n${userMessage.content}`
-          : withCreateFileDirective(userMessage.content),
+          ? withCharacterDualWriteDirective(`用户已确认以下计划，请直接按计划执行，不要重新制定计划。若计划已经给出明确文件、位置和插入文本，请优先调用对应写入工具，不要为了重复确认而重读全文。执行完成后简要说明结果；只有项目状态确实变化时才输出 Memory Candidate。\n\n## 原始需求\n${activeConversation.pendingPlan?.userMessage.content ?? userMessage.content}\n\n## 已确认计划\n${activeConversation.pendingPlan?.planContent ?? ""}\n\n## 本次指令\n${userMessage.content}`)
+          : withCharacterDualWriteDirective(withCreateFileDirective(userMessage.content)),
         documentContext: plannedContext.content,
         documentFileName: activeFileAtStart?.name,
         maxTokens: undefined,
@@ -1188,32 +1525,21 @@ const CopilotPanel: React.FC = () => {
         skills: requestSkills,
         workspaceRoot: rootPath ?? undefined,
         directoryTree,
-        memoryContext: memoryPrompt,
+        memoryContext: runtimeContext,
       });
       if (!isWorkspaceCurrent()) return;
 
       // 实现多轮工具调用循环
       let currentResponse = response;
       const maxIterations = 100;
-      const WRITE_TOOLS = new Set(["edit_file", "edit_docx", "create_file", "create_blueprint"]);
+      const WRITE_TOOLS = new Set(["edit_file", "edit_docx", "create_file", "create_blueprint", "upsert_reference_entries"]);
       let hasSuccessfulCreateFile = false;
+      let hasSuccessfulCharacterMdWrite = false;
+      let hasSuccessfulReferenceUpsert = false;
       let createFileRecoveryAttempted = false;
+      let characterDualWriteRecoveryAttempted = false;
 
-      const extractToolCalls = (text: string): Array<{ fullMatch: string; json: string }> => {
-        const results: Array<{ fullMatch: string; json: string }> = [];
-        const startPattern = /```(?:tool[_-]?call|json)\s*\n/g;
-        let startMatch: RegExpExecArray | null;
-        while ((startMatch = startPattern.exec(text)) !== null) {
-          const startIndex = startMatch.index + startMatch[0].length;
-          const endMarker = text.indexOf('\n```', startIndex);
-          if (endMarker === -1) break;
-          const json = text.substring(startIndex, endMarker);
-          if (!/"(?:name|tool)"\s*:/.test(json)) continue;
-          const fullMatch = text.substring(startMatch.index, endMarker + 4);
-          results.push({ fullMatch, json });
-        }
-        return results;
-      };
+      const extractToolCalls = extractToolCallsFromText;
 
       const isLikelyCompleteJson = (s: string): boolean => {
         let depth = 0;
@@ -1491,6 +1817,43 @@ const CopilotPanel: React.FC = () => {
         if (!isWorkspaceCurrent()) return;
         const extractedCalls = extractToolCalls(currentResponse);
         if (extractedCalls.length === 0 || !rootPath) {
+          const needsCharacterDualWrite = isCharacterSheetRequest(userMessage.content)
+            || isCharacterSheetRequest(activeConversation.pendingPlan?.userMessage.content ?? "")
+            || isCharacterSheetRequest(activeConversation.pendingPlan?.planContent ?? "")
+            || hasSuccessfulCharacterMdWrite
+            || hasSuccessfulReferenceUpsert;
+          if (
+            rootPath
+            && needsCharacterDualWrite
+            && (!hasSuccessfulReferenceUpsert || !hasSuccessfulCharacterMdWrite)
+            && !characterDualWriteRecoveryAttempted
+          ) {
+            appendAssistantText(currentResponse);
+            characterDualWriteRecoveryAttempted = true;
+            const missingParts = [
+              !hasSuccessfulReferenceUpsert ? "upsert_reference_entries 写入人物参考条目数据库" : "",
+              !hasSuccessfulCharacterMdWrite ? "create_file 或 edit_file 写入 .md 人设档案" : "",
+            ].filter(Boolean).join(" 和 ");
+            setStatusText("人设需要数据库和 md 双写，正在要求 AI 补齐...");
+            currentResponse = await callAI({
+              modelProfile: requestModel,
+              taskType: "chat",
+              userMessage: `上一轮涉及人物/角色/人设，但没有完成数据库和 .md 双写。请现在只输出缺失的工具调用，补齐：${missingParts}。\n\n要求：\n- 数据库工具必须使用 upsert_reference_entries，listName 使用 "人物"，items[].body 必须包含 current_desire/current_fear/current_emotion/current_bias。\n- .md 档案必须使用工作区相对路径，建议放在 Settings/Characters/ 或使用清晰的 角色-姓名.md。\n- 不要输出解释文字，只输出必要的 fenced tool_call JSON。`,
+              documentContext: plannedContext.content,
+              documentFileName: activeFileAtStart?.name,
+              maxTokens: undefined,
+              conversationHistory: nextMessages.slice(-6, -1),
+              attachments: requestAttachments,
+              multiFileContext,
+              contextMaxLength,
+              skills: requestSkills,
+              workspaceRoot: rootPath ?? undefined,
+              directoryTree: directoryTree,
+              memoryContext: runtimeContext,
+            });
+            if (!isWorkspaceCurrent()) return;
+            continue;
+          }
           if (rootPath && forceCreateFile && !hasSuccessfulCreateFile && !createFileRecoveryAttempted) {
             appendAssistantText(currentResponse);
             createFileRecoveryAttempted = true;
@@ -1509,14 +1872,17 @@ const CopilotPanel: React.FC = () => {
               skills: requestSkills,
               workspaceRoot: rootPath ?? undefined,
               directoryTree: directoryTree,
-              memoryContext: memoryPrompt,
+              memoryContext: runtimeContext,
             });
             if (!isWorkspaceCurrent()) return;
             continue;
           }
           break;
         }
-        appendAssistantText(currentResponse);
+        const visibleBeforeTools = stripToolCalls(currentResponse);
+        if (visibleBeforeTools && !extractedCalls.some((call) => WRITE_TOOLS.has((parseToolCall(call.json)?.name ?? "")))) {
+          appendAssistantText(visibleBeforeTools);
+        }
 
         const toolResults: Array<{ name: string; result: string }> = [];
 
@@ -1593,7 +1959,7 @@ const CopilotPanel: React.FC = () => {
                 skills: requestSkills,
                 workspaceRoot: rootPath ?? undefined,
                 directoryTree: directoryTree,
-                memoryContext: memoryPrompt,
+                memoryContext: runtimeContext,
               });
               if (!isWorkspaceCurrent()) return;
 
@@ -1656,11 +2022,29 @@ const CopilotPanel: React.FC = () => {
               void loadBlueprints();
             }
 
+            if (parsed.name === "upsert_reference_entries" && !toolResult.result.startsWith("Error")) {
+              hasSuccessfulReferenceUpsert = true;
+              await loadReferenceLists().catch(() => undefined);
+              setStatusText("已更新参考条目");
+            }
+
             if (WRITE_TOOLS.has(parsed.name) && !toolResult.result.startsWith("Error")) {
               if (parsed.name === "create_file") {
                 hasSuccessfulCreateFile = true;
+                const createdPath = typeof toolArgs?.path === "string" ? toolArgs.path : "";
+                if (/\.md$/i.test(createdPath) && isCharacterSheetPath(createdPath)) {
+                  hasSuccessfulCharacterMdWrite = true;
+                }
               }
-              await handleWriteToolSuccess(parsed.name, toolResult.result, toolArgs?.path as string ?? "");
+              if (parsed.name === "edit_file") {
+                const editedPath = typeof toolArgs?.path === "string" ? toolArgs.path : "";
+                if (/\.md$/i.test(editedPath) && isCharacterSheetPath(editedPath)) {
+                  hasSuccessfulCharacterMdWrite = true;
+                }
+              }
+              if (parsed.name !== "upsert_reference_entries") {
+                await handleWriteToolSuccess(parsed.name, toolResult.result, toolArgs?.path as string ?? "");
+              }
             }
 
             toolResults.push({ name: parsed.name, result: toolResult.result });
@@ -1676,7 +2060,9 @@ const CopilotPanel: React.FC = () => {
         }
 
         if (toolResults.length > 0) {
-          const toolContext = toolResults.map(r => `Tool: ${r.name}\nResult: ${r.result}`).join("\n\n");
+          const toolContext = toolResults
+            .map(r => `Tool: ${r.name}\nResult: ${summarizeToolResultForModel(r.name, r.result)}`)
+            .join("\n\n");
 
           setStatusText(`Processing tool results (iteration ${iteration + 1})...`);
 
@@ -1702,7 +2088,7 @@ const CopilotPanel: React.FC = () => {
             skills: requestSkills,
             workspaceRoot: rootPath ?? undefined,
             directoryTree: directoryTree,
-            memoryContext: memoryPrompt,
+            memoryContext: runtimeContext,
           });
           if (!isWorkspaceCurrent()) return;
 
@@ -1721,23 +2107,28 @@ const CopilotPanel: React.FC = () => {
       // 组合最终响应（只显示 AI 的最终回复）
       appendAssistantText(currentResponse);
       response = assistantTextParts.join("\n\n") || stripToolCalls(currentResponse) || currentResponse;
-      const memoryCandidate = extractMemoryCandidate(response);
-      if (memoryCandidate) {
-        const memoryResult = await applyMemoryCandidate(memoryCandidate, {
+      const memoryCandidates = extractMemoryCandidates(response);
+      if (memoryCandidates.length > 0) {
+        const memoryResults = await applyMemoryCandidates(memoryCandidates, {
           hasSuccessfulCreateFile,
           isConfirmedPlanExecution: Boolean(override?.clearPendingPlan),
         });
         if (!isWorkspaceCurrent()) return;
-        response = stripMemoryCandidate(response);
-        if (memoryResult.applied) {
-          const targetName = memoryResult.target === "important"
-            ? "Importants.md"
-            : memoryResult.target === "nova"
-              ? "Nova.md"
-              : memoryResult.target === "snapshot"
-                ? "Snapshot.md"
-                : "Cache.md";
-          setStatusText(`已更新 ${targetName}`);
+        response = stripMemoryCandidates(response);
+        const targetNames = Array.from(new Set(memoryResults
+          .filter((result) => result.applied)
+          .map((result) => {
+            if (result.target === "important") return "Importants.md";
+            if (result.target === "nova") return "Nova.md";
+            if (result.target === "author_voice") return "AuthorVoice.md";
+            if (result.target === "obsession") return "Obsessions.md";
+            if (result.target === "snapshot") return "Snapshot.md";
+            if (result.target === "cache") return "Cache.md";
+            return "";
+          })
+          .filter(Boolean)));
+        if (targetNames.length > 0) {
+          setStatusText(`已更新 ${targetNames.join("、")}`);
         }
       }
 
@@ -1824,7 +2215,7 @@ const CopilotPanel: React.FC = () => {
 
     const buildSkills: ChatSkills = {
       ...normalizeChatSkills(activeConversation?.chatSkills ?? chatSkills),
-      agentMode: pendingPlan.agentMode === "editor" ? "editor" : "writer",
+        agentMode: pendingPlan.agentMode === "editor" ? "editor" : pendingPlan.agentMode === "architect" ? "architect" : "writer",
       agentSubMode: "build",
       forcePlanMode: false,
     };
@@ -1889,7 +2280,7 @@ const CopilotPanel: React.FC = () => {
       attachments: previousUserMessage.attachments ?? [],
       skills: {
         ...normalizeChatSkills(activeConversation?.chatSkills ?? chatSkills),
-        agentMode: pendingClarification?.agentMode === "editor" ? "editor" : "writer",
+        agentMode: pendingClarification?.agentMode === "editor" ? "editor" : pendingClarification?.agentMode === "architect" ? "architect" : "writer",
         agentSubMode: "plan",
         forcePlanMode: true,
       },
@@ -2405,7 +2796,7 @@ const CopilotPanel: React.FC = () => {
               }}
               role="menu"
             >
-              {(["writer", "editor"] as const).map((mode) => (
+              {(["writer", "editor", "architect"] as const).map((mode) => (
                 <button
                   key={mode}
                   type="button"

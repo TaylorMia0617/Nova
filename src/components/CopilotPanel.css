@@ -429,6 +429,11 @@
 .message.user .message-text {
   background: linear-gradient(135deg, #255aa7 0%, #3278d3 100%);
   color: #ffffff;
+  white-space: pre-wrap;
+}
+
+.message.user .message-text p {
+  white-space: inherit;
 }
 
 .message.assistant .message-text {

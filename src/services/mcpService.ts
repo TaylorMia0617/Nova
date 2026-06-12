@@ -1,7 +1,7 @@
 import type { ModelProfile } from "../types/ai";
 import type { McpTool, McpToolResult } from "../types/ai";
-import { readFile, readDirectory, readFileBinary, writeFile, writeFileBinary, createFile, listBlueprints, saveBlueprint } from "./fileSystemService";
-import type { WorkspaceNode } from "./fileSystemService";
+import { getReferenceList, getReferenceLists, readFile, readDirectory, readFileBinary, saveReferenceList, writeFile, writeFileBinary, createFile, listBlueprints, saveBlueprint } from "./fileSystemService";
+import type { ReferenceListData, WorkspaceNode } from "./fileSystemService";
 import type { BlueprintDocument, BlueprintEdge, BlueprintNode } from "../types/blueprint";
 import { createDocxBase64FromPlainText, parseDocxBase64, serializeDocxBase64, type ProseMirrorNode } from "./docxOoxmlService";
 import { searchWithTavily } from "./searchService";
@@ -65,14 +65,17 @@ type ResolvedWorkspacePath = {
 
 type WriteToolSuccess = {
   ok: true;
-  action: "create_file" | "edit_file" | "edit_docx";
-  relativePath: string;
-  absolutePath: string;
-  fileType: "text" | "docx";
+  action: "create_file" | "edit_file" | "edit_docx" | "upsert_reference_entries";
+  relativePath?: string;
+  absolutePath?: string;
+  fileType?: "text" | "docx" | "reference";
+  listName?: string;
+  listId?: string;
   existed?: boolean;
   bytes?: number;
   edits?: number;
   insertions?: number;
+  upserted?: number;
 };
 
 function formatPathError(path: string): string {
@@ -203,6 +206,42 @@ const LOCAL_FILESYSTEM_TOOLS: McpTool[] = [
     }
   },
   {
+    name: "upsert_reference_entries",
+    description: "Create or update structured reference entries in the workspace reference database. Use this for AI-generated character sheets and other structured setting records; character sheets should default to listName=\"人物\".",
+    inputSchema: {
+      type: "object",
+      properties: {
+        listName: {
+          type: "string",
+          description: "Reference list name. Use 人物 for character sheets unless the user asks otherwise."
+        },
+        items: {
+          type: "array",
+          description: "Reference entries to insert or update by key.",
+          items: {
+            type: "object",
+            properties: {
+              key: {
+                type: "string",
+                description: "Entry key, usually the character name."
+              },
+              value: {
+                type: "string",
+                description: "Short annotation shown in reference suggestions."
+              },
+              body: {
+                type: "string",
+                description: "Structured body. Character entries should include current_desire, current_fear, current_emotion, and current_bias."
+              }
+            },
+            required: ["key", "value", "body"]
+          }
+        }
+      },
+      required: ["items"]
+    }
+  },
+  {
     name: "edit_file",
     description: "对指定文件进行行级编辑（支持替换、插入、删除操作）",
     inputSchema: {
@@ -240,7 +279,7 @@ const LOCAL_FILESYSTEM_TOOLS: McpTool[] = [
   },
   {
     name: "edit_docx",
-    description: "Safely edit an existing DOCX by inserting plain-text paragraphs before or after matched text. Use this for local changes in existing .docx files; do not use create_file to overwrite an existing DOCX.",
+    description: "Safely edit an existing DOCX by inserting plain-text paragraphs before or after matched text, or appending to the end. Use this for local changes in existing .docx files; do not use create_file to overwrite an existing DOCX.",
     inputSchema: {
       type: "object",
       properties: {
@@ -256,7 +295,7 @@ const LOCAL_FILESYSTEM_TOOLS: McpTool[] = [
             properties: {
               type: {
                 type: "string",
-                description: "append_after_text inserts after the matching paragraph; insert_before_text inserts before it."
+                description: "append_after_text inserts after the matching paragraph; insert_before_text inserts before it; append_to_end appends to the end and does not need matchText."
               },
               matchText: {
                 type: "string",
@@ -267,7 +306,7 @@ const LOCAL_FILESYSTEM_TOOLS: McpTool[] = [
                 description: "Plain text to insert. Blank lines create separate paragraphs."
               }
             },
-            required: ["type", "matchText", "insertText"]
+            required: ["type", "insertText"]
           }
         }
       },
@@ -318,7 +357,7 @@ function normalizeToolForPrompt(tool: McpTool): McpTool {
 
 export function getLocalTools(agentSubMode?: "plan" | "build"): McpTool[] {
   const tools = agentSubMode === "plan"
-    ? LOCAL_FILESYSTEM_TOOLS.filter(t => t.name !== "edit_file" && t.name !== "create_file" && t.name !== "create_blueprint")
+    ? LOCAL_FILESYSTEM_TOOLS.filter(t => t.name !== "edit_file" && t.name !== "create_file" && t.name !== "create_blueprint" && t.name !== "upsert_reference_entries")
     : LOCAL_FILESYSTEM_TOOLS;
   return tools.map(normalizeToolForPrompt);
 }
@@ -507,6 +546,12 @@ function plainTextToDocxParagraphs(value: string): ProseMirrorNode[] {
     }));
 }
 
+function isEmptyDocxParagraph(node: ProseMirrorNode | undefined) {
+  if (!node || node.type !== "paragraph") return false;
+  const text = (node.content ?? []).map(child => child.text ?? "").join("").trim();
+  return text.length === 0;
+}
+
 type DocxEditOperation = {
   type?: unknown;
   matchText?: unknown;
@@ -533,14 +578,22 @@ async function editDocxByTextInsertions(resolved: ResolvedWorkspacePath, rawOper
     const matchText = String(operation?.matchText ?? "");
     const normalizedMatchText = normalizeMatchText(matchText);
     const insertParagraphs = plainTextToDocxParagraphs(String(operation?.insertText ?? ""));
-    if (!["append_after_text", "insert_before_text"].includes(type)) {
+    if (!["append_after_text", "insert_before_text", "append_to_end"].includes(type)) {
       throw new Error(`Unsupported edit_docx operation type: ${type || "(empty)"}`);
     }
-    if (!normalizedMatchText) {
+    if (type !== "append_to_end" && !normalizedMatchText) {
       throw new Error("matchText is required for edit_docx operations.");
     }
     if (insertParagraphs.length === 0) {
       throw new Error("insertText must contain at least one non-empty paragraph.");
+    }
+
+    if (type === "append_to_end") {
+      const currentContent = docJson.content ?? [];
+      const baseContent = currentContent.length === 1 && isEmptyDocxParagraph(currentContent[0]) ? [] : currentContent;
+      docJson.content = [...baseContent, ...insertParagraphs];
+      insertions += insertParagraphs.length;
+      continue;
     }
 
     const range = findDocxMatchRange(docJson.content ?? [], matchText);
@@ -571,6 +624,67 @@ async function readWorkspaceFileContent(resolved: ResolvedWorkspacePath): Promis
   return readFile(resolved.absolutePath);
 }
 
+function createReferenceListId(name: string) {
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^\w\u4e00-\u9fff-]+/g, "")
+    .slice(0, 32) || "reference";
+  return `${slug}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function upsertReferenceEntries(args: Record<string, unknown>): Promise<{
+  list: ReferenceListData;
+  upserted: number;
+}> {
+  const listName = String(args.listName ?? "人物").trim() || "人物";
+  const rawItems = args.items;
+  if (!Array.isArray(rawItems) || rawItems.length === 0) {
+    throw new Error("items array is required and must not be empty.");
+  }
+
+  const items = rawItems.map((item, index) => {
+    if (!item || typeof item !== "object") {
+      throw new Error(`items[${index}] must be an object.`);
+    }
+    const typed = item as { key?: unknown; value?: unknown; body?: unknown };
+    const key = String(typed.key ?? "").trim();
+    const value = String(typed.value ?? "").trim();
+    const body = String(typed.body ?? "").trim();
+    if (!key) throw new Error(`items[${index}].key is required.`);
+    if (!value) throw new Error(`items[${index}].value is required.`);
+    if (!body) throw new Error(`items[${index}].body is required.`);
+    return { key, value, body };
+  });
+
+  const index = await getReferenceLists();
+  const existingIndex = index.find((list) => list.name === listName);
+  const existingList = existingIndex ? await getReferenceList(existingIndex.id) : null;
+  const list: ReferenceListData = existingList ?? {
+    id: createReferenceListId(listName),
+    name: listName,
+    items: [],
+  };
+
+  const nextItems = [...list.items];
+  for (const item of items) {
+    const existingItemIndex = nextItems.findIndex((entry) => entry.key === item.key);
+    if (existingItemIndex >= 0) {
+      nextItems[existingItemIndex] = item;
+    } else {
+      nextItems.push(item);
+    }
+  }
+
+  const saved = await saveReferenceList({
+    ...list,
+    name: listName,
+    items: nextItems,
+  });
+  return { list: saved, upserted: items.length };
+}
+
 export async function runLocalTool(
   toolName: string,
   args: Record<string, unknown>,
@@ -579,7 +693,7 @@ export async function runLocalTool(
   options?: { enableWebSearch?: boolean; searchCount?: number; searchLimit?: number; agentSubMode?: "plan" | "build" }
 ): Promise<McpToolResult> {
   try {
-    if ((toolName === "edit_file" || toolName === "edit_docx" || toolName === "create_file") && options?.agentSubMode === "plan") {
+    if ((toolName === "edit_file" || toolName === "edit_docx" || toolName === "create_file" || toolName === "upsert_reference_entries") && options?.agentSubMode === "plan") {
       return { toolName, result: `Error: ${toolName} is not available in Plan mode. Switch to Build mode to make edits.` };
     }
 
@@ -733,6 +847,24 @@ export async function runLocalTool(
             summary: summarizeBlueprint(saved),
           }, null, 2),
         };
+      }
+      case "upsert_reference_entries": {
+        try {
+          const { list, upserted } = await upsertReferenceEntries(args);
+          return {
+            toolName,
+            result: makeWriteSuccess({
+              ok: true,
+              action: "upsert_reference_entries",
+              fileType: "reference",
+              listName: list.name,
+              listId: list.id,
+              upserted,
+            }),
+          };
+        } catch (error) {
+          return { toolName, result: `Error updating reference entries: ${error instanceof Error ? error.message : String(error)}` };
+        }
       }
       case "edit_file": {
         let resolved: ResolvedWorkspacePath;

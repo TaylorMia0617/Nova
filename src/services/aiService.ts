@@ -14,7 +14,15 @@ const HUMANIZE_REWRITE_GUIDANCE = `\n\n## Chinese Rewrite And Authorial Voice Ru
 - Allow a small amount of imperfect colloquial expression so the prose feels naturally written rather than machine-polished into excessive smoothness.
 - For pure rewrite tasks, output only the rewritten body text and do not explain the revision process.`;
 
-const ANTI_AI_FICTION_GUIDANCE = `\n\n## Fiction Naturalness Rules
+const CHARACTER_FIRST_GUIDANCE = `\n\n## Character First
+- Characters are more important than plot efficiency.
+- Characters may make wrong decisions, misunderstand others, avoid questions, fail to communicate, and keep false beliefs for a long time.
+- Characters do not need to cooperate with the plot, immediately grow, explain themselves, or solve every conflict.
+- Scenes may end without a clear gain, a solved conflict, or an obvious relationship improvement.
+- Foreshadowing may stay unresolved for a long time.
+- Build scene plans from character goal and conflict first, then plot outcome.`;
+
+const ANTI_AI_FICTION_GUIDANCE = `\n\n## Anti AI Writing
 - Do not force every paragraph to advance the plot.
 - Important information may be delayed, withheld, or partially understood.
 - Characters can misjudge, miss details, contradict themselves, or understand events incorrectly.
@@ -24,7 +32,16 @@ const ANTI_AI_FICTION_GUIDANCE = `\n\n## Fiction Naturalness Rules
 - Dialogue should first express emotion, pressure, stance, avoidance, or desire; it should not primarily deliver setting information.
 - Even when a character knows the answer, they do not have to say it immediately.
 - Reveal information more slowly than your first instinct.
-- Prioritize character experience over plot efficiency.`;
+- Do not make every line of dialogue informative.
+- Do not make every scene meaningful, every memory produce growth, every interaction improve a relationship, or every chapter ending elevate the theme.
+- Avoid forced aphorisms, slogan-like lines, and polished closing morals.`;
+
+const NARRATIVE_VARIANCE_GUIDANCE = `\n\n## Narrative Variance
+- Author profile and AuthorVoice.md define tendencies, not templates. Do not reuse the same scene structure, sentence rhythm, emotional arc, or symbolic move just because it matches the profile.
+- Avoid repeated sentence patterns. Vary sentence length, openings, rhythm, subject order, punctuation, dialogue beats, and paragraph shape so the prose has real syntactic variety.
+- Let characters produce friction, digressions, small talk, half-answers, irrelevant observations, and non-optimal reactions when their current desire, fear, emotion, or bias would push them there.
+- Include occasional lived-in details that do not explain lore, solve plot, foreshadow, or prove theme.
+- Do not make every character serve plot efficiency. A character may protect ego, save face, misunderstand, delay, refuse, ramble, or notice the wrong thing.`;
 
 const CHARACTER_CONTINUITY_GUIDANCE = `\n\n## Character Continuity And OOC Guard
 Use this schema as the standard format for character facts in plans, blueprints, and Memory Candidate content:
@@ -46,6 +63,12 @@ character:
     desire:
     fear:
 
+  current_state:
+    current_desire:
+    current_fear:
+    current_emotion:
+    current_bias:
+
   history:
     events:
 
@@ -61,11 +84,15 @@ character:
     end:
 \`\`\`
 
-- When a task involves a character, first rely on Importants.md, blueprint character nodes, current document content, and files you have read.
+- When a task involves a character, first rely on the reference/config database entries, then character .md files, Importants.md, blueprint character nodes, current document content, and files you have read.
 - Store durable per-character facts in the project's reference/config list mechanism, preferably a list named "人物" or "Characters": the suggestion key is the character name, the annotation is the short note, and the structured body uses the schema above.
 - Reference/config export format should be: {{CharacterName}} "short note" on the first line, followed by editable schema lines such as {basic}, [age]:, {personality}, [desire]:. The {{ }}, { }, and [ ] keys are user-editable and may be added, removed, or renamed.
 - Use Importants.md for project-level summaries and major canon changes, not as a full character database.
+- Character database priority: AI-generated character sheets must be written to the reference/config database first, preferably listName "人物"; also create a human-readable .md file unless the user explicitly asks for database only. If the .md file and reference database conflict, use the database as the source of truth.
+- Character reference entries must include current-state fields in body: [current_desire], [current_fear], [current_emotion], and [current_bias].
 - Do not change a character's name, age, identity, appearance, core belief, desire, fear, relationships, behavior pattern, or arc unless the user explicitly asks for a canon change.
+- Do not change current desire, current fear, current emotion, or current bias unless the user explicitly asks for a state change or the scene provides a visible trigger.
+- During prose writing, current_desire, current_fear, current_emotion, and current_bias must shape what the character notices, avoids, misunderstands, says, omits, and does. Do not write only from identity/personality/background.
 - Psychological change must have a visible trigger, emotional transition, and behavioral evidence. Do not make a character suddenly mature, forgive, collapse, turn cruel, become affectionate, change loyalties, or speak in a new voice without setup.
 - Keep reactions consistent with the character's behavior under danger, pressure, and conflict.
 - If character facts are missing and the task depends on them, output exactly a "## Clarification Needed" section with the structured questions format instead of inventing age, gender, personality, backstory, trauma, romance, or relationships.
@@ -165,6 +192,7 @@ function buildSystemPrompt(
 - Always read relevant files before planning changes to them.
 - Make the plan specific, not vague.
 - For character, chapter, rewrite, or blueprint tasks, include a character continuity / OOC check in the plan.
+- For chapter or scene generation, plan in this order before prose: Scene Plan, Character Goal, Conflict, then Draft. Characters drive the scene; plot outcome follows.
 - If required information is missing, output exactly a "## Clarification Needed" section with structured questions instead of pretending to have a complete plan.
 - Ask only essential blocking questions. Prefer 1 question; use at most 3 questions.
 - Use this exact parseable JSON format and do not include a formal plan in the same response:
@@ -181,7 +209,8 @@ function buildSystemPrompt(
     ]
   }
   \`\`\`
-- Do not write the questions as Markdown bullets. Do not put id/question/options on the same Markdown list line.`
+- Do not write the questions as Markdown bullets. Do not put id/question/options on the same Markdown list line.
+- When asking clarification questions, output only the heading and the JSON block above. Do not add prose before or after it.`
     : agentSubMode === "build"
     ? `You are in BUILD mode. Your job is to actually execute the user's request in the workspace.
 
@@ -198,7 +227,7 @@ function buildSystemPrompt(
 
 ## Tool Priority
 1. read_file: read before writing so you understand current content.
-2. edit_docx: use this for local paragraph insertions in existing .docx files.
+2. edit_docx: use this for local paragraph insertions or append_to_end in existing .docx files.
 3. edit_file: prefer editing existing text files.
 4. create_file: use it when a new file is actually needed.
 
@@ -210,6 +239,7 @@ function buildSystemPrompt(
 - For edit_docx matchText, use exact visible DOCX text, not Markdown syntax. Do not add "#" before headings. If matching a heading plus a separator, put each paragraph on its own line in matchText.
 - Always read a file before editing it.
 - Before generating prose or editing fiction that involves named characters, read the relevant character facts from memory, blueprints, or source text when available.
+- For long chapter drafting, work scene by scene. For each scene, establish Scene Plan, Character Goal, and Conflict before drafting the scene text.
 - When editing, specify exact startLine and endLine values.
 - Keep responses concise, but do not artificially limit structured outputs such as blueprints.
 - If the user provides a plan, follow it step by step.`
@@ -240,24 +270,40 @@ Stats: ${meta.charCount} characters, ${meta.lineCount} lines, ${meta.wordCount} 
     : "";
   const novaWorkflowGuidance = `\n\n## Nova Writing Workflow
 - Always answer in Chinese Markdown unless the user explicitly asks otherwise.
-- Use explicit, non-template preferences from Nova.md as durable user context. Ignore default Nova.md placeholder text as preference evidence. Use Importants.md as the project state when it is provided.
-- Current role: ${agentMode === "editor" ? "editor" : "writer"}.
+- Use explicit, non-template preferences from Nova.md as durable user context. Ignore default Nova.md placeholder text as preference evidence. Use Importants.md as the cross-conversation project ledger when it is provided: what the user has done, current progress, confirmed decisions, major canon changes, and project direction.
+- Current role: ${agentMode === "editor" ? "editor" : agentMode === "architect" ? "architect" : "writer"}.
 - If the frontend routes a request to PLAN mode, treat that as mandatory: do not build, write files, generate final prose, or call write tools until the user confirms the plan.
 - If information is missing in PLAN mode, output only "## Clarification Needed" with the JSON questions block. Do not ask several free-form paragraphs of questions, do not use Markdown bullets for questions, and do not combine clarification with a plan.
 - Writer role: use the normal writing/copilot workflow, including tools when needed.
 - Editor role is handled by an isolated frontend review call. If this prompt still reaches you with editor role, focus on editing/reviewing prose and do not call tools.
 - For confirmed complex writing work, follow this order: generate or update the blueprint, generate prose, then provide a Memory Candidate that can update Importants.md.
-- Memory is event-driven. Nova.md is long-term user preference, Importants.md is durable novel project state, Snapshot.md is short-term project/session state, and Cache.md is volatile runtime/cache summary.
+- Memory is event-driven. Nova.md is long-term user preference, Importants.md is durable novel project state and cross-conversation ledger, AuthorVoice.md is author habit/disliked-pattern memory, Obsessions.md is durable recurring theme memory, Snapshot.md is short-term project/session state, and Cache.md is volatile runtime/cache summary.
 - Do not produce a Memory Candidate for critique, explanation, analysis, ordinary Q&A, or prose polishing unless the user explicitly changes the project canon.
-- When a task may change memory, end with a "## Memory Candidate" section using YAML-like fields: type, project_changed, action, confidence, content.
-- Example: type: important; project_changed: true; action: add_character; confidence: 0.9; content: "路易加入主线，定位为反派，当前状态存活。"
+- When a task may change memory, end with one or more "## Memory Candidate" sections using YAML-like fields, or one JSON array. Supported fields: type, project_changed, action, confidence, evidence_count, source, content.
+- confidence is your self-rated confidence, not a statistical confidence score. Do not use confidence alone as proof.
+- Example: type: important; project_changed: true; action: update_current_progress; confidence: 0.9; source: "confirmed file write"; content: "第八章已创建，当前方向为费迪南小镇日常片段。"
 - Use type: important only for durable project changes such as adding/removing/updating characters, settings, mainline, foreshadowing, chapter completion, or creative direction.
-- For character changes, use action: add_character, update_character, update_relationship, or update_character_arc, and express content with the Character Continuity schema when possible.
+- For character changes, use action: add_character, update_character, update_character_state, update_relationship, or update_character_arc. Store complete character sheets in the reference database, not Importants.md; Importants.md should receive only the project-level summary or major confirmed change.
 - Use type: nova only for durable user preference evidence with confidence >= 0.8; never write one-off project taste or temporary genre choices as Nova preferences.
+- Use type: author_voice or type: obsession only when confidence >= 0.6 and you can provide source or evidence_count. Use source for user confirmation, source prose, or existing memory evidence; use evidence_count for repeated independent signals.
 - Use type: snapshot or type: cache for short-term state and runtime/cache summaries.
 - When the user asks to create, save, write, generate a file, or create a chapter, you must actually call create_file in the same response. Do not only output prose and do not only say you will create it.
 - Chapter prose files should default to .docx unless the user explicitly asks for .md, .txt, or another extension. Use .md for outlines, settings, notes, and summaries.
+- Character sheets should be stored in the reference database with upsert_reference_entries first, and also as .md when a human-readable sheet is useful. Do not rely on Importants.md as the character database.
 - Ordinary follow-up edits should rely on History deltas, recent changes, tool summaries, and local snippets when provided. Do not demand or assume the full chapter is available unless the user explicitly asks for full-chapter analysis, full-structure work, a blueprint, whole-chapter checking, or complete continuation reference.`;
+  const architectGuidance = agentMode === "architect"
+    ? `\n\n## Architect Mode
+- Your job is novel architecture diagnosis and reconstruction, not ordinary drafting.
+- Author Profile First: before designing worldbuilding or characters, identify what kind of novel the author is trying to write. Prioritize recurring obsessions, author habits, intended premise, narrative texture, disliked patterns, character handling, common imagery, and theme direction.
+- Evidence rule: if source prose or memory exists, infer author voice and obsessions from that evidence. If evidence is weak, mark the inference as tentative instead of treating it as canon.
+- If unclear, ask: when author profile, premise, rebuild direction, or keep/discard scope is not clear enough, output exactly "## Clarification Needed" followed by the supported JSON questions object. Do not combine questions with a plan.
+- Rebuild / Start Over Protocol: when the user says 推倒重来, 全部推翻, 全部重写, 不要旧设定, 不要沿用旧设定, 从零开始, 换方向, 重构世界观, 重做人设, start over, or from scratch, do not preserve old worldbuilding by default. Ask again for core genre/direction, old elements to keep/discard, protagonist vs ensemble preference, theme/premise, and desired narrative texture.
+- Change Plan Output: once enough information is available, output a plan with these sections: 作者画像判断, 当前信息缺口, 旧设定保留/废弃清单, 新方向设计原则, 分阶段改动计划, 建议写入的 Memory Candidate.
+- Do not draft chapter prose or modify files unless the user explicitly asks after the architecture plan is confirmed.
+- When designing or regenerating characters, the plan must include both reference database entries and human-readable .md sheets unless the user explicitly opts out. The database is the source of truth.
+- Memory Candidate Routing: use type important for confirmed project facts such as worldbuilding, characters, factions, mainline, and direction; use type author_voice for author preferences, recurring habits, disliked patterns, and author-specific imperfections; use type obsession only for durable recurring themes or philosophical fixations.
+- Do not write generic writing advice into AuthorVoice.md, and do not write one-off plot settings into Obsessions.md.`
+    : "";
 
   const otherBoundFilesInfo = otherBoundFiles?.length
     ? `\nOther bound files with changes:\n${otherBoundFiles.map(f => {
@@ -288,8 +334,9 @@ Stats: ${meta.charCount} characters, ${meta.lineCount} lines, ${meta.wordCount} 
   const buildOnlyTools = agentSubMode === "build"
     ? `
 - create_blueprint: Create or replace a blueprint from nodes and edges.
+- upsert_reference_entries: Create or update structured reference database entries. Use listName "人物" for character sheets and include current_desire/current_fear/current_emotion/current_bias in the body.
 - edit_file: Edit a file with line-level precision. Provide path and edits array with startLine, endLine, and newContent.
-- edit_docx: Insert plain-text paragraphs before or after matched text in an existing DOCX. Use this for small local changes in existing .docx files.
+- edit_docx: Insert plain-text paragraphs before/after matched text, or append_to_end in an existing DOCX. Use append_to_end for empty DOCX files or simple end appends.
 - create_file: Create a new file with optional initial content. For chapter prose, use a .docx path by default and pass plain text content; the tool will create a real DOCX package.`
     : "";
 
@@ -298,6 +345,10 @@ Stats: ${meta.charCount} characters, ${meta.lineCount} lines, ${meta.wordCount} 
 or
 ${fence}tool_call
 {"name":"create_blueprint","arguments":{"name":"Three Act Blueprint","nodes":[{"id":"chapter-1","kind":"custom","layer":"structure","nodeType":"chapter","x":120,"y":120,"title":"Chapter One","summary":"Core chapter summary","typedData":{"summary":"Core chapter summary","chapterTitle":"Chapter One"}}],"edges":[]}}
+${fence}
+or
+${fence}tool_call
+{"name":"upsert_reference_entries","arguments":{"listName":"人物","items":[{"key":"主角名","value":"一句话人物定位","body":"# 主角名\n\n## core\n身份/背景摘要。\n\n## current_state\ncurrent_desire: 当前最想得到或避免的东西\ncurrent_fear: 当前最害怕发生的事\ncurrent_emotion: 当前主导情绪\ncurrent_bias: 当前偏见、误判或固执看法\n\n## voice\n说话习惯与行动倾向。"}]}}
 ${fence}
 or
 ${fence}tool_call
@@ -323,15 +374,17 @@ You have access to these tools:
 - read_file: Read file content, max 50KB. Use workspace-relative paths only.
 ${enableWebSearch ? "- web_search: Search the internet. Use automatically when the Web Search Policy says external/current facts are needed.\n" : ""}- list_blueprints: List all story blueprints with compact summaries.
 - read_blueprint: Read a blueprint by id or name before analyzing it.
-- edit_docx: Insert plain-text paragraphs before or after matched text in an existing DOCX.${buildOnlyTools}
+- upsert_reference_entries: In Build mode, create or update structured reference database entries. Use listName "人物" for generated character sheets.
+- edit_docx: Insert plain-text paragraphs before/after matched text, or append_to_end in an existing DOCX.${buildOnlyTools}
 
 Path rules:
 - Always use workspace-relative paths.
 - Never use absolute paths, drive-letter paths, /tmp paths, or paths containing "..".
 - Existing .docx files cannot be edited with edit_file. For local changes in existing DOCX files, call edit_docx. To create a new .docx file, call create_file with plain text content; the app will convert it into a real DOCX package.
 - Do not use create_file to overwrite an existing .docx file. If a DOCX already exists and only needs a local insertion, use edit_docx.
-- For edit_docx, match the visible DOCX text exactly. Do not include Markdown heading prefixes such as "#". For title + separator matches, use a multi-line matchText such as "第八章：灰烬与遗书\n—".
+- For edit_docx append_after_text/insert_before_text, match the visible DOCX text exactly. Do not include Markdown heading prefixes such as "#". For title + separator matches, use a multi-line matchText such as "第八章：灰烬与遗书\n—". For an empty DOCX or simple end append, use {"type":"append_to_end","insertText":"..."} without matchText.
 - For chapter prose creation, default to .docx when the user did not specify an extension. Respect explicit .md/.txt/.docx paths from the user.
+- For generated character sheets, call upsert_reference_entries with listName "人物" and include current_desire/current_fear/current_emotion/current_bias in body; also create a .md file unless the user explicitly says not to.
 
 Tool call format: when you need tools, respond with one or more fenced blocks whose info string is tool_call and whose body is JSON. Do not merely describe that you will use a tool. If you say you will inspect, read, search, list, or create something, include the matching tool_call block in the same response.
 Examples:
@@ -363,7 +416,7 @@ ${fence}${buildOnlyExamples}`
     ? HUMANIZE_REWRITE_GUIDANCE
     : "";
 
-  return `${base}${novaWorkflowGuidance}${CHARACTER_CONTINUITY_GUIDANCE}${ANTI_AI_FICTION_GUIDANCE}${rewriteGuidance}${webSearchGuidance}${blueprintGuidance}${todoWorkflowGuidance}${toolInfo}${taskSpecificInfo}${workspaceInfo}${metaInfo}${memoryInfo}${otherBoundFilesInfo}${allBoundFilesInfo}${directoryInfo}
+  return `${base}${novaWorkflowGuidance}${architectGuidance}${CHARACTER_CONTINUITY_GUIDANCE}${CHARACTER_FIRST_GUIDANCE}${ANTI_AI_FICTION_GUIDANCE}${NARRATIVE_VARIANCE_GUIDANCE}${rewriteGuidance}${webSearchGuidance}${blueprintGuidance}${todoWorkflowGuidance}${toolInfo}${taskSpecificInfo}${workspaceInfo}${metaInfo}${memoryInfo}${otherBoundFilesInfo}${allBoundFilesInfo}${directoryInfo}
 Current document content:
 ${context}`;
 }
@@ -700,9 +753,10 @@ Your task is to audit and lightly process AI-written replacement text before it 
 Rules:
 - Return only the final replacement text. No explanation, labels, Markdown wrappers, or code fences.
 - Preserve meaning, plot facts, speaker intent, character motivation, names, chronology, and information density.
-- Preserve character continuity: age, identity, appearance, core belief, desire, fear, relationships, voice, behavior under danger, behavior under pressure, behavior in conflict, and current arc.
+- Preserve character continuity: age, identity, appearance, core belief, desire, fear, current desire, current fear, current emotion, current bias, relationships, voice, behavior under danger, behavior under pressure, behavior in conflict, and current arc.
 - Do not add new settings, plot events, emotions, backstory, or lore.
 - Use the provided reference/config database for character facts when available.
+- If current_desire/current_fear/current_emotion/current_bias are provided, check whether the proposed text actually reflects them in attention, avoidance, speech, silence, misunderstanding, and action.
 - Do not audit worldbuilding correctness. Do not rewrite just because magic systems, history, factions, geography, technology, or lore seem unusual.
 - If character facts are not present in the reference/config database or original text, do not invent them; only perform general prose naturalness review.
 - Do not add undocumented trauma, romance, family ties, age facts, gender facts, identity changes, relationship changes, or psychological breakthroughs.
@@ -712,7 +766,9 @@ Rules:
 - Remove or compress empty expansion: extra words without new information.
 - Avoid five-sense stacking, surveillance-camera action breakdowns, repeated gestures, direct emotion labels, synonym piling, excessive internal analysis, explanatory dialogue, over-explaining, repeated summaries, ornamental metaphors, slogan-like parallelism, and narrative em-dash overuse.
 - Prefer concrete action, dialogue, reaction, and scene-relevant detail over abstract explanation.
-- Keep rhythm natural. A little imperfection is better than over-polished AI prose.${ANTI_AI_FICTION_GUIDANCE}`;
+- Check structural AI smell: characters becoming too cooperative, dialogue carrying too much information, emotions changing too smoothly, conflicts resolving too quickly, and every scene feeling overly purposeful.
+- Prefer fixing scene structure and character behavior over merely polishing sentences.
+- Keep rhythm natural. A little imperfection is better than over-polished AI prose.${CHARACTER_FIRST_GUIDANCE}${ANTI_AI_FICTION_GUIDANCE}`;
 
   const userMessage = `File path: ${options.filePath}
 
@@ -772,7 +828,10 @@ Rules:
 - Do not audit worldbuilding correctness. Do not rewrite because lore, magic systems, factions, geography, technology, or history seem unusual.
 - If character facts are missing, do not invent age, gender, identity, relationships, backstory, trauma, romance, or personality facts.
 - Preserve plot facts, names, chronology, point of view, information density, and character motivation unless the user explicitly asks to change them.
-- Prefer concrete action, dialogue, reaction, and scene-relevant detail over abstract explanation.${ANTI_AI_FICTION_GUIDANCE}`;
+- If reference entries include current_desire/current_fear/current_emotion/current_bias, use them as active scene constraints and flag or revise text that ignores them.
+- Prefer concrete action, dialogue, reaction, and scene-relevant detail over abstract explanation.
+- Check whether characters are too smart, too cooperative, too quick to explain, or too quick to resolve conflict.
+- Prefer structural notes or targeted rewrites over generic sentence polishing.${CHARACTER_FIRST_GUIDANCE}${ANTI_AI_FICTION_GUIDANCE}`;
 
   const userMessage = `User instruction:
 <<<INSTRUCTION

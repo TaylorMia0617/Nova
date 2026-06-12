@@ -14,6 +14,7 @@ type EditorBridge = {
   getSelectionText: () => string;
   getSelectionRange: () => EditorRange | null;
   getContent: () => string;
+  getSerializedContent?: () => string;
   applyText: (options: EditorApplyOptions) => void;
   focus: () => void;
 };
@@ -30,6 +31,10 @@ export function getEditorSelectionText() {
 
 export function getEditorContent() {
   return editorBridge?.getContent() ?? "";
+}
+
+export function getEditorSerializedContent() {
+  return editorBridge?.getSerializedContent?.() ?? editorBridge?.getContent() ?? "";
 }
 
 export function insertTextIntoEditor(text: string) {

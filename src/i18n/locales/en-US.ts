@@ -91,6 +91,7 @@ const enUS: TranslationDict = {
     agentMode: "Role",
     writer: "Writer",
     editor: "Editor",
+    architect: "Architect",
     confirmPlan: "Confirm plan and build",
     clarificationQuestion: "Question:",
     clarificationCustomPlaceholder: "Type a custom answer...",

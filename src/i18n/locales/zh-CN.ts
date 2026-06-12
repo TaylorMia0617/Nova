@@ -91,6 +91,7 @@ const zhCN: TranslationDict = {
     agentMode: "角色",
     writer: "写手",
     editor: "编辑",
+    architect: "架构师",
     confirmPlan: "确认计划并执行",
     clarificationQuestion: "问题：",
     clarificationCustomPlaceholder: "输入自定义回答...",
