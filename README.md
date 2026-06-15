@@ -34,7 +34,7 @@ Your workspace remains local. Project conversations and memory live under `.nove
 Nova uses several memory files inside `.novel-assistance/habits/`:
 
 - `Importants.md`: cross-conversation project ledger, progress, confirmed decisions, major canon changes.
-- `AuthorVoice.md`: author habits, disliked patterns, recurring quirks.
+- `AuthorVoice.md`: author habits, disliked patterns, narrative mechanics, and recurring gaze/desire/body-focus patterns when relevant.
 - `Obsessions.md`: durable themes and philosophical fixations.
 - `Snapshot.md`: short-term project/session state.
 - `Cache.md`: volatile runtime memory and summaries.

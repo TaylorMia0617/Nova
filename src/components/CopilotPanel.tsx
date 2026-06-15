@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+﻿import React, { useEffect, useMemo, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ChevronDown, MessageSquarePlus, Paperclip, Send, Settings, Sparkles, Trash2, X } from "lucide-react";
@@ -25,7 +25,14 @@ import {
   loadMemoryContext,
   stripMemoryCandidates,
 } from "../services/memoryService";
-import { readFile, type ReferenceListData, type WorkspaceNode } from "../services/fileSystemService";
+import {
+  readFile,
+  readProjectAuthorVoice,
+  readProjectImportant,
+  readProjectObsessions,
+  type ReferenceListData,
+  type WorkspaceNode,
+} from "../services/fileSystemService";
 import { calculateTextStats } from "../utils/textStats";
 import type { AgentMode, ChatSkills, ConversationAttachment, ConversationMessage, ConversationRecord, ConversationSummary, ConversationWorkItem, EditReviewDebug, FileChange, FileContentCache, MultiFileContext, PromptDebugBreakdown, PromptDebugEntry } from "../types/ai";
 import "./CopilotPanel.css";
@@ -138,6 +145,39 @@ function buildRelevantReferenceContext(
     : content;
 }
 
+function assessProjectMemoryTemplateUpgrade(important: string, authorVoice: string, obsessions: string) {
+  const reasons: string[] = [];
+  const placeholderCount = [important, authorVoice, obsessions]
+    .join("\n")
+    .match(/待整理/g)?.length ?? 0;
+
+  if (placeholderCount >= 3) {
+    reasons.push("记忆文件里还有多处“待整理”，说明模板结构已经有了，但尚未基于作品完成提炼。");
+  }
+  if (!/Chapter Index/i.test(important)) {
+    reasons.push("Importants.md 缺少 Chapter Index，章节层索引可能还没有升级。");
+  }
+  if (!/NarrativeMechanics/i.test(authorVoice)) {
+    reasons.push("AuthorVoice.md 缺少 NarrativeMechanics，AI 可能仍停留在浅层风格总结。");
+  }
+  if (!/EroticLens/i.test(authorVoice)) {
+    reasons.push("AuthorVoice.md 缺少 EroticLens，女性镜头、身体感知、欲望/羞耻机制可能不会被稳定继承。");
+  }
+  if (!/MotifFunctions/i.test(obsessions)) {
+    reasons.push("Obsessions.md 缺少 MotifFunctions，反复意象可能没有被归纳成功能层。");
+  }
+
+  const shortMemory = important.trim().length + authorVoice.trim().length + obsessions.trim().length < 1600;
+  if (shortMemory) {
+    reasons.push("当前项目记忆内容较短，可能还没有从导入章节中重新提炼。");
+  }
+
+  return {
+    needed: reasons.length > 0,
+    reasons: reasons.slice(0, 4),
+  };
+}
+
 const PLAN_REQUIRED_PATTERNS = [
   /先.*(计划|方案|大纲|确认)|制定.*(计划|方案|大纲)|输出.*(计划|方案|大纲)|计划.*确认|确认.*计划/i,
   /长篇规划|世界观|角色弧|主线|伏笔|多文件|结构性重写|重构.*结构|蓝图方案/i,
@@ -148,11 +188,6 @@ const PLAN_REQUIRED_PATTERNS = [
 const PROJECT_MEMORY_PATTERNS = [
   /小说|写作|剧情|蓝图|大纲|章节|正文|伏笔|主线|设定|世界观|角色|人物|创作|故事|幕|卷/i,
   /novel|story|plot|blueprint|outline|chapter|draft|character|worldbuilding|foreshadow/i,
-];
-
-const PROJECT_FOLLOWUP_PATTERNS = [
-  /继续写|接着|续写|修改这里|按刚才|再调整|刚才|下一段|下一章|继续修改|继续调整|这里/i,
-  /continue|keep going|follow up|same as before|next scene|next chapter|revise this|adjust this/i,
 ];
 
 const ARCHITECT_PLAN_PATTERNS = [
@@ -187,10 +222,6 @@ function normalizeChatSkills(skills?: Partial<ChatSkills> | null): ChatSkills {
 
 function isProjectMemoryRelevant(content: string): boolean {
   return PROJECT_MEMORY_PATTERNS.some((pattern) => pattern.test(content));
-}
-
-function isProjectFollowupRequest(content: string): boolean {
-  return PROJECT_FOLLOWUP_PATTERNS.some((pattern) => pattern.test(content));
 }
 
 function isArchitectPlanRelevant(content: string): boolean {
@@ -360,6 +391,11 @@ function normalizeWorkspacePath(path: string) {
   return path.trim().replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+/g, "/");
 }
 
+function isInternalWorkspaceDataPath(path: string) {
+  const normalized = normalizeWorkspacePath(path).toLowerCase();
+  return normalized === ".novel-assistance" || normalized.startsWith(".novel-assistance/");
+}
+
 function joinWorkspacePath(rootPath: string, relativePath: string) {
   const separator = rootPath.includes("\\") ? "\\" : "/";
   return `${rootPath.replace(/[/\\]+$/, "")}${separator}${normalizeWorkspacePath(relativePath).replace(/\//g, separator)}`;
@@ -429,7 +465,7 @@ function extractToolCallsFromText(text: string): ExtractedToolCall[] {
   const occupied: Array<{ start: number; end: number }> = [];
   const addCall = (start: number, fullMatch: string, json: string) => {
     if (!/"(?:name|tool)"\s*:/.test(json)) return;
-    if (!/"(?:name|tool)"\s*:\s*"(?:create_file|edit_file|edit_docx|create_blueprint|upsert_reference_entries|read_file|list_directory|web_search|list_blueprints|read_blueprint)"/.test(json)) return;
+    if (!/"(?:name|tool)"\s*:\s*"(?:create_file|edit_file|edit_docx|create_blueprint|upsert_reference_entries|read_file|search_file|list_directory|web_search|list_blueprints|read_blueprint)"/.test(json)) return;
     const end = start + fullMatch.length;
     if (occupied.some((range) => start < range.end && end > range.start)) return;
     occupied.push({ start, end });
@@ -458,22 +494,22 @@ function extractToolCallsFromText(text: string): ExtractedToolCall[] {
 function stripToolCalls(content: string) {
   const stripped = extractToolCallsFromText(content)
     .reduceRight((text, call) => text.slice(0, call.index) + text.slice(call.index + call.fullMatch.length), content)
-    .replace(/```(?:tool[_-]?call|json)\s*\n[\s\S]*"name"\s*:\s*"(?:create_file|edit_file|edit_docx|create_blueprint|upsert_reference_entries|read_file|list_directory|web_search|list_blueprints|read_blueprint)"[\s\S]*$/i, "")
-    .replace(/\{\s*"name"\s*:\s*"(?:create_file|edit_file|edit_docx|create_blueprint|upsert_reference_entries|read_file|list_directory|web_search|list_blueprints|read_blueprint)"[\s\S]*$/i, "");
+    .replace(/```(?:tool[_-]?call|json)\s*\n[\s\S]*"name"\s*:\s*"(?:create_file|edit_file|edit_docx|create_blueprint|upsert_reference_entries|read_file|search_file|list_directory|web_search|list_blueprints|read_blueprint)"[\s\S]*$/i, "")
+    .replace(/\{\s*"name"\s*:\s*"(?:create_file|edit_file|edit_docx|create_blueprint|upsert_reference_entries|read_file|search_file|list_directory|web_search|list_blueprints|read_blueprint)"[\s\S]*$/i, "");
   return stripped.trim();
 }
 
 function getToolWorkKind(toolName: string): ConversationWorkItem["kind"] {
   if (toolName === "web_search") return "search";
   if (toolName.includes("blueprint")) return "blueprint";
-  if (toolName === "read_file" || toolName === "list_directory") return "file";
+  if (toolName === "read_file" || toolName === "search_file" || toolName === "list_directory") return "file";
   if (toolName === "edit_file" || toolName === "edit_docx" || toolName === "create_file" || toolName === "create_blueprint" || toolName === "upsert_reference_entries") return "write";
   return "tool";
 }
 
 function summarizeToolArgs(toolName: string, args: Record<string, unknown>) {
   if (toolName === "web_search") return String(args.query ?? "");
-  if (toolName === "read_file" || toolName === "list_directory" || toolName === "edit_file" || toolName === "edit_docx" || toolName === "create_file") {
+  if (toolName === "read_file" || toolName === "search_file" || toolName === "list_directory" || toolName === "edit_file" || toolName === "edit_docx" || toolName === "create_file") {
     return String(args.path ?? "workspace");
   }
   if (toolName === "upsert_reference_entries") return String(args.listName ?? "人物");
@@ -674,6 +710,7 @@ const CopilotPanel: React.FC = () => {
   const [currentAssistantWorkItems, setCurrentAssistantWorkItems] = useState<ConversationWorkItem[]>([]);
   const [clarificationDraftAnswers, setClarificationDraftAnswers] = useState<Record<string, string>>({});
   const [submittedClarificationIds, setSubmittedClarificationIds] = useState<Set<string>>(new Set());
+  const [templateUpgradeNotice, setTemplateUpgradeNotice] = useState<{ reasons: string[] } | null>(null);
   const [agentTodo, setAgentTodo] = useState<{
     tool: string;
     path: string;
@@ -685,6 +722,11 @@ const CopilotPanel: React.FC = () => {
   const agentModeButtonRef = useRef<HTMLButtonElement>(null);
   const lastDefaultChatModelIdRef = useRef(defaultChatModelId);
   const workspaceLoadRequestRef = useRef(0);
+  const dismissedTemplateUpgradeRootsRef = useRef<Set<string>>(new Set());
+  const activeConversationRef = useRef<ConversationRecord | null>(null);
+  const draftInputRef = useRef("");
+  const draftSaveTimerRef = useRef<number | null>(null);
+  const lastPersistedDraftRef = useRef<{ conversationId: string; value: string } | null>(null);
 
   const currentModel = useMemo(
     () => getModelProfileById(activeConversation?.modelId || defaultChatModelId),
@@ -695,6 +737,10 @@ const CopilotPanel: React.FC = () => {
     [defaultChatModelId, defaultEditReviewModelId, getModelProfileById, modelProfiles]
   );
   const activeInputModel = chatSkills.agentMode === "editor" ? editReviewModel : currentModel;
+
+  useEffect(() => {
+    activeConversationRef.current = activeConversation;
+  }, [activeConversation]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -972,21 +1018,77 @@ const CopilotPanel: React.FC = () => {
     };
   };
 
+  const clearDraftSaveTimer = () => {
+    if (draftSaveTimerRef.current !== null) {
+      window.clearTimeout(draftSaveTimerRef.current);
+      draftSaveTimerRef.current = null;
+    }
+  };
+
+  const persistDraftInput = async (
+    value = draftInputRef.current,
+    conversation = activeConversationRef.current,
+    expectedRootPath = rootPath
+  ) => {
+    if (!conversation) return;
+    const normalizedValue = value ?? "";
+    const lastPersisted = lastPersistedDraftRef.current;
+    if (
+      conversation.draftInput === normalizedValue &&
+      lastPersisted?.conversationId === conversation.id &&
+      lastPersisted.value === normalizedValue
+    ) {
+      return;
+    }
+
+    const updatedAt = new Date().toISOString();
+    const record: ConversationRecord = {
+      ...conversation,
+      draftInput: normalizedValue,
+      updatedAt,
+    };
+    const nextSummaries = await writeConversation(record);
+    if (expectedRootPath !== useFileStore.getState().rootPath) return;
+    lastPersistedDraftRef.current = { conversationId: record.id, value: normalizedValue };
+    setConversationSummaries(nextSummaries);
+    setActiveConversation((current) => current?.id === record.id
+      ? (() => {
+        const next = { ...current, draftInput: normalizedValue, updatedAt };
+        activeConversationRef.current = next;
+        return next;
+      })()
+      : current);
+  };
+
   const loadConversation = async (conversationId: string, expectedRootPath = rootPath) => {
+    const currentConversation = activeConversationRef.current;
+    if (currentConversation && currentConversation.id !== conversationId) {
+      clearDraftSaveTimer();
+      await persistDraftInput(draftInputRef.current, currentConversation, expectedRootPath);
+    }
     const record = await readConversation(conversationId);
     if (expectedRootPath !== useFileStore.getState().rootPath) return;
     if (!record) return;
-        setActiveConversation(record);
-        setInput(record.draftInput || "");
-        setDraftAttachments([]);
-        setClarificationDraftAnswers({});
-        setSubmittedClarificationIds(new Set());
+    const nextDraft = record.draftInput || "";
+    draftInputRef.current = nextDraft;
+    lastPersistedDraftRef.current = { conversationId: record.id, value: nextDraft };
+    activeConversationRef.current = record;
+    setActiveConversation(record);
+    setInput(nextDraft);
+    setDraftAttachments([]);
+    setClarificationDraftAnswers({});
+    setSubmittedClarificationIds(new Set());
   };
 
   const persistConversation = async (record: ConversationRecord) => {
-    const nextSummaries = await writeConversation(record);
+    const draftInput = activeConversationRef.current?.id === record.id ? draftInputRef.current : record.draftInput || "";
+    const recordToWrite = { ...record, draftInput };
+    const nextSummaries = await writeConversation(recordToWrite);
+    draftInputRef.current = draftInput;
+    lastPersistedDraftRef.current = { conversationId: recordToWrite.id, value: draftInput };
     setConversationSummaries(nextSummaries);
-    setActiveConversation(record);
+    activeConversationRef.current = recordToWrite;
+    setActiveConversation(recordToWrite);
   };
 
   const persistFileCaches = async () => {
@@ -1000,6 +1102,74 @@ const CopilotPanel: React.FC = () => {
     };
 
     await persistConversation(updatedRecord);
+  };
+
+  const checkTemplateUpgradeNeed = async (expectedRootPath = rootPath) => {
+    if (!expectedRootPath || dismissedTemplateUpgradeRootsRef.current.has(expectedRootPath)) {
+      setTemplateUpgradeNotice(null);
+      return;
+    }
+
+    try {
+      const [important, authorVoice, obsessions] = await Promise.all([
+        readProjectImportant(),
+        readProjectAuthorVoice(),
+        readProjectObsessions(),
+      ]);
+      if (expectedRootPath !== useFileStore.getState().rootPath) return;
+      const assessment = assessProjectMemoryTemplateUpgrade(
+        important ?? "",
+        authorVoice ?? "",
+        obsessions ?? ""
+      );
+      setTemplateUpgradeNotice(assessment.needed ? { reasons: assessment.reasons } : null);
+    } catch {
+      if (expectedRootPath === useFileStore.getState().rootPath) {
+        setTemplateUpgradeNotice(null);
+      }
+    }
+  };
+
+  const startTemplateUpgrade = async () => {
+    if (!activeInputModel || isLoading) return;
+    clearDraftSaveTimer();
+    await persistDraftInput(draftInputRef.current, activeConversationRef.current);
+    setTemplateUpgradeNotice(null);
+    setInput("");
+    setDraftAttachments([]);
+
+    const upgradeConversation: ConversationRecord = {
+      ...createConversation(defaultChatModelId, useFileStore.getState().activeFile?.path),
+      title: "项目记忆模板升级",
+    };
+    const upgradePrompt = [
+      "请立即升级当前工作区的 Nova 项目记忆模板。用户已确认本操作会消耗较多 token。",
+      "",
+      "任务目标：",
+      "1. 读取工作区目录，优先分析章节正文、现有人设、参考条目数据库、Importants.md、AuthorVoice.md、Obsessions.md。",
+      "2. 不要只套空模板。必须基于实际导入文件重新提炼。",
+      "3. 输出两层记忆：",
+      "   - Chapter Index 写入 Importants.md：每章 Summary、CharacterChanges、ImportantObjects、Foreshadowing、OpenQuestions。",
+      "   - 全书创作模型写入 AuthorVoice.md / Obsessions.md：WritingMechanics、DialogueMechanics、NarrativeMechanics、EroticLens、Themes、MotifFunctions。",
+      "4. 把具体物件降级为机制例证，不要把乌鸦、项链、火焰等表象直接当成作者风格。",
+      "5. 如果证据不足，先读取更多文件；只有确实缺少正文时再提出简短问题。",
+      "6. 最终用多个 Memory Candidate 写入对应记忆文件；完整人设仍以参考条目数据库为主，不塞进 Importants.md。",
+      "",
+      "请现在开始执行，不要只给计划。",
+    ].join("\n");
+
+    await handleSendMessage({
+      content: upgradePrompt,
+      conversation: upgradeConversation,
+      attachments: [],
+      skills: {
+        ...chatSkills,
+        agentMode: "architect",
+        agentSubMode: "build",
+        forcePlanMode: false,
+        enableEditReview: false,
+      },
+    });
   };
 
   const updateChatSkills = (updater: (current: ChatSkills) => ChatSkills) => {
@@ -1019,21 +1189,45 @@ const CopilotPanel: React.FC = () => {
   };
 
   const resetCopilotRuntimeState = () => {
+    clearDraftSaveTimer();
     const emptyCaches = new Map<string, FileContentCache>();
     fileCachesRef.current = emptyCaches;
     setFileCaches(emptyCaches);
     setConversationSummaries([]);
     setActiveConversation(null);
+    activeConversationRef.current = null;
+    draftInputRef.current = "";
+    lastPersistedDraftRef.current = null;
     setInput("");
     setDraftAttachments([]);
     setCurrentAssistantText("");
     setCurrentAssistantWorkItems([]);
     setClarificationDraftAnswers({});
     setSubmittedClarificationIds(new Set());
+    setTemplateUpgradeNotice(null);
     setAgentTodo(null);
     setIsLoading(false);
     setIsAgentModeMenuOpen(false);
   };
+
+  useEffect(() => {
+    const conversationId = activeConversation?.id;
+    if (!conversationId || isLoading) return;
+    if (lastPersistedDraftRef.current?.conversationId === conversationId && lastPersistedDraftRef.current.value === input) return;
+
+    clearDraftSaveTimer();
+    draftSaveTimerRef.current = window.setTimeout(() => {
+      const currentConversation = activeConversationRef.current;
+      if (!currentConversation || currentConversation.id !== conversationId) return;
+      void persistDraftInput(input, currentConversation);
+    }, 650);
+
+    return clearDraftSaveTimer;
+  }, [activeConversation?.id, input, isLoading]);
+
+  useEffect(() => {
+    return clearDraftSaveTimer;
+  }, []);
 
   useEffect(() => {
     if (!activeConversation || !defaultChatModelId) {
@@ -1101,6 +1295,7 @@ const CopilotPanel: React.FC = () => {
       try {
         await ensureWorkspaceConversationStore();
         await ensureMemoryFiles();
+        await checkTemplateUpgradeNeed(rootPath);
         const summaries = await listConversationSummaries();
         if (requestId !== workspaceLoadRequestRef.current || rootPath !== useFileStore.getState().rootPath) return;
         setConversationSummaries(summaries);
@@ -1158,7 +1353,12 @@ const CopilotPanel: React.FC = () => {
   }, []);
 
   const handleNewConversation = async () => {
+    clearDraftSaveTimer();
+    await persistDraftInput(draftInputRef.current, activeConversationRef.current);
     const next = createConversation(defaultChatModelId, useFileStore.getState().activeFile?.path);
+    draftInputRef.current = "";
+    lastPersistedDraftRef.current = { conversationId: next.id, value: "" };
+    activeConversationRef.current = next;
     setActiveConversation(next);
     setInput("");
     setDraftAttachments([]);
@@ -1171,6 +1371,7 @@ const CopilotPanel: React.FC = () => {
     attachments?: ConversationAttachment[];
     skills?: ChatSkills;
     clearPendingPlan?: boolean;
+    conversation?: ConversationRecord;
     answeredClarification?: {
       messageId: string;
       answers: Array<{ questionId: string; question: string; answer: string }>;
@@ -1178,6 +1379,7 @@ const CopilotPanel: React.FC = () => {
   }) => {
     const messageContent = (override?.content ?? input).trim();
     const requestAttachments = override?.attachments ?? draftAttachments;
+    const targetConversation = override?.conversation ?? activeConversation;
     let requestSkills = normalizeChatSkills(override?.skills ?? chatSkills);
     const forceCreateFile = shouldForceCreateFile(messageContent);
     const defaultChapterToDocx = shouldDefaultChapterToDocx(messageContent);
@@ -1194,7 +1396,9 @@ const CopilotPanel: React.FC = () => {
       };
     }
     const requestModel = requestSkills.agentMode === "editor" ? editReviewModel : currentModel;
-    if (!messageContent || !activeConversation || !requestModel || isLoading) return;
+    if (!messageContent || !targetConversation || !requestModel || isLoading) return;
+    clearDraftSaveTimer();
+    if (!override) draftInputRef.current = "";
     const rootPathAtStart = rootPath;
     const isWorkspaceCurrent = () => rootPathAtStart === useFileStore.getState().rootPath;
 
@@ -1211,29 +1415,29 @@ const CopilotPanel: React.FC = () => {
     };
 
     const baseMessages = override?.answeredClarification
-      ? activeConversation.messages.map((message) => message.id === override.answeredClarification?.messageId
+      ? targetConversation.messages.map((message) => message.id === override.answeredClarification?.messageId
           ? { ...message, clarificationAnswers: override.answeredClarification.answers }
           : message)
-      : activeConversation.messages;
+      : targetConversation.messages;
     const nextMessages = [...baseMessages, userMessage];
     const pendingClarification = !override || override.answeredClarification
-      ? activeConversation.pendingClarification ?? null
+      ? targetConversation.pendingClarification ?? null
       : null;
-    const nextPendingClarification = activeConversation.pendingClarification && override?.answeredClarification?.messageId === activeConversation.pendingClarification.messageId
+    const nextPendingClarification = targetConversation.pendingClarification && override?.answeredClarification?.messageId === targetConversation.pendingClarification.messageId
       ? {
-          ...activeConversation.pendingClarification,
+          ...targetConversation.pendingClarification,
           answers: override.answeredClarification.answers,
         }
-      : activeConversation.pendingClarification ?? null;
+      : targetConversation.pendingClarification ?? null;
     const requestFileSnapshot = syncActiveEditorContentForRequest();
     const draftRecord: ConversationRecord = {
-      ...activeConversation,
-      title: activeConversation.messages.length === 0 ? buildTitleFromMessage(userMessage.content) : activeConversation.title,
+      ...targetConversation,
+      title: targetConversation.messages.length === 0 ? targetConversation.title || buildTitleFromMessage(userMessage.content) : targetConversation.title,
       updatedAt: new Date().toISOString(),
-      contextFilePath: requestFileSnapshot.activeFile?.path ?? activeConversation.contextFilePath ?? null,
+      contextFilePath: requestFileSnapshot.activeFile?.path ?? targetConversation.contextFilePath ?? null,
       messages: nextMessages,
       draftInput: "",
-      pendingPlan: override?.clearPendingPlan ? null : activeConversation.pendingPlan ?? null,
+      pendingPlan: override?.clearPendingPlan ? null : targetConversation.pendingPlan ?? null,
       pendingClarification: nextPendingClarification,
     };
 
@@ -1339,20 +1543,11 @@ const CopilotPanel: React.FC = () => {
       const directoryTree = buildDirectoryTreeString(filesAtStart);
       const shouldRequestPlan =
         !override && requestSkills.agentSubMode === "plan";
-      const shouldIncludeProjectMemory =
-        shouldRequestPlan
-        || override?.clearPendingPlan
-        || isProjectMemoryRelevant(userMessage.content)
-        || isProjectFollowupRequest(userMessage.content)
-        || (requestSkills.agentMode === "architect" && isArchitectPlanRelevant(userMessage.content));
-      const shouldIncludeWritingMemory =
-        shouldIncludeProjectMemory
-        || requestSkills.agentMode === "architect";
       const memoryContext = await loadMemoryContext({
         includeStableProjectMemory: true,
-        includeAuthorProjectMemory: shouldIncludeWritingMemory,
-        includeShortTermMemory: shouldIncludeWritingMemory,
-        includeCacheMemory: shouldIncludeWritingMemory,
+        includeAuthorProjectMemory: false,
+        includeShortTermMemory: false,
+        includeCacheMemory: false,
       });
       const memoryPrompt = buildMemoryPrompt(memoryContext);
       const relevantReferenceContext = buildRelevantReferenceContext(referenceLists, userMessage.content, plannedContext.content);
@@ -1370,43 +1565,51 @@ const CopilotPanel: React.FC = () => {
       );
       addMemoryDebugEntry(
         plannedContext.promptDebug.entries,
-        "Importants.md",
-        memoryContext.projectImportant,
-        5200,
+        "CharacterStates.md",
+        memoryContext.characterStates,
+        1800,
         "stable",
-        "Cross-conversation project ledger and confirmed state."
+        "Lightweight state: character desire, fear, emotion, bias, knowledge, and location."
       );
       addMemoryDebugEntry(
         plannedContext.promptDebug.entries,
-        "AuthorVoice.md",
-        memoryContext.projectAuthorVoice,
-        3600,
+        "Relationships.md",
+        memoryContext.relationships,
+        1600,
         "stable",
-        "Author voice and disliked writing patterns for project requests."
+        "Lightweight state: character interaction patterns, conflict, and emotional movement."
       );
       addMemoryDebugEntry(
         plannedContext.promptDebug.entries,
-        "Obsessions.md",
-        memoryContext.projectObsessions,
-        2800,
+        "Timeline.md",
+        memoryContext.timeline,
+        1800,
         "stable",
-        "Recurring project themes and obsessions."
+        "Lightweight state: event order, chapter order, and causality."
       );
       addMemoryDebugEntry(
         plannedContext.promptDebug.entries,
-        "Snapshot.md",
-        memoryContext.projectSnapshot,
-        2600,
-        "summary",
-        "Short-term project/session state for follow-up requests."
+        "Inventory.md",
+        memoryContext.inventory,
+        1600,
+        "stable",
+        "Lightweight state: object, clue, letter, and prop ownership/status."
       );
       addMemoryDebugEntry(
         plannedContext.promptDebug.entries,
-        "Cache.md",
-        memoryContext.projectCache,
-        2200,
-        "summary",
-        "Volatile runtime memory summarized for follow-up requests."
+        "Foreshadowings.md",
+        memoryContext.foreshadowings,
+        1800,
+        "stable",
+        "Lightweight state: open or resolved foreshadowing with source lines."
+      );
+      addMemoryDebugEntry(
+        plannedContext.promptDebug.entries,
+        "AuthorTemplate.md",
+        memoryContext.authorTemplate,
+        1400,
+        "stable",
+        "Lightweight prose/output taste constraints, not plot memory."
       );
       if (relevantReferenceContext) {
         plannedContext.promptDebug.entries.push({
@@ -1513,7 +1716,7 @@ const CopilotPanel: React.FC = () => {
         modelProfile: requestModel,
         taskType: "chat",
         userMessage: override?.clearPendingPlan
-          ? withCharacterDualWriteDirective(`用户已确认以下计划，请直接按计划执行，不要重新制定计划。若计划已经给出明确文件、位置和插入文本，请优先调用对应写入工具，不要为了重复确认而重读全文。执行完成后简要说明结果；只有项目状态确实变化时才输出 Memory Candidate。\n\n## 原始需求\n${activeConversation.pendingPlan?.userMessage.content ?? userMessage.content}\n\n## 已确认计划\n${activeConversation.pendingPlan?.planContent ?? ""}\n\n## 本次指令\n${userMessage.content}`)
+          ? withCharacterDualWriteDirective(`用户已确认以下计划，请直接按计划执行，不要重新制定计划。若计划已经给出明确文件、位置和插入文本，请优先调用对应写入工具，不要为了重复确认而重读全文。执行完成后简要说明结果；只有项目状态确实变化时才输出 Memory Candidate。\n\n## 原始需求\n${targetConversation.pendingPlan?.userMessage.content ?? userMessage.content}\n\n## 已确认计划\n${targetConversation.pendingPlan?.planContent ?? ""}\n\n## 本次指令\n${userMessage.content}`)
           : withCharacterDualWriteDirective(withCreateFileDirective(userMessage.content)),
         documentContext: plannedContext.content,
         documentFileName: activeFileAtStart?.name,
@@ -1731,6 +1934,11 @@ const CopilotPanel: React.FC = () => {
           addEditReviewDebugReason(editReviewDebug.skipReasons, "edit_file args are missing path or edits.");
           return args;
         }
+        if (isInternalWorkspaceDataPath(path)) {
+          addEditReviewDebugReason(editReviewDebug.skipReasons, "Internal .novel-assistance files skip edit review.");
+          editReviewDebug.skippedCount += edits.length;
+          return args;
+        }
         editReviewDebug.editCount += edits.length;
         editReviewDebug.filePath = path;
         editReviewDebug.modelLabel = editReviewModel?.label;
@@ -1812,14 +2020,15 @@ const CopilotPanel: React.FC = () => {
       const MAX_CONTINUATION_RETRIES = 3;
       let continuationCount = 0;
       let toolFormatRetryCount = 0;
+      let readFileCount = 0;
 
       for (let iteration = 0; iteration < maxIterations; iteration++) {
         if (!isWorkspaceCurrent()) return;
         const extractedCalls = extractToolCalls(currentResponse);
         if (extractedCalls.length === 0 || !rootPath) {
           const needsCharacterDualWrite = isCharacterSheetRequest(userMessage.content)
-            || isCharacterSheetRequest(activeConversation.pendingPlan?.userMessage.content ?? "")
-            || isCharacterSheetRequest(activeConversation.pendingPlan?.planContent ?? "")
+            || isCharacterSheetRequest(targetConversation.pendingPlan?.userMessage.content ?? "")
+            || isCharacterSheetRequest(targetConversation.pendingPlan?.planContent ?? "")
             || hasSuccessfulCharacterMdWrite
             || hasSuccessfulReferenceUpsert;
           if (
@@ -1997,6 +2206,19 @@ const CopilotPanel: React.FC = () => {
             };
             appendWorkItem(workItem);
             if (!isWorkspaceCurrent()) return;
+            if (parsed.name === "read_file") {
+              readFileCount += 1;
+              if (readFileCount > 2) {
+                const limitedResult = "Error: read_file limit reached for this turn (max 2 calls). Use search_file or a smaller startLine/endLine range instead.";
+                updateWorkItem(workItem.id, {
+                  status: "error",
+                  resultSummary: limitedResult,
+                });
+                toolResults.push({ name: parsed.name, result: limitedResult });
+                currentResponse = currentResponse.replace(call.fullMatch, "");
+                continue;
+              }
+            }
             const toolArgs = parsed.name === "edit_file"
               ? await reviewEditFileArgs(parsed.args)
               : parsed.args;
@@ -2187,6 +2409,7 @@ const CopilotPanel: React.FC = () => {
   const handleConfirmDelete = async () => {
     setIsDeleteConfirmOpen(false);
     if (!activeConversation) return;
+    clearDraftSaveTimer();
 
     try {
       const summaries = await deleteConversation(activeConversation.id);
@@ -2201,6 +2424,9 @@ const CopilotPanel: React.FC = () => {
       }
 
       const draft = createConversation(defaultChatModelId, useFileStore.getState().activeFile?.path);
+      draftInputRef.current = "";
+      lastPersistedDraftRef.current = { conversationId: draft.id, value: "" };
+      activeConversationRef.current = draft;
       setActiveConversation(draft);
       setInput("");
       setDraftAttachments([]);
@@ -2374,6 +2600,46 @@ const CopilotPanel: React.FC = () => {
         </select>
       </div>
       <div className="chat-container">
+        {templateUpgradeNotice && (
+          <div className="template-upgrade-card">
+            <div className="template-upgrade-main">
+              <strong>建议升级项目记忆模板</strong>
+              <p>
+                Nova 检测到当前工作区的记忆文件可能还停留在旧模板或空模板。升级会让 AI 读取章节与设定，重新提炼 Chapter Index、AuthorVoice、Obsessions。
+              </p>
+              <p className="template-upgrade-warning">
+                注意：该操作会调用 AI 并读取多个文件，可能消耗较多 token；章节越多，消耗越高。
+              </p>
+              {templateUpgradeNotice.reasons.length > 0 && (
+                <ul>
+                  {templateUpgradeNotice.reasons.map((reason) => (
+                    <li key={reason}>{reason}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div className="template-upgrade-actions">
+              <button
+                type="button"
+                className="template-upgrade-primary"
+                onClick={() => void startTemplateUpgrade()}
+                disabled={isLoading || !activeInputModel}
+              >
+                开始升级
+              </button>
+              <button
+                type="button"
+                className="template-upgrade-secondary"
+                onClick={() => {
+                  if (rootPath) dismissedTemplateUpgradeRootsRef.current.add(rootPath);
+                  setTemplateUpgradeNotice(null);
+                }}
+              >
+                稍后
+              </button>
+            </div>
+          </div>
+        )}
         <div className="messages">
           {(activeConversation?.messages.length ?? 0) === 0 && (
             <div className="empty-chat">
@@ -2678,13 +2944,9 @@ const CopilotPanel: React.FC = () => {
             <textarea
               value={input}
               onChange={(e) => {
-                setInput(e.target.value);
-                if (activeConversation) {
-                  setActiveConversation({
-                    ...activeConversation,
-                    draftInput: e.target.value,
-                  });
-                }
+                const nextInput = e.target.value;
+                draftInputRef.current = nextInput;
+                setInput(nextInput);
               }}
               onKeyDown={handleKeyPress}
                 placeholder={activeInputModel ? t("copilot.askAI") : t("copilot.configureModel")}
@@ -2852,6 +3114,26 @@ const CopilotPanel: React.FC = () => {
                   onChange={(e) => setTempMaxTokens(e.target.value)}
                 />
               </label>
+              <div className="copilot-settings-section">
+                <div className="copilot-settings-section-title">项目记忆模板升级</div>
+                <p>
+                  让架构师读取当前工作区，重新提炼章节索引、作者画像、叙事机制、主题执念和意象功能。
+                </p>
+                <p className="copilot-settings-warning">
+                  该操作会调用 AI 并读取多个文件，可能消耗较多 token；章节越多，消耗越高。
+                </p>
+                <button
+                  type="button"
+                  className="copilot-settings-wide-button"
+                  onClick={() => {
+                    setIsSettingsOpen(false);
+                    void startTemplateUpgrade();
+                  }}
+                  disabled={isLoading || !activeInputModel}
+                >
+                  开始升级模板
+                </button>
+              </div>
               <div className="copilot-settings-actions">
                 <button
                   className="secondary"

@@ -19,7 +19,8 @@ type JsonRpcResponse<T = unknown> = {
 
 let requestCounter = 0;
 
-const MAX_FILE_SIZE = 50 * 1024; // 50KB
+const MAX_FILE_SIZE = 50 * 1024; // Legacy full-file guard.
+const MAX_READ_FILE_CHARS = 5000;
 const isDocxPath = (path: string) => path.trim().toLowerCase().endsWith(".docx");
 const newBlueprintId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -144,16 +145,50 @@ const LOCAL_FILESYSTEM_TOOLS: McpTool[] = [
   },
   {
     name: "read_file",
-    description: "读取指定文件的内容（限制50KB）",
+    description: "Read a workspace file as numbered lines. Returns at most 5000 characters. Use startLine/endLine for precise snippets.",
     inputSchema: {
       type: "object",
       properties: {
         path: {
           type: "string",
-          description: "要读取的文件路径（相对于工作区根目录）"
+          description: "File path relative to the workspace root."
+        },
+        startLine: {
+          type: "number",
+          description: "Optional 1-based first line to return."
+        },
+        endLine: {
+          type: "number",
+          description: "Optional 1-based last line to return, inclusive."
+        },
+        maxChars: {
+          type: "number",
+          description: "Optional character cap, maximum 5000."
         }
       },
       required: ["path"]
+    }
+  },
+  {
+    name: "search_file",
+    description: "Search a workspace file and return matching line numbers with small context snippets. Prefer this before broad reads.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "File path relative to the workspace root."
+        },
+        query: {
+          type: "string",
+          description: "Plain text or case-insensitive pattern to search for."
+        },
+        contextLines: {
+          type: "number",
+          description: "Context lines before and after each match, default 2, max 5."
+        }
+      },
+      required: ["path", "query"]
     }
   },
   {
@@ -279,7 +314,7 @@ const LOCAL_FILESYSTEM_TOOLS: McpTool[] = [
   },
   {
     name: "edit_docx",
-    description: "Safely edit an existing DOCX by inserting plain-text paragraphs before or after matched text, or appending to the end. Use this for local changes in existing .docx files; do not use create_file to overwrite an existing DOCX.",
+    description: "Safely edit an existing DOCX by inserting, appending, replacing, or deleting plain-text paragraphs. Use this for local changes in existing .docx files; do not use create_file to overwrite an existing DOCX.",
     inputSchema: {
       type: "object",
       properties: {
@@ -289,24 +324,52 @@ const LOCAL_FILESYSTEM_TOOLS: McpTool[] = [
         },
         operations: {
           type: "array",
-          description: "DOCX paragraph insertion operations, applied in order.",
+          description: "DOCX paragraph operations, applied in order.",
           items: {
             type: "object",
             properties: {
               type: {
                 type: "string",
-                description: "append_after_text inserts after the matching paragraph; insert_before_text inserts before it; append_to_end appends to the end and does not need matchText."
+                description: "Supported values: append_after_text, insert_before_text, append_to_end, replace_text, delete_text, replace_between_text, delete_between_text."
               },
               matchText: {
                 type: "string",
-                description: "Plain text to find in a paragraph. The first matching paragraph is used."
+                description: "Plain text to find. Used by append_after_text, insert_before_text, replace_text, and delete_text."
+              },
+              matchOccurrence: {
+                type: "number",
+                description: "1-based occurrence to use when matchText appears multiple times."
+              },
+              startText: {
+                type: "string",
+                description: "Start boundary text for replace_between_text or delete_between_text."
+              },
+              endText: {
+                type: "string",
+                description: "End boundary text for replace_between_text or delete_between_text."
+              },
+              startOccurrence: {
+                type: "number",
+                description: "1-based occurrence to use for startText when it appears multiple times."
+              },
+              endOccurrence: {
+                type: "number",
+                description: "1-based occurrence to use for endText when it appears multiple times."
+              },
+              includeBoundaries: {
+                type: "boolean",
+                description: "For *_between_text operations, true also removes/replaces the boundary paragraphs. Default false keeps them."
               },
               insertText: {
                 type: "string",
-                description: "Plain text to insert. Blank lines create separate paragraphs."
+                description: "Plain text to insert for append_after_text, insert_before_text, or append_to_end. Blank lines create separate paragraphs."
+              },
+              replaceText: {
+                type: "string",
+                description: "Plain text replacement for replace_text or replace_between_text. Omit or leave empty for deletion."
               }
             },
-            required: ["type", "insertText"]
+            required: ["type"]
           }
         }
       },
@@ -500,9 +563,11 @@ function isDocxTextBlock(node: ProseMirrorNode | null | undefined) {
   return Boolean(node && ["paragraph", "heading"].includes(node.type));
 }
 
-function findDocxMatchRange(content: ProseMirrorNode[], matchText: string): { startIndex: number; endIndex: number } | null {
+function findDocxMatchRange(content: ProseMirrorNode[], matchText: string, occurrence = 1): { startIndex: number; endIndex: number } | null {
   const parts = docxMatchParts(matchText);
   if (parts.length === 0) return null;
+  const targetOccurrence = Math.max(1, Math.floor(Number(occurrence) || 1));
+  let matchCount = 0;
 
   const entries = content
     .map((node, index) => ({ index, text: isDocxTextBlock(node) ? normalizeMatchText(nodeInlineText(node)) : "" }))
@@ -523,6 +588,8 @@ function findDocxMatchRange(content: ProseMirrorNode[], matchText: string): { st
     }
 
     if (ok) {
+      matchCount += 1;
+      if (matchCount !== targetOccurrence) continue;
       return {
         startIndex: entries[start].index,
         endIndex: entries[cursor].index,
@@ -555,7 +622,14 @@ function isEmptyDocxParagraph(node: ProseMirrorNode | undefined) {
 type DocxEditOperation = {
   type?: unknown;
   matchText?: unknown;
+  matchOccurrence?: unknown;
+  startText?: unknown;
+  endText?: unknown;
+  startOccurrence?: unknown;
+  endOccurrence?: unknown;
+  includeBoundaries?: unknown;
   insertText?: unknown;
+  replaceText?: unknown;
 };
 
 async function editDocxByTextInsertions(resolved: ResolvedWorkspacePath, rawOperations: unknown): Promise<{ base64: string; insertions: number }> {
@@ -577,15 +651,31 @@ async function editDocxByTextInsertions(resolved: ResolvedWorkspacePath, rawOper
     const type = String(operation?.type ?? "").trim();
     const matchText = String(operation?.matchText ?? "");
     const normalizedMatchText = normalizeMatchText(matchText);
+    const matchOccurrence = Math.max(1, Math.floor(Number(operation?.matchOccurrence) || 1));
+    const startOccurrence = Math.max(1, Math.floor(Number(operation?.startOccurrence) || 1));
+    const endOccurrence = Math.max(1, Math.floor(Number(operation?.endOccurrence) || 1));
+    const includeBoundaries = Boolean(operation?.includeBoundaries);
     const insertParagraphs = plainTextToDocxParagraphs(String(operation?.insertText ?? ""));
-    if (!["append_after_text", "insert_before_text", "append_to_end"].includes(type)) {
+    const replaceParagraphs = plainTextToDocxParagraphs(String(operation?.replaceText ?? ""));
+    if (![
+      "append_after_text",
+      "insert_before_text",
+      "append_to_end",
+      "replace_text",
+      "delete_text",
+      "replace_between_text",
+      "delete_between_text",
+    ].includes(type)) {
       throw new Error(`Unsupported edit_docx operation type: ${type || "(empty)"}`);
     }
-    if (type !== "append_to_end" && !normalizedMatchText) {
+    if (["append_after_text", "insert_before_text", "replace_text", "delete_text"].includes(type) && !normalizedMatchText) {
       throw new Error("matchText is required for edit_docx operations.");
     }
-    if (insertParagraphs.length === 0) {
+    if (["append_after_text", "insert_before_text", "append_to_end"].includes(type) && insertParagraphs.length === 0) {
       throw new Error("insertText must contain at least one non-empty paragraph.");
+    }
+    if (type === "replace_text" && replaceParagraphs.length === 0) {
+      throw new Error("replaceText must contain at least one non-empty paragraph for replace_text.");
     }
 
     if (type === "append_to_end") {
@@ -596,18 +686,63 @@ async function editDocxByTextInsertions(resolved: ResolvedWorkspacePath, rawOper
       continue;
     }
 
-    const range = findDocxMatchRange(docJson.content ?? [], matchText);
+    if (type === "replace_between_text" || type === "delete_between_text") {
+      const startText = String(operation?.startText ?? "");
+      const endText = String(operation?.endText ?? "");
+      const normalizedStartText = normalizeMatchText(startText);
+      const normalizedEndText = normalizeMatchText(endText);
+      if (!normalizedStartText || !normalizedEndText) {
+        throw new Error("startText and endText are required for *_between_text operations.");
+      }
+      if (type === "replace_between_text" && replaceParagraphs.length === 0) {
+        throw new Error("replaceText must contain at least one non-empty paragraph for replace_between_text.");
+      }
+
+      const content = docJson.content ?? [];
+      const startRange = findDocxMatchRange(content, startText, startOccurrence);
+      if (!startRange) {
+        throw new Error(`Start text not found in ${resolved.relativePath}: ${normalizedStartText.slice(0, 120)}`);
+      }
+      const endRange = findDocxMatchRange(content, endText, endOccurrence);
+      if (!endRange) {
+        throw new Error(`End text not found in ${resolved.relativePath}: ${normalizedEndText.slice(0, 120)}`);
+      }
+      if (endRange.startIndex < startRange.endIndex) {
+        throw new Error("endText must appear after startText for *_between_text operations.");
+      }
+
+      const replaceStart = includeBoundaries ? startRange.startIndex : startRange.endIndex + 1;
+      const replaceEndExclusive = includeBoundaries ? endRange.endIndex + 1 : endRange.startIndex;
+      docJson.content = [
+        ...content.slice(0, replaceStart),
+        ...(type === "replace_between_text" ? replaceParagraphs : []),
+        ...content.slice(replaceEndExclusive),
+      ];
+      insertions += type === "replace_between_text" ? replaceParagraphs.length : 0;
+      continue;
+    }
+
+    const range = findDocxMatchRange(docJson.content ?? [], matchText, matchOccurrence);
     if (!range) {
       throw new Error(`Match text not found in ${resolved.relativePath}: ${normalizedMatchText.slice(0, 120)}`);
     }
 
-    const insertionIndex = type === "append_after_text" ? range.endIndex + 1 : range.startIndex;
-    docJson.content = [
-      ...(docJson.content ?? []).slice(0, insertionIndex),
-      ...insertParagraphs,
-      ...(docJson.content ?? []).slice(insertionIndex),
-    ];
-    insertions += insertParagraphs.length;
+    if (type === "replace_text" || type === "delete_text") {
+      docJson.content = [
+        ...(docJson.content ?? []).slice(0, range.startIndex),
+        ...(type === "replace_text" ? replaceParagraphs : []),
+        ...(docJson.content ?? []).slice(range.endIndex + 1),
+      ];
+      insertions += type === "replace_text" ? replaceParagraphs.length : 0;
+    } else {
+      const insertionIndex = type === "append_after_text" ? range.endIndex + 1 : range.startIndex;
+      docJson.content = [
+        ...(docJson.content ?? []).slice(0, insertionIndex),
+        ...insertParagraphs,
+        ...(docJson.content ?? []).slice(insertionIndex),
+      ];
+      insertions += insertParagraphs.length;
+    }
   }
 
   return {
@@ -622,6 +757,83 @@ async function readWorkspaceFileContent(resolved: ResolvedWorkspacePath): Promis
     return proseMirrorToPlainText(parsed.docJson).trim();
   }
   return readFile(resolved.absolutePath);
+}
+
+function clampPositiveInteger(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function formatNumberedLineSlice(content: string, args: Record<string, unknown>): string {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const startLine = Math.max(1, clampPositiveInteger(args.startLine, 1));
+  const endLine = Math.min(lines.length, clampPositiveInteger(args.endLine, lines.length));
+  const maxChars = Math.min(MAX_READ_FILE_CHARS, clampPositiveInteger(args.maxChars, MAX_READ_FILE_CHARS));
+  if (startLine > endLine) {
+    return JSON.stringify({
+      totalLines: lines.length,
+      startLine,
+      endLine,
+      truncated: false,
+      content: "",
+    }, null, 2);
+  }
+
+  const numbered: string[] = [];
+  let chars = 0;
+  let truncated = false;
+  for (let lineNumber = startLine; lineNumber <= endLine; lineNumber += 1) {
+    const line = `${lineNumber}: ${lines[lineNumber - 1] ?? ""}`;
+    if (numbered.length > 0 && chars + line.length + 1 > maxChars) {
+      truncated = true;
+      break;
+    }
+    if (numbered.length === 0 && line.length > maxChars) {
+      numbered.push(line.slice(0, maxChars));
+      truncated = true;
+      break;
+    }
+    numbered.push(line);
+    chars += line.length + 1;
+  }
+
+  return JSON.stringify({
+    totalLines: lines.length,
+    startLine,
+    endLine,
+    returnedStartLine: numbered.length ? startLine : null,
+    returnedEndLine: numbered.length ? startLine + numbered.length - 1 : null,
+    maxChars,
+    truncated,
+    content: numbered.join("\n"),
+  }, null, 2);
+}
+
+function searchNumberedLines(content: string, args: Record<string, unknown>): string {
+  const query = String(args.query ?? "").trim();
+  if (!query) return "Error: query is required";
+  const contextLines = Math.min(5, clampPositiveInteger(args.contextLines, 2));
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const queryLower = query.toLowerCase();
+  const matches = [];
+  for (let index = 0; index < lines.length && matches.length < 50; index += 1) {
+    if (!lines[index].toLowerCase().includes(queryLower)) continue;
+    const beforeStart = Math.max(0, index - contextLines);
+    const afterEnd = Math.min(lines.length - 1, index + contextLines);
+    matches.push({
+      line: index + 1,
+      text: lines[index],
+      before: lines.slice(beforeStart, index).map((text, offset) => ({ line: beforeStart + offset + 1, text })),
+      after: lines.slice(index + 1, afterEnd + 1).map((text, offset) => ({ line: index + offset + 2, text })),
+    });
+  }
+  return JSON.stringify({
+    query,
+    totalLines: lines.length,
+    matchCount: matches.length,
+    truncated: matches.length >= 50,
+    matches,
+  }, null, 2).slice(0, MAX_READ_FILE_CHARS);
 }
 
 function createReferenceListId(name: string) {
@@ -769,7 +981,7 @@ export async function runLocalTool(
           if (content.length > MAX_FILE_SIZE) {
             return { toolName, result: `Error: File size (${content.length} bytes) exceeds the 50KB limit.` };
           }
-          return { toolName, result: content };
+          return { toolName, result: formatNumberedLineSlice(content, args) };
         } catch (error) {
           // 如果读取失败，可能是因为文件句柄未注册
           // 尝试加载父目录来注册文件句柄
@@ -782,12 +994,30 @@ export async function runLocalTool(
               if (content.length > MAX_FILE_SIZE) {
                 return { toolName, result: `Error: File size (${content.length} bytes) exceeds the 50KB limit.` };
               }
-              return { toolName, result: content };
+              return { toolName, result: formatNumberedLineSlice(content, args) };
             } catch (retryError) {
               return { toolName, result: `Error reading file: ${retryError instanceof Error ? retryError.message : String(retryError)}` };
             }
           }
           return { toolName, result: `Error reading file: ${error instanceof Error ? error.message : String(error)}` };
+        }
+      }
+      case "search_file": {
+        let resolved: ResolvedWorkspacePath;
+        try {
+          resolved = resolveWorkspacePath(workspaceRoot, args.path as string);
+        } catch (error) {
+          return { toolName, result: `Error: ${error instanceof Error ? error.message : String(error)}` };
+        }
+
+        try {
+          const content = await readWorkspaceFileContent(resolved);
+          if (content.length > MAX_FILE_SIZE) {
+            return { toolName, result: `Error: File size (${content.length} bytes) exceeds the 50KB limit.` };
+          }
+          return { toolName, result: searchNumberedLines(content, args) };
+        } catch (error) {
+          return { toolName, result: `Error searching file: ${error instanceof Error ? error.message : String(error)}` };
         }
       }
       case "web_search": {
@@ -1021,11 +1251,6 @@ export async function runLocalTool(
           try {
             return await readFile(path);
           } catch {
-            const parentPath = parentPathOf(path, resolved.separator);
-            if (parentPath) {
-              await readDirectory(parentPath);
-              return await readFile(path);
-            }
             throw new Error(`Could not read file: ${resolved.relativePath}`);
           }
         };
@@ -1035,12 +1260,6 @@ export async function runLocalTool(
             await writeFile(path, data);
           } catch (writeError) {
             console.error("[create_file] writeFile failed:", writeError);
-            const parentPath = parentPathOf(path, resolved.separator);
-            if (parentPath) {
-              await readDirectory(parentPath);
-              await writeFile(path, data);
-              return;
-            }
             throw new Error(`Could not write file: ${resolved.relativePath}`);
           }
         };
@@ -1052,7 +1271,8 @@ export async function runLocalTool(
             console.log("[create_file] createFile succeeded");
           } catch (createError) {
             const errorMsg = createError instanceof Error ? createError.message : String(createError);
-            if (errorMsg.includes("already exists")) {
+            const alreadyExists = errorMsg.includes("already exists") || errorMsg.includes("EEXIST");
+            if (alreadyExists) {
               existed = true;
               console.log("[create_file] File already exists, skipping creation");
               if (isDocx) {

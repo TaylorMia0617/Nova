@@ -1431,6 +1431,110 @@
   margin: 0 0 16px;
 }
 
+.template-upgrade-card {
+  margin: 12px 16px 8px;
+  padding: 14px;
+  border: 1px solid rgba(78, 140, 255, 0.35);
+  border-radius: 8px;
+  background: rgba(23, 37, 58, 0.88);
+  color: #dce7f5;
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.template-upgrade-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.template-upgrade-main strong {
+  display: block;
+  font-size: 14px;
+  margin-bottom: 6px;
+  color: #edf3ff;
+}
+
+.template-upgrade-main p {
+  margin: 0 0 6px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #b9c9df;
+}
+
+.template-upgrade-main ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #9fb4ce;
+}
+
+.template-upgrade-warning,
+.copilot-settings-warning {
+  color: #ffd089 !important;
+}
+
+.template-upgrade-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.template-upgrade-actions button,
+.copilot-settings-wide-button {
+  border: 0;
+  border-radius: 7px;
+  padding: 7px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  color: #ffffff;
+}
+
+.template-upgrade-primary,
+.copilot-settings-wide-button {
+  background: linear-gradient(135deg, #2b68bf 0%, #3d8df6 100%);
+}
+
+.template-upgrade-secondary {
+  background: #263448;
+  color: #b9c9df !important;
+}
+
+.template-upgrade-actions button:disabled,
+.copilot-settings-wide-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.copilot-settings-section {
+  border: 1px solid #2d3f5a;
+  border-radius: 8px;
+  padding: 12px;
+  margin: 2px 0 16px;
+  background: rgba(13, 20, 32, 0.7);
+}
+
+.copilot-settings-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #edf3ff;
+  margin-bottom: 6px;
+}
+
+.copilot-settings-section p {
+  margin: 0 0 8px;
+  color: #b0c2da;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.copilot-settings-wide-button {
+  width: 100%;
+  margin-top: 2px;
+}
+
 .copilot-settings-actions .danger-button {
   background: linear-gradient(135deg, #a82037 0%, #d44050 100%);
   color: #ffffff;

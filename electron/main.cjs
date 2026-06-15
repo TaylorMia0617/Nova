@@ -132,10 +132,23 @@ ${formatProjectTitleFromWorkspace(rootPath)}
 未回收伏笔：
 待整理
 
+Chapter Index：
+待整理
+
 当前创作方向：
 待整理
 `;
 }
+
+const DEFAULT_AUTHOR_VOICE_TEMPLATE = "# AuthorVoice\n\n## WritingMechanics\n待整理\n\n## DialogueMechanics\n待整理\n\n## NarrativeMechanics\n\n### InformationReveal\n待整理\n\n### EmotionPresentation\n待整理\n\n### RelationshipDevelopment\n待整理\n\n### Worldbuilding\n待整理\n\n### ObjectNarrative\n待整理\n\n### POVControl\n待整理\n\n## EroticLens\n\n### BodyFocus\n待整理\n\n### GazePattern\n待整理\n\n### DesireMechanics\n待整理\n\n### ShameAndDistance\n待整理\n\n### ClothingAndBoundary\n待整理\n\n### Avoid\n待整理\n";
+
+const DEFAULT_OBSESSIONS_TEMPLATE = "# Obsessions\n\n## Themes\n待整理\n\n## MotifFunctions\n待整理\n";
+const DEFAULT_CHARACTER_STATES_TEMPLATE = "# CharacterStates\n\n记录角色当前状态、欲望、恐惧、情绪、偏见、已知信息、所在位置。\n\n每条建议格式：\n- 角色：状态摘要；source: 文件名 startLine-endLine；evidence: 简短证据\n";
+const DEFAULT_RELATIONSHIPS_TEMPLATE = "# Relationships\n\n记录角色关系、互动模式、冲突、感情变化。蓝图可使用同名 Relationships 作为关系网络视图。\n\n每条建议格式：\n- A ↔ B：关系/冲突/感情变化；source: 文件名 startLine-endLine；evidence: 简短证据\n";
+const DEFAULT_TIMELINE_TEMPLATE = "# Timeline\n\n记录事件时间线、章节顺序、因果顺序。\n\n每条建议格式：\n- 时间/章节：事件；影响；source: 文件名 startLine-endLine\n";
+const DEFAULT_INVENTORY_TEMPLATE = "# Inventory\n\n记录物品、线索、信件、道具的当前归属、状态、最后出现位置。\n\n每条建议格式：\n- 物品：归属/状态/意义；last_seen: 文件名 startLine-endLine；evidence: 简短证据\n";
+const DEFAULT_FORESHADOWINGS_TEMPLATE = "# Foreshadowings\n\n记录伏笔、未解问题、来源章节/行号、预计回收方向。已回收伏笔应标记 resolved 或移除。\n\n每条建议格式：\n- 伏笔：问题/异常；source: 文件名 startLine-endLine；status: open/resolved；payoff_hint: 简短方向\n";
+const DEFAULT_AUTHOR_TEMPLATE = "# AuthorTemplate\n\n只记录作者写作模板、输出偏好和口味约束；不要记录剧情状态。\n\n## Prose Rules\n待整理\n\n## Chapter Workflow\nPrompt -> Plan -> Blueprint -> Prose\n";
 
 function isLegacyDefaultProjectImportants(content) {
   const normalized = String(content ?? "").replace(/\r\n/g, "\n");
@@ -196,6 +209,52 @@ async function migrateLegacyDefaultProjectImportants(importantsPath, rootPath) {
     }
   } catch (error) {
     console.warn("[memory] Unable to migrate project importants:", error);
+  }
+}
+
+function appendMissingSection(content, heading, body = "待整理\n") {
+  if (content.includes(heading)) return content;
+  return `${content.trim()}\n\n${heading}\n${body}`.trimEnd() + "\n";
+}
+
+async function migrateProjectMemorySchema(paths) {
+  if (await pathExists(paths.importantsPath)) {
+    const current = await fs.readFile(paths.importantsPath, "utf8");
+    const next = appendMissingSection(current, "Chapter Index：");
+    if (next !== current) await fs.writeFile(paths.importantsPath, next, "utf8");
+  }
+
+  if (await pathExists(paths.authorVoicePath)) {
+    let current = await fs.readFile(paths.authorVoicePath, "utf8");
+    for (const heading of [
+      "## WritingMechanics",
+      "## DialogueMechanics",
+      "## NarrativeMechanics",
+      "### InformationReveal",
+      "### EmotionPresentation",
+      "### RelationshipDevelopment",
+      "### Worldbuilding",
+      "### ObjectNarrative",
+      "### POVControl",
+      "## EroticLens",
+      "### BodyFocus",
+      "### GazePattern",
+      "### DesireMechanics",
+      "### ShameAndDistance",
+      "### ClothingAndBoundary",
+      "### Avoid",
+    ]) {
+      current = appendMissingSection(current, heading);
+    }
+    await fs.writeFile(paths.authorVoicePath, current, "utf8");
+  }
+
+  if (await pathExists(paths.obsessionsPath)) {
+    let current = await fs.readFile(paths.obsessionsPath, "utf8");
+    for (const heading of ["## Themes", "## MotifFunctions"]) {
+      current = appendMissingSection(current, heading);
+    }
+    await fs.writeFile(paths.obsessionsPath, current, "utf8");
   }
 }
 const SKIPPED_WORKSPACE_DIRECTORIES = new Set([
@@ -280,6 +339,12 @@ function getWorkspaceAppDataPaths() {
   const obsessionsPath = path.join(habitsPath, "Obsessions.md");
   const snapshotPath = path.join(habitsPath, "Snapshot.md");
   const cacheMemoryPath = path.join(habitsPath, "Cache.md");
+  const characterStatesPath = path.join(habitsPath, "CharacterStates.md");
+  const relationshipsPath = path.join(habitsPath, "Relationships.md");
+  const timelinePath = path.join(habitsPath, "Timeline.md");
+  const inventoryPath = path.join(habitsPath, "Inventory.md");
+  const foreshadowingsPath = path.join(habitsPath, "Foreshadowings.md");
+  const authorTemplatePath = path.join(habitsPath, "AuthorTemplate.md");
   const cachePath = path.join(dataPath, "cache");
   const cacheIndexPath = path.join(cachePath, "index.json");
 
@@ -299,6 +364,12 @@ function getWorkspaceAppDataPaths() {
     obsessionsPath,
     snapshotPath,
     cacheMemoryPath,
+    characterStatesPath,
+    relationshipsPath,
+    timelinePath,
+    inventoryPath,
+    foreshadowingsPath,
+    authorTemplatePath,
     cachePath,
     cacheIndexPath,
   };
@@ -358,14 +429,33 @@ async function ensureWorkspaceHabits() {
     await fs.writeFile(paths.snapshotPath, "# Snapshot\n\n当前短期状态：\n\n", "utf8");
   }
   if (!(await pathExists(paths.authorVoicePath))) {
-    await fs.writeFile(paths.authorVoicePath, "# AuthorVoice\n\n作者偏好、坏习惯、叙事执念、反感项：\n\n", "utf8");
+    await fs.writeFile(paths.authorVoicePath, DEFAULT_AUTHOR_VOICE_TEMPLATE, "utf8");
   }
   if (!(await pathExists(paths.obsessionsPath))) {
-    await fs.writeFile(paths.obsessionsPath, "# Obsessions\n\n长期主题执念：\n\n", "utf8");
+    await fs.writeFile(paths.obsessionsPath, DEFAULT_OBSESSIONS_TEMPLATE, "utf8");
   }
   if (!(await pathExists(paths.cacheMemoryPath))) {
     await fs.writeFile(paths.cacheMemoryPath, "# Cache\n\n内容寻址缓存摘要：\n\n", "utf8");
   }
+  if (!(await pathExists(paths.characterStatesPath))) {
+    await fs.writeFile(paths.characterStatesPath, DEFAULT_CHARACTER_STATES_TEMPLATE, "utf8");
+  }
+  if (!(await pathExists(paths.relationshipsPath))) {
+    await fs.writeFile(paths.relationshipsPath, DEFAULT_RELATIONSHIPS_TEMPLATE, "utf8");
+  }
+  if (!(await pathExists(paths.timelinePath))) {
+    await fs.writeFile(paths.timelinePath, DEFAULT_TIMELINE_TEMPLATE, "utf8");
+  }
+  if (!(await pathExists(paths.inventoryPath))) {
+    await fs.writeFile(paths.inventoryPath, DEFAULT_INVENTORY_TEMPLATE, "utf8");
+  }
+  if (!(await pathExists(paths.foreshadowingsPath))) {
+    await fs.writeFile(paths.foreshadowingsPath, DEFAULT_FORESHADOWINGS_TEMPLATE, "utf8");
+  }
+  if (!(await pathExists(paths.authorTemplatePath))) {
+    await fs.writeFile(paths.authorTemplatePath, DEFAULT_AUTHOR_TEMPLATE, "utf8");
+  }
+  await migrateProjectMemorySchema(paths);
   return {
     rootPath: paths.rootPath,
     habitsPath: paths.habitsPath,
@@ -374,6 +464,12 @@ async function ensureWorkspaceHabits() {
     obsessionsPath: paths.obsessionsPath,
     snapshotPath: paths.snapshotPath,
     cacheMemoryPath: paths.cacheMemoryPath,
+    characterStatesPath: paths.characterStatesPath,
+    relationshipsPath: paths.relationshipsPath,
+    timelinePath: paths.timelinePath,
+    inventoryPath: paths.inventoryPath,
+    foreshadowingsPath: paths.foreshadowingsPath,
+    authorTemplatePath: paths.authorTemplatePath,
   };
 }
 
@@ -466,14 +562,43 @@ function getReferenceListFilePath(listId) {
 }
 
 async function readReferenceListsIndex() {
-  const { referenceListsPath } = await ensureWorkspaceAppData();
+  const { referenceDataPath, referenceListsPath } = await ensureWorkspaceAppData();
+  let index = [];
   try {
     const content = await fs.readFile(referenceListsPath, "utf8");
     const parsed = JSON.parse(content);
-    return Array.isArray(parsed) ? parsed : [];
+    index = Array.isArray(parsed) ? parsed : [];
   } catch {
-    return [];
+    index = [];
   }
+
+  try {
+    const files = await fs.readdir(referenceDataPath);
+    let changed = false;
+    for (const fileName of files) {
+      if (!/^list-.+\.json$/i.test(fileName)) continue;
+      const filePath = path.join(referenceDataPath, fileName);
+      const content = await fs.readFile(filePath, "utf8");
+      const list = JSON.parse(content);
+      if (!list || typeof list !== "object" || !list.id || !list.name) continue;
+      if (index.some((item) => item.id === list.id)) continue;
+      const now = new Date().toISOString();
+      index.push({
+        id: list.id,
+        name: list.name,
+        createdAt: list.createdAt || now,
+        updatedAt: list.updatedAt || now,
+      });
+      changed = true;
+    }
+    if (changed) {
+      await fs.writeFile(referenceListsPath, JSON.stringify(index, null, 2), "utf8");
+    }
+  } catch {
+    // Keep the explicit index if repair scanning fails.
+  }
+
+  return index;
 }
 
 async function writeReferenceListsIndex(index) {
@@ -1077,7 +1202,9 @@ ipcMain.handle("fs:readFile", async (event, filePath) => {
 
 ipcMain.handle("fs:writeFile", async (event, filePath, content) => {
   return runWithWorkspaceRoot(event, async () => {
-    await fs.writeFile(assertWorkspacePath(filePath), content, "utf8");
+    const normalizedPath = assertWorkspacePath(filePath);
+    await fs.mkdir(path.dirname(normalizedPath), { recursive: true });
+    await fs.writeFile(normalizedPath, content, "utf8");
   });
 });
 
@@ -1090,7 +1217,9 @@ ipcMain.handle("fs:readFileBinary", async (event, filePath) => {
 
 ipcMain.handle("fs:writeFileBinary", async (event, filePath, base64Content) => {
   return runWithWorkspaceRoot(event, async () => {
-    await fs.writeFile(assertWorkspacePath(filePath), Buffer.from(base64Content, "base64"));
+    const normalizedPath = assertWorkspacePath(filePath);
+    await fs.mkdir(path.dirname(normalizedPath), { recursive: true });
+    await fs.writeFile(normalizedPath, Buffer.from(base64Content, "base64"));
   });
 });
 
@@ -1206,6 +1335,66 @@ ipcMain.handle("memory:readProjectCacheMemory", async (event) => runWithWorkspac
 ipcMain.handle("memory:writeProjectCacheMemory", async (event, content) => runWithWorkspaceRoot(event, async () => {
   const paths = await ensureWorkspaceHabits();
   await writeWithRetry(paths.cacheMemoryPath, String(content ?? ""));
+}));
+
+ipcMain.handle("memory:readProjectCharacterStates", async (event) => runWithWorkspaceRoot(event, async () => {
+  const paths = await ensureWorkspaceHabits();
+  return fs.readFile(paths.characterStatesPath, "utf8");
+}));
+
+ipcMain.handle("memory:writeProjectCharacterStates", async (event, content) => runWithWorkspaceRoot(event, async () => {
+  const paths = await ensureWorkspaceHabits();
+  await writeWithRetry(paths.characterStatesPath, String(content ?? ""));
+}));
+
+ipcMain.handle("memory:readProjectRelationships", async (event) => runWithWorkspaceRoot(event, async () => {
+  const paths = await ensureWorkspaceHabits();
+  return fs.readFile(paths.relationshipsPath, "utf8");
+}));
+
+ipcMain.handle("memory:writeProjectRelationships", async (event, content) => runWithWorkspaceRoot(event, async () => {
+  const paths = await ensureWorkspaceHabits();
+  await writeWithRetry(paths.relationshipsPath, String(content ?? ""));
+}));
+
+ipcMain.handle("memory:readProjectTimeline", async (event) => runWithWorkspaceRoot(event, async () => {
+  const paths = await ensureWorkspaceHabits();
+  return fs.readFile(paths.timelinePath, "utf8");
+}));
+
+ipcMain.handle("memory:writeProjectTimeline", async (event, content) => runWithWorkspaceRoot(event, async () => {
+  const paths = await ensureWorkspaceHabits();
+  await writeWithRetry(paths.timelinePath, String(content ?? ""));
+}));
+
+ipcMain.handle("memory:readProjectInventory", async (event) => runWithWorkspaceRoot(event, async () => {
+  const paths = await ensureWorkspaceHabits();
+  return fs.readFile(paths.inventoryPath, "utf8");
+}));
+
+ipcMain.handle("memory:writeProjectInventory", async (event, content) => runWithWorkspaceRoot(event, async () => {
+  const paths = await ensureWorkspaceHabits();
+  await writeWithRetry(paths.inventoryPath, String(content ?? ""));
+}));
+
+ipcMain.handle("memory:readProjectForeshadowings", async (event) => runWithWorkspaceRoot(event, async () => {
+  const paths = await ensureWorkspaceHabits();
+  return fs.readFile(paths.foreshadowingsPath, "utf8");
+}));
+
+ipcMain.handle("memory:writeProjectForeshadowings", async (event, content) => runWithWorkspaceRoot(event, async () => {
+  const paths = await ensureWorkspaceHabits();
+  await writeWithRetry(paths.foreshadowingsPath, String(content ?? ""));
+}));
+
+ipcMain.handle("memory:readProjectAuthorTemplate", async (event) => runWithWorkspaceRoot(event, async () => {
+  const paths = await ensureWorkspaceHabits();
+  return fs.readFile(paths.authorTemplatePath, "utf8");
+}));
+
+ipcMain.handle("memory:writeProjectAuthorTemplate", async (event, content) => runWithWorkspaceRoot(event, async () => {
+  const paths = await ensureWorkspaceHabits();
+  await writeWithRetry(paths.authorTemplatePath, String(content ?? ""));
 }));
 
 ipcMain.handle("cache:get", async (event, request) => runWithWorkspaceRoot(event, async () => {
@@ -1334,7 +1523,8 @@ ipcMain.handle("blueprintTemplate:delete", async (event, templateId) => runWithW
 
 ipcMain.handle("fs:createFile", async (event, filePath) => runWithWorkspaceRoot(event, async () => {
   const { normalizedPath } = getValidatedEntryName(filePath);
-  const handle = await fs.open(normalizedPath, "w");
+  await fs.mkdir(path.dirname(normalizedPath), { recursive: true });
+  const handle = await fs.open(normalizedPath, "wx");
   await handle.close();
 }));
 
@@ -1343,7 +1533,7 @@ ipcMain.handle("fs:createFolder", async (event, folderPath) => runWithWorkspaceR
   if (await pathExists(normalizedPath)) {
     throw new Error("A file or folder with that name already exists.");
   }
-  await fs.mkdir(normalizedPath);
+  await fs.mkdir(normalizedPath, { recursive: true });
 }));
 
 ipcMain.handle("fs:renamePath", async (event, currentPath, newName) => runWithWorkspaceRoot(event, async () => {

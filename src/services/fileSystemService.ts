@@ -88,6 +88,18 @@ interface NovelHostApi {
   writeProjectSnapshot?: (content: string) => Promise<void>;
   readProjectCacheMemory?: () => Promise<string>;
   writeProjectCacheMemory?: (content: string) => Promise<void>;
+  readProjectCharacterStates?: () => Promise<string>;
+  writeProjectCharacterStates?: (content: string) => Promise<void>;
+  readProjectRelationships?: () => Promise<string>;
+  writeProjectRelationships?: (content: string) => Promise<void>;
+  readProjectTimeline?: () => Promise<string>;
+  writeProjectTimeline?: (content: string) => Promise<void>;
+  readProjectInventory?: () => Promise<string>;
+  writeProjectInventory?: (content: string) => Promise<void>;
+  readProjectForeshadowings?: () => Promise<string>;
+  writeProjectForeshadowings?: (content: string) => Promise<void>;
+  readProjectAuthorTemplate?: () => Promise<string>;
+  writeProjectAuthorTemplate?: (content: string) => Promise<void>;
   getContentCache?: (request: ContentCacheRequest) => Promise<ContentCacheResult>;
   putContentCache?: (request: ContentCachePutRequest) => Promise<ContentCacheResult>;
   getProjectCacheIndex?: () => Promise<ProjectCacheIndex>;
@@ -149,6 +161,12 @@ export interface WorkspaceHabitsPaths {
   obsessionsPath?: string;
   snapshotPath?: string;
   cacheMemoryPath?: string;
+  characterStatesPath?: string;
+  relationshipsPath?: string;
+  timelinePath?: string;
+  inventoryPath?: string;
+  foreshadowingsPath?: string;
+  authorTemplatePath?: string;
 }
 
 type AnyDirectoryHandle = FileSystemDirectoryHandle & {
@@ -817,6 +835,66 @@ export async function writeProjectCacheMemory(content: string): Promise<void> {
   if (host?.writeProjectCacheMemory) {
     await host.writeProjectCacheMemory(content);
   }
+}
+
+export async function readProjectCharacterStates(): Promise<string | null> {
+  const host = getHostApi();
+  return host?.readProjectCharacterStates ? host.readProjectCharacterStates() : null;
+}
+
+export async function writeProjectCharacterStates(content: string): Promise<void> {
+  const host = getHostApi();
+  if (host?.writeProjectCharacterStates) await host.writeProjectCharacterStates(content);
+}
+
+export async function readProjectRelationships(): Promise<string | null> {
+  const host = getHostApi();
+  return host?.readProjectRelationships ? host.readProjectRelationships() : null;
+}
+
+export async function writeProjectRelationships(content: string): Promise<void> {
+  const host = getHostApi();
+  if (host?.writeProjectRelationships) await host.writeProjectRelationships(content);
+}
+
+export async function readProjectTimeline(): Promise<string | null> {
+  const host = getHostApi();
+  return host?.readProjectTimeline ? host.readProjectTimeline() : null;
+}
+
+export async function writeProjectTimeline(content: string): Promise<void> {
+  const host = getHostApi();
+  if (host?.writeProjectTimeline) await host.writeProjectTimeline(content);
+}
+
+export async function readProjectInventory(): Promise<string | null> {
+  const host = getHostApi();
+  return host?.readProjectInventory ? host.readProjectInventory() : null;
+}
+
+export async function writeProjectInventory(content: string): Promise<void> {
+  const host = getHostApi();
+  if (host?.writeProjectInventory) await host.writeProjectInventory(content);
+}
+
+export async function readProjectForeshadowings(): Promise<string | null> {
+  const host = getHostApi();
+  return host?.readProjectForeshadowings ? host.readProjectForeshadowings() : null;
+}
+
+export async function writeProjectForeshadowings(content: string): Promise<void> {
+  const host = getHostApi();
+  if (host?.writeProjectForeshadowings) await host.writeProjectForeshadowings(content);
+}
+
+export async function readProjectAuthorTemplate(): Promise<string | null> {
+  const host = getHostApi();
+  return host?.readProjectAuthorTemplate ? host.readProjectAuthorTemplate() : null;
+}
+
+export async function writeProjectAuthorTemplate(content: string): Promise<void> {
+  const host = getHostApi();
+  if (host?.writeProjectAuthorTemplate) await host.writeProjectAuthorTemplate(content);
 }
 
 export async function getContentCache(request: ContentCacheRequest): Promise<ContentCacheResult | null> {
