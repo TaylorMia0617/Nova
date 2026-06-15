@@ -470,6 +470,7 @@ const enUS: TranslationDict = {
     time: "Time",
     content: "Content",
     storyEvents: "Story events",
+    fulfilled: "Fulfilled",
     characterStories: "Character story",
     characterEventTime: "Character story time",
     storyText: "Story",

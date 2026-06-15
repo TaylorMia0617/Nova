@@ -236,13 +236,13 @@ const applyTemplateBinding = (node: BlueprintNode, field: BlueprintNodeTemplate[
       return { ...node, storyType };
     }
     if (bindingKey === "storyEventContent") {
-      return { ...node, storyEvents: values.map((item, index) => ({ id: newId("event"), time: node.storyEvents?.[index]?.time ?? "", content: item, foreshadowing: node.storyEvents?.[index]?.foreshadowing ?? "" })) };
+      return { ...node, storyEvents: values.map((item, index) => ({ id: newId("event"), time: node.storyEvents?.[index]?.time ?? "", content: item, foreshadowing: node.storyEvents?.[index]?.foreshadowing ?? "", fulfilled: node.storyEvents?.[index]?.fulfilled ?? false })) };
     }
     if (bindingKey === "storyEventTime") {
-      return { ...node, storyEvents: values.map((item, index) => ({ id: newId("event"), time: item, content: node.storyEvents?.[index]?.content ?? "", foreshadowing: node.storyEvents?.[index]?.foreshadowing ?? "" })) };
+      return { ...node, storyEvents: values.map((item, index) => ({ id: newId("event"), time: item, content: node.storyEvents?.[index]?.content ?? "", foreshadowing: node.storyEvents?.[index]?.foreshadowing ?? "", fulfilled: node.storyEvents?.[index]?.fulfilled ?? false })) };
     }
     if (bindingKey === "storyEventForeshadowing") {
-      return { ...node, storyEvents: values.map((item, index) => ({ id: newId("event"), time: node.storyEvents?.[index]?.time ?? "", content: node.storyEvents?.[index]?.content ?? "", foreshadowing: item })) };
+      return { ...node, storyEvents: values.map((item, index) => ({ id: newId("event"), time: node.storyEvents?.[index]?.time ?? "", content: node.storyEvents?.[index]?.content ?? "", foreshadowing: item, fulfilled: node.storyEvents?.[index]?.fulfilled ?? false })) };
     }
   }
   if (node.kind === "character") {
@@ -319,13 +319,20 @@ const normalizeNode = (node: BlueprintNode): BlueprintNode => {
   if (node.kind === "story") {
     const linkedChapters = normalizeLinkedChapters(node);
     const storyEvents = Array.isArray(node.storyEvents)
-      ? node.storyEvents
+      ? node.storyEvents.map((event) => ({
+          id: event.id ?? newId("event"),
+          time: event.time ?? "",
+          content: event.content ?? "",
+          foreshadowing: event.foreshadowing ?? "",
+          fulfilled: event.fulfilled ?? false,
+        }))
       : (node.time || node.foreshadowing)
         ? [{
             id: newId("event"),
             time: node.time ?? "",
             content: "",
             foreshadowing: node.foreshadowing ?? "",
+            fulfilled: false,
           }]
         : [];
 

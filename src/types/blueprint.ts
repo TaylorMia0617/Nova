@@ -175,6 +175,7 @@ export type BlueprintNode = {
     time: string;
     content: string;
     foreshadowing: string;
+    fulfilled?: boolean;
   }>;
   characterName?: string;
   identity?: string;

@@ -470,6 +470,7 @@ const zhCN: TranslationDict = {
     time: "时间",
     content: "内容",
     storyEvents: "剧情事件",
+    fulfilled: "已兑现",
     characterStories: "人物剧情",
     characterEventTime: "人物剧情时间",
     storyText: "故事",

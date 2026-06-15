@@ -1376,6 +1376,20 @@
   padding: 0;
 }
 
+.blueprint-event-fulfilled {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  color: var(--color-text-subtle, #94a3b8);
+  font-size: 12px;
+}
+
+.blueprint-event-fulfilled input {
+  width: 14px;
+  height: 14px;
+}
+
 .blueprint-vs-divider {
   margin: 4px 0;
   color: var(--color-accent, #5eead4);

@@ -27,9 +27,6 @@ import {
 } from "../services/memoryService";
 import {
   readFile,
-  readProjectAuthorVoice,
-  readProjectImportant,
-  readProjectObsessions,
   type ReferenceListData,
   type WorkspaceNode,
 } from "../services/fileSystemService";
@@ -143,39 +140,6 @@ function buildRelevantReferenceContext(
   return content.length > maxLength
     ? `${content.slice(0, maxLength)}\n\n...[relevant reference entries truncated]...`
     : content;
-}
-
-function assessProjectMemoryTemplateUpgrade(important: string, authorVoice: string, obsessions: string) {
-  const reasons: string[] = [];
-  const placeholderCount = [important, authorVoice, obsessions]
-    .join("\n")
-    .match(/待整理/g)?.length ?? 0;
-
-  if (placeholderCount >= 3) {
-    reasons.push("记忆文件里还有多处“待整理”，说明模板结构已经有了，但尚未基于作品完成提炼。");
-  }
-  if (!/Chapter Index/i.test(important)) {
-    reasons.push("Importants.md 缺少 Chapter Index，章节层索引可能还没有升级。");
-  }
-  if (!/NarrativeMechanics/i.test(authorVoice)) {
-    reasons.push("AuthorVoice.md 缺少 NarrativeMechanics，AI 可能仍停留在浅层风格总结。");
-  }
-  if (!/EroticLens/i.test(authorVoice)) {
-    reasons.push("AuthorVoice.md 缺少 EroticLens，女性镜头、身体感知、欲望/羞耻机制可能不会被稳定继承。");
-  }
-  if (!/MotifFunctions/i.test(obsessions)) {
-    reasons.push("Obsessions.md 缺少 MotifFunctions，反复意象可能没有被归纳成功能层。");
-  }
-
-  const shortMemory = important.trim().length + authorVoice.trim().length + obsessions.trim().length < 1600;
-  if (shortMemory) {
-    reasons.push("当前项目记忆内容较短，可能还没有从导入章节中重新提炼。");
-  }
-
-  return {
-    needed: reasons.length > 0,
-    reasons: reasons.slice(0, 4),
-  };
 }
 
 const PLAN_REQUIRED_PATTERNS = [
@@ -465,7 +429,7 @@ function extractToolCallsFromText(text: string): ExtractedToolCall[] {
   const occupied: Array<{ start: number; end: number }> = [];
   const addCall = (start: number, fullMatch: string, json: string) => {
     if (!/"(?:name|tool)"\s*:/.test(json)) return;
-    if (!/"(?:name|tool)"\s*:\s*"(?:create_file|edit_file|edit_docx|create_blueprint|upsert_reference_entries|read_file|search_file|list_directory|web_search|list_blueprints|read_blueprint)"/.test(json)) return;
+    if (!/"(?:name|tool)"\s*:\s*"(?:create_file|edit_file|edit_docx|create_blueprint|upsert_reference_entries|read_file|search_file|list_directory|web_search|list_blueprints|read_blueprint|list_blueprint_templates)"/.test(json)) return;
     const end = start + fullMatch.length;
     if (occupied.some((range) => start < range.end && end > range.start)) return;
     occupied.push({ start, end });
@@ -494,8 +458,8 @@ function extractToolCallsFromText(text: string): ExtractedToolCall[] {
 function stripToolCalls(content: string) {
   const stripped = extractToolCallsFromText(content)
     .reduceRight((text, call) => text.slice(0, call.index) + text.slice(call.index + call.fullMatch.length), content)
-    .replace(/```(?:tool[_-]?call|json)\s*\n[\s\S]*"name"\s*:\s*"(?:create_file|edit_file|edit_docx|create_blueprint|upsert_reference_entries|read_file|search_file|list_directory|web_search|list_blueprints|read_blueprint)"[\s\S]*$/i, "")
-    .replace(/\{\s*"name"\s*:\s*"(?:create_file|edit_file|edit_docx|create_blueprint|upsert_reference_entries|read_file|search_file|list_directory|web_search|list_blueprints|read_blueprint)"[\s\S]*$/i, "");
+    .replace(/```(?:tool[_-]?call|json)\s*\n[\s\S]*"name"\s*:\s*"(?:create_file|edit_file|edit_docx|create_blueprint|upsert_reference_entries|read_file|search_file|list_directory|web_search|list_blueprints|read_blueprint|list_blueprint_templates)"[\s\S]*$/i, "")
+    .replace(/\{\s*"name"\s*:\s*"(?:create_file|edit_file|edit_docx|create_blueprint|upsert_reference_entries|read_file|search_file|list_directory|web_search|list_blueprints|read_blueprint|list_blueprint_templates)"[\s\S]*$/i, "");
   return stripped.trim();
 }
 
@@ -514,6 +478,7 @@ function summarizeToolArgs(toolName: string, args: Record<string, unknown>) {
   }
   if (toolName === "upsert_reference_entries") return String(args.listName ?? "人物");
   if (toolName === "read_blueprint") return String(args.name ?? args.id ?? "blueprint");
+  if (toolName === "list_blueprint_templates") return "blueprint templates";
   if (toolName === "create_blueprint") return String(args.name ?? (args.blueprint as { name?: string } | undefined)?.name ?? "blueprint");
   return toolName;
 }
@@ -710,7 +675,6 @@ const CopilotPanel: React.FC = () => {
   const [currentAssistantWorkItems, setCurrentAssistantWorkItems] = useState<ConversationWorkItem[]>([]);
   const [clarificationDraftAnswers, setClarificationDraftAnswers] = useState<Record<string, string>>({});
   const [submittedClarificationIds, setSubmittedClarificationIds] = useState<Set<string>>(new Set());
-  const [templateUpgradeNotice, setTemplateUpgradeNotice] = useState<{ reasons: string[] } | null>(null);
   const [agentTodo, setAgentTodo] = useState<{
     tool: string;
     path: string;
@@ -722,9 +686,9 @@ const CopilotPanel: React.FC = () => {
   const agentModeButtonRef = useRef<HTMLButtonElement>(null);
   const lastDefaultChatModelIdRef = useRef(defaultChatModelId);
   const workspaceLoadRequestRef = useRef(0);
-  const dismissedTemplateUpgradeRootsRef = useRef<Set<string>>(new Set());
   const activeConversationRef = useRef<ConversationRecord | null>(null);
   const draftInputRef = useRef("");
+  const inputTextareaRef = useRef<HTMLTextAreaElement>(null);
   const draftSaveTimerRef = useRef<number | null>(null);
   const lastPersistedDraftRef = useRef<{ conversationId: string; value: string } | null>(null);
 
@@ -1104,74 +1068,6 @@ const CopilotPanel: React.FC = () => {
     await persistConversation(updatedRecord);
   };
 
-  const checkTemplateUpgradeNeed = async (expectedRootPath = rootPath) => {
-    if (!expectedRootPath || dismissedTemplateUpgradeRootsRef.current.has(expectedRootPath)) {
-      setTemplateUpgradeNotice(null);
-      return;
-    }
-
-    try {
-      const [important, authorVoice, obsessions] = await Promise.all([
-        readProjectImportant(),
-        readProjectAuthorVoice(),
-        readProjectObsessions(),
-      ]);
-      if (expectedRootPath !== useFileStore.getState().rootPath) return;
-      const assessment = assessProjectMemoryTemplateUpgrade(
-        important ?? "",
-        authorVoice ?? "",
-        obsessions ?? ""
-      );
-      setTemplateUpgradeNotice(assessment.needed ? { reasons: assessment.reasons } : null);
-    } catch {
-      if (expectedRootPath === useFileStore.getState().rootPath) {
-        setTemplateUpgradeNotice(null);
-      }
-    }
-  };
-
-  const startTemplateUpgrade = async () => {
-    if (!activeInputModel || isLoading) return;
-    clearDraftSaveTimer();
-    await persistDraftInput(draftInputRef.current, activeConversationRef.current);
-    setTemplateUpgradeNotice(null);
-    setInput("");
-    setDraftAttachments([]);
-
-    const upgradeConversation: ConversationRecord = {
-      ...createConversation(defaultChatModelId, useFileStore.getState().activeFile?.path),
-      title: "项目记忆模板升级",
-    };
-    const upgradePrompt = [
-      "请立即升级当前工作区的 Nova 项目记忆模板。用户已确认本操作会消耗较多 token。",
-      "",
-      "任务目标：",
-      "1. 读取工作区目录，优先分析章节正文、现有人设、参考条目数据库、Importants.md、AuthorVoice.md、Obsessions.md。",
-      "2. 不要只套空模板。必须基于实际导入文件重新提炼。",
-      "3. 输出两层记忆：",
-      "   - Chapter Index 写入 Importants.md：每章 Summary、CharacterChanges、ImportantObjects、Foreshadowing、OpenQuestions。",
-      "   - 全书创作模型写入 AuthorVoice.md / Obsessions.md：WritingMechanics、DialogueMechanics、NarrativeMechanics、EroticLens、Themes、MotifFunctions。",
-      "4. 把具体物件降级为机制例证，不要把乌鸦、项链、火焰等表象直接当成作者风格。",
-      "5. 如果证据不足，先读取更多文件；只有确实缺少正文时再提出简短问题。",
-      "6. 最终用多个 Memory Candidate 写入对应记忆文件；完整人设仍以参考条目数据库为主，不塞进 Importants.md。",
-      "",
-      "请现在开始执行，不要只给计划。",
-    ].join("\n");
-
-    await handleSendMessage({
-      content: upgradePrompt,
-      conversation: upgradeConversation,
-      attachments: [],
-      skills: {
-        ...chatSkills,
-        agentMode: "architect",
-        agentSubMode: "build",
-        forcePlanMode: false,
-        enableEditReview: false,
-      },
-    });
-  };
-
   const updateChatSkills = (updater: (current: ChatSkills) => ChatSkills) => {
     setChatSkills((current) => {
       const nextSkills = normalizeChatSkills(updater(current));
@@ -1204,7 +1100,6 @@ const CopilotPanel: React.FC = () => {
     setCurrentAssistantWorkItems([]);
     setClarificationDraftAnswers({});
     setSubmittedClarificationIds(new Set());
-    setTemplateUpgradeNotice(null);
     setAgentTodo(null);
     setIsLoading(false);
     setIsAgentModeMenuOpen(false);
@@ -1295,7 +1190,6 @@ const CopilotPanel: React.FC = () => {
       try {
         await ensureWorkspaceConversationStore();
         await ensureMemoryFiles();
-        await checkTemplateUpgradeNeed(rootPath);
         const summaries = await listConversationSummaries();
         if (requestId !== workspaceLoadRequestRef.current || rootPath !== useFileStore.getState().rootPath) return;
         setConversationSummaries(summaries);
@@ -1565,51 +1459,43 @@ const CopilotPanel: React.FC = () => {
       );
       addMemoryDebugEntry(
         plannedContext.promptDebug.entries,
-        "CharacterStates.md",
-        memoryContext.characterStates,
-        1800,
-        "stable",
-        "Lightweight state: character desire, fear, emotion, bias, knowledge, and location."
-      );
-      addMemoryDebugEntry(
-        plannedContext.promptDebug.entries,
-        "Relationships.md",
-        memoryContext.relationships,
-        1600,
-        "stable",
-        "Lightweight state: character interaction patterns, conflict, and emotional movement."
-      );
-      addMemoryDebugEntry(
-        plannedContext.promptDebug.entries,
-        "Timeline.md",
-        memoryContext.timeline,
-        1800,
-        "stable",
-        "Lightweight state: event order, chapter order, and causality."
-      );
-      addMemoryDebugEntry(
-        plannedContext.promptDebug.entries,
-        "Inventory.md",
-        memoryContext.inventory,
-        1600,
-        "stable",
-        "Lightweight state: object, clue, letter, and prop ownership/status."
-      );
-      addMemoryDebugEntry(
-        plannedContext.promptDebug.entries,
-        "Foreshadowings.md",
-        memoryContext.foreshadowings,
-        1800,
-        "stable",
-        "Lightweight state: open or resolved foreshadowing with source lines."
-      );
-      addMemoryDebugEntry(
-        plannedContext.promptDebug.entries,
         "AuthorTemplate.md",
         memoryContext.authorTemplate,
-        1400,
+        1800,
         "stable",
-        "Lightweight prose/output taste constraints, not plot memory."
+        "Author philosophy, theology, desire, why this novel exists, and novel core."
+      );
+      addMemoryDebugEntry(
+        plannedContext.promptDebug.entries,
+        "ProseStyle.md",
+        memoryContext.proseStyle,
+        1800,
+        "stable",
+        "Prose rhythm, POV, sentence habits, dialogue habits, and avoided patterns."
+      );
+      addMemoryDebugEntry(
+        plannedContext.promptDebug.entries,
+        "DescriptionStats.md",
+        memoryContext.descriptionStats,
+        2000,
+        "stable",
+        "Scene, time, and character description habits with usage counts."
+      );
+      addMemoryDebugEntry(
+        plannedContext.promptDebug.entries,
+        "StoryDatabase.md",
+        memoryContext.storyDatabase,
+        2400,
+        "stable",
+        "Static people, geography, factions, items, effects, owners, and backstory."
+      );
+      addMemoryDebugEntry(
+        plannedContext.promptDebug.entries,
+        "RealtimeDatabase.md",
+        memoryContext.realtimeDatabase,
+        2200,
+        "stable",
+        "Changing holders, locations, relationship/faction states, and time-node state."
       );
       if (relevantReferenceContext) {
         plannedContext.promptDebug.entries.push({
@@ -1634,7 +1520,7 @@ const CopilotPanel: React.FC = () => {
           ? `The user is answering a previous clarification question. Continue planning from the original request and the new answer.\n\n## Original Request\n${pendingClarification.userMessage.content}\n\n## Clarification Question\n${pendingClarification.promptContent}\n\n## User Answer\n${userMessage.content}\n\nNow produce the formal plan if enough information is available. If information is still missing, output a new "## Clarification Needed" section and ask only the missing questions.`
           : userMessage.content;
         const architectPlanRequest = requestSkills.agentMode === "architect"
-          ? `\n\n## Architect Plan Protocol\n- First diagnose the author profile: recurring obsessions, author habits, intended premise, narrative texture, disliked patterns, character handling, and theme direction.\n- If the author profile, premise, or rebuild direction is not clear enough, output exactly "## Clarification Needed" followed by the supported JSON questions object. Do not output a plan in the same message.\n- If this is a rebuild/start-over request (${isArchitectRebuildRequest(basePlanRequest) ? "yes" : "no"}), do not preserve old worldbuilding by default. Ask again what to keep or discard, the new core genre/direction, protagonist vs ensemble preference, theme/premise, and desired narrative texture.\n- Once enough answers exist, output a change plan with: 作者画像判断, 当前信息缺口, 旧设定保留/废弃清单, 新方向设计原则, 分阶段改动计划, and suggested Memory Candidate targets.\n- Do not write chapter prose or modify files in Architect plan mode.`
+          ? `\n\n## Architect Plan Protocol\n- First clarify AuthorTemplate: philosophy, theology, desire, why this novel exists, and novel core.\n- If the author core, premise, rebuild direction, or database scope is not clear enough, output exactly "## Clarification Needed" followed by the supported JSON questions object. Do not output a plan in the same message.\n- If this is a rebuild/start-over request (${isArchitectRebuildRequest(basePlanRequest) ? "yes" : "no"}), do not preserve old worldbuilding by default. Ask again what to keep or discard, the new core genre/direction, protagonist vs ensemble preference, author core, and desired prose texture.\n- Once enough answers exist, output a change plan with: 作者模板判断, 当前信息缺口, 旧设定保留/废弃清单, 新方向设计原则, 蓝图改动, StoryDatabase/RealtimeDatabase 改动, ProseStyle/DescriptionStats 改动, and suggested Memory Candidate targets.\n- Do not write chapter prose or modify files in Architect plan mode.`
           : "";
         const planRequest = `${basePlanRequest}\n\nNeedPlan 已触发。请先输出执行计划，等待用户确认后再生成蓝图、正文或修改文件。现在不要写文件。\n\nIf essential information is missing, do not pretend this is a plan. Output exactly a "## Clarification Needed" section with the questions instead.${architectPlanRequest}`;
 
@@ -2299,7 +2185,7 @@ const CopilotPanel: React.FC = () => {
           currentResponse = await callAI({
             modelProfile: requestModel,
             taskType: "chat",
-            userMessage: `Tool Results:\n\n${toolContext}\n\nContinue the user's TODO workflow. If the next TODO needs a tool, output only valid fenced tool_call JSON blocks in this response. Do not stop at a prose statement that you will use a tool. If you have enough information, provide the final answer. For blueprint creation, use create_blueprint before summarizing, and do not limit the blueprint to a fixed number of nodes; create the content-derived nodes and edges the source actually needs.`,
+            userMessage: `Tool Results:\n\n${toolContext}\n\nContinue the user's TODO workflow. If the next TODO needs a tool, output only valid fenced tool_call JSON blocks in this response. Do not stop at a prose statement that you will use a tool. If you have enough information, provide the final answer. For blueprint creation, call list_blueprint_templates before create_blueprint, prefer templateId/templateName on nodes, and do not limit the blueprint to a fixed number of nodes; create the content-derived nodes and edges the source actually needs.`,
             documentContext: plannedContext.content,
             documentFileName: activeFileAtStart?.name,
             maxTokens: undefined,
@@ -2340,12 +2226,12 @@ const CopilotPanel: React.FC = () => {
         const targetNames = Array.from(new Set(memoryResults
           .filter((result) => result.applied)
           .map((result) => {
-            if (result.target === "important") return "Importants.md";
             if (result.target === "nova") return "Nova.md";
-            if (result.target === "author_voice") return "AuthorVoice.md";
-            if (result.target === "obsession") return "Obsessions.md";
-            if (result.target === "snapshot") return "Snapshot.md";
-            if (result.target === "cache") return "Cache.md";
+            if (result.target === "author_template") return "AuthorTemplate.md";
+            if (result.target === "prose_style") return "ProseStyle.md";
+            if (result.target === "description_stats") return "DescriptionStats.md";
+            if (result.target === "story_database") return "StoryDatabase.md";
+            if (result.target === "realtime_database") return "RealtimeDatabase.md";
             return "";
           })
           .filter(Boolean)));
@@ -2534,6 +2420,9 @@ const CopilotPanel: React.FC = () => {
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.nativeEvent.isComposing || e.keyCode === 229) {
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       void handleSendMessage();
@@ -2600,46 +2489,6 @@ const CopilotPanel: React.FC = () => {
         </select>
       </div>
       <div className="chat-container">
-        {templateUpgradeNotice && (
-          <div className="template-upgrade-card">
-            <div className="template-upgrade-main">
-              <strong>建议升级项目记忆模板</strong>
-              <p>
-                Nova 检测到当前工作区的记忆文件可能还停留在旧模板或空模板。升级会让 AI 读取章节与设定，重新提炼 Chapter Index、AuthorVoice、Obsessions。
-              </p>
-              <p className="template-upgrade-warning">
-                注意：该操作会调用 AI 并读取多个文件，可能消耗较多 token；章节越多，消耗越高。
-              </p>
-              {templateUpgradeNotice.reasons.length > 0 && (
-                <ul>
-                  {templateUpgradeNotice.reasons.map((reason) => (
-                    <li key={reason}>{reason}</li>
-                  ))}
-                </ul>
-              )}
-            </div>
-            <div className="template-upgrade-actions">
-              <button
-                type="button"
-                className="template-upgrade-primary"
-                onClick={() => void startTemplateUpgrade()}
-                disabled={isLoading || !activeInputModel}
-              >
-                开始升级
-              </button>
-              <button
-                type="button"
-                className="template-upgrade-secondary"
-                onClick={() => {
-                  if (rootPath) dismissedTemplateUpgradeRootsRef.current.add(rootPath);
-                  setTemplateUpgradeNotice(null);
-                }}
-              >
-                稍后
-              </button>
-            </div>
-          </div>
-        )}
         <div className="messages">
           {(activeConversation?.messages.length ?? 0) === 0 && (
             <div className="empty-chat">
@@ -2942,6 +2791,7 @@ const CopilotPanel: React.FC = () => {
           </div>
           <div className="input-textbox-wrapper">
             <textarea
+              ref={inputTextareaRef}
               value={input}
               onChange={(e) => {
                 const nextInput = e.target.value;
@@ -3114,26 +2964,6 @@ const CopilotPanel: React.FC = () => {
                   onChange={(e) => setTempMaxTokens(e.target.value)}
                 />
               </label>
-              <div className="copilot-settings-section">
-                <div className="copilot-settings-section-title">项目记忆模板升级</div>
-                <p>
-                  让架构师读取当前工作区，重新提炼章节索引、作者画像、叙事机制、主题执念和意象功能。
-                </p>
-                <p className="copilot-settings-warning">
-                  该操作会调用 AI 并读取多个文件，可能消耗较多 token；章节越多，消耗越高。
-                </p>
-                <button
-                  type="button"
-                  className="copilot-settings-wide-button"
-                  onClick={() => {
-                    setIsSettingsOpen(false);
-                    void startTemplateUpgrade();
-                  }}
-                  disabled={isLoading || !activeInputModel}
-                >
-                  开始升级模板
-                </button>
-              </div>
               <div className="copilot-settings-actions">
                 <button
                   className="secondary"

@@ -78,28 +78,16 @@ interface NovelHostApi {
   readGlobalHabits?: () => Promise<string>;
   writeGlobalHabits?: (content: string) => Promise<void>;
   ensureWorkspaceHabits?: () => Promise<WorkspaceHabitsPaths>;
-  readProjectImportant?: () => Promise<string>;
-  writeProjectImportant?: (content: string) => Promise<void>;
-  readProjectAuthorVoice?: () => Promise<string>;
-  writeProjectAuthorVoice?: (content: string) => Promise<void>;
-  readProjectObsessions?: () => Promise<string>;
-  writeProjectObsessions?: (content: string) => Promise<void>;
-  readProjectSnapshot?: () => Promise<string>;
-  writeProjectSnapshot?: (content: string) => Promise<void>;
-  readProjectCacheMemory?: () => Promise<string>;
-  writeProjectCacheMemory?: (content: string) => Promise<void>;
-  readProjectCharacterStates?: () => Promise<string>;
-  writeProjectCharacterStates?: (content: string) => Promise<void>;
-  readProjectRelationships?: () => Promise<string>;
-  writeProjectRelationships?: (content: string) => Promise<void>;
-  readProjectTimeline?: () => Promise<string>;
-  writeProjectTimeline?: (content: string) => Promise<void>;
-  readProjectInventory?: () => Promise<string>;
-  writeProjectInventory?: (content: string) => Promise<void>;
-  readProjectForeshadowings?: () => Promise<string>;
-  writeProjectForeshadowings?: (content: string) => Promise<void>;
   readProjectAuthorTemplate?: () => Promise<string>;
   writeProjectAuthorTemplate?: (content: string) => Promise<void>;
+  readProjectProseStyle?: () => Promise<string>;
+  writeProjectProseStyle?: (content: string) => Promise<void>;
+  readProjectDescriptionStats?: () => Promise<string>;
+  writeProjectDescriptionStats?: (content: string) => Promise<void>;
+  readProjectStoryDatabase?: () => Promise<string>;
+  writeProjectStoryDatabase?: (content: string) => Promise<void>;
+  readProjectRealtimeDatabase?: () => Promise<string>;
+  writeProjectRealtimeDatabase?: (content: string) => Promise<void>;
   getContentCache?: (request: ContentCacheRequest) => Promise<ContentCacheResult>;
   putContentCache?: (request: ContentCachePutRequest) => Promise<ContentCacheResult>;
   getProjectCacheIndex?: () => Promise<ProjectCacheIndex>;
@@ -156,17 +144,11 @@ export interface ProjectCacheIndex {
 export interface WorkspaceHabitsPaths {
   rootPath: string;
   habitsPath: string;
-  importantsPath: string;
-  authorVoicePath?: string;
-  obsessionsPath?: string;
-  snapshotPath?: string;
-  cacheMemoryPath?: string;
-  characterStatesPath?: string;
-  relationshipsPath?: string;
-  timelinePath?: string;
-  inventoryPath?: string;
-  foreshadowingsPath?: string;
   authorTemplatePath?: string;
+  proseStylePath?: string;
+  descriptionStatsPath?: string;
+  storyDatabasePath?: string;
+  realtimeDatabasePath?: string;
 }
 
 type AnyDirectoryHandle = FileSystemDirectoryHandle & {
@@ -762,131 +744,6 @@ export async function ensureWorkspaceHabits(): Promise<WorkspaceHabitsPaths | nu
   return null;
 }
 
-export async function readProjectImportant(): Promise<string | null> {
-  const host = getHostApi();
-  if (host?.readProjectImportant) {
-    return host.readProjectImportant();
-  }
-  return null;
-}
-
-export async function writeProjectImportant(content: string): Promise<void> {
-  const host = getHostApi();
-  if (host?.writeProjectImportant) {
-    await host.writeProjectImportant(content);
-  }
-}
-
-export async function readProjectAuthorVoice(): Promise<string | null> {
-  const host = getHostApi();
-  if (host?.readProjectAuthorVoice) {
-    return host.readProjectAuthorVoice();
-  }
-  return null;
-}
-
-export async function writeProjectAuthorVoice(content: string): Promise<void> {
-  const host = getHostApi();
-  if (host?.writeProjectAuthorVoice) {
-    await host.writeProjectAuthorVoice(content);
-  }
-}
-
-export async function readProjectObsessions(): Promise<string | null> {
-  const host = getHostApi();
-  if (host?.readProjectObsessions) {
-    return host.readProjectObsessions();
-  }
-  return null;
-}
-
-export async function writeProjectObsessions(content: string): Promise<void> {
-  const host = getHostApi();
-  if (host?.writeProjectObsessions) {
-    await host.writeProjectObsessions(content);
-  }
-}
-
-export async function readProjectSnapshot(): Promise<string | null> {
-  const host = getHostApi();
-  if (host?.readProjectSnapshot) {
-    return host.readProjectSnapshot();
-  }
-  return null;
-}
-
-export async function writeProjectSnapshot(content: string): Promise<void> {
-  const host = getHostApi();
-  if (host?.writeProjectSnapshot) {
-    await host.writeProjectSnapshot(content);
-  }
-}
-
-export async function readProjectCacheMemory(): Promise<string | null> {
-  const host = getHostApi();
-  if (host?.readProjectCacheMemory) {
-    return host.readProjectCacheMemory();
-  }
-  return null;
-}
-
-export async function writeProjectCacheMemory(content: string): Promise<void> {
-  const host = getHostApi();
-  if (host?.writeProjectCacheMemory) {
-    await host.writeProjectCacheMemory(content);
-  }
-}
-
-export async function readProjectCharacterStates(): Promise<string | null> {
-  const host = getHostApi();
-  return host?.readProjectCharacterStates ? host.readProjectCharacterStates() : null;
-}
-
-export async function writeProjectCharacterStates(content: string): Promise<void> {
-  const host = getHostApi();
-  if (host?.writeProjectCharacterStates) await host.writeProjectCharacterStates(content);
-}
-
-export async function readProjectRelationships(): Promise<string | null> {
-  const host = getHostApi();
-  return host?.readProjectRelationships ? host.readProjectRelationships() : null;
-}
-
-export async function writeProjectRelationships(content: string): Promise<void> {
-  const host = getHostApi();
-  if (host?.writeProjectRelationships) await host.writeProjectRelationships(content);
-}
-
-export async function readProjectTimeline(): Promise<string | null> {
-  const host = getHostApi();
-  return host?.readProjectTimeline ? host.readProjectTimeline() : null;
-}
-
-export async function writeProjectTimeline(content: string): Promise<void> {
-  const host = getHostApi();
-  if (host?.writeProjectTimeline) await host.writeProjectTimeline(content);
-}
-
-export async function readProjectInventory(): Promise<string | null> {
-  const host = getHostApi();
-  return host?.readProjectInventory ? host.readProjectInventory() : null;
-}
-
-export async function writeProjectInventory(content: string): Promise<void> {
-  const host = getHostApi();
-  if (host?.writeProjectInventory) await host.writeProjectInventory(content);
-}
-
-export async function readProjectForeshadowings(): Promise<string | null> {
-  const host = getHostApi();
-  return host?.readProjectForeshadowings ? host.readProjectForeshadowings() : null;
-}
-
-export async function writeProjectForeshadowings(content: string): Promise<void> {
-  const host = getHostApi();
-  if (host?.writeProjectForeshadowings) await host.writeProjectForeshadowings(content);
-}
-
 export async function readProjectAuthorTemplate(): Promise<string | null> {
   const host = getHostApi();
   return host?.readProjectAuthorTemplate ? host.readProjectAuthorTemplate() : null;
@@ -895,6 +752,46 @@ export async function readProjectAuthorTemplate(): Promise<string | null> {
 export async function writeProjectAuthorTemplate(content: string): Promise<void> {
   const host = getHostApi();
   if (host?.writeProjectAuthorTemplate) await host.writeProjectAuthorTemplate(content);
+}
+
+export async function readProjectProseStyle(): Promise<string | null> {
+  const host = getHostApi();
+  return host?.readProjectProseStyle ? host.readProjectProseStyle() : null;
+}
+
+export async function writeProjectProseStyle(content: string): Promise<void> {
+  const host = getHostApi();
+  if (host?.writeProjectProseStyle) await host.writeProjectProseStyle(content);
+}
+
+export async function readProjectDescriptionStats(): Promise<string | null> {
+  const host = getHostApi();
+  return host?.readProjectDescriptionStats ? host.readProjectDescriptionStats() : null;
+}
+
+export async function writeProjectDescriptionStats(content: string): Promise<void> {
+  const host = getHostApi();
+  if (host?.writeProjectDescriptionStats) await host.writeProjectDescriptionStats(content);
+}
+
+export async function readProjectStoryDatabase(): Promise<string | null> {
+  const host = getHostApi();
+  return host?.readProjectStoryDatabase ? host.readProjectStoryDatabase() : null;
+}
+
+export async function writeProjectStoryDatabase(content: string): Promise<void> {
+  const host = getHostApi();
+  if (host?.writeProjectStoryDatabase) await host.writeProjectStoryDatabase(content);
+}
+
+export async function readProjectRealtimeDatabase(): Promise<string | null> {
+  const host = getHostApi();
+  return host?.readProjectRealtimeDatabase ? host.readProjectRealtimeDatabase() : null;
+}
+
+export async function writeProjectRealtimeDatabase(content: string): Promise<void> {
+  const host = getHostApi();
+  if (host?.writeProjectRealtimeDatabase) await host.writeProjectRealtimeDatabase(content);
 }
 
 export async function getContentCache(request: ContentCacheRequest): Promise<ContentCacheResult | null> {

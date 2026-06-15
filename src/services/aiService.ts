@@ -37,116 +37,78 @@ const ANTI_AI_FICTION_GUIDANCE = `\n\n## Anti AI Writing
 - Avoid forced aphorisms, slogan-like lines, and polished closing morals.`;
 
 const NARRATIVE_VARIANCE_GUIDANCE = `\n\n## Narrative Variance
-- Author profile and AuthorVoice.md define tendencies, not templates. Do not reuse the same scene structure, sentence rhythm, emotional arc, or symbolic move just because it matches the profile.
+- AuthorTemplate and ProseStyle define tendencies, not templates. Do not reuse the same scene structure, sentence rhythm, emotional arc, or symbolic move just because it matches the profile.
 - Avoid repeated sentence patterns. Vary sentence length, openings, rhythm, subject order, punctuation, dialogue beats, and paragraph shape so the prose has real syntactic variety.
 - Let characters produce friction, digressions, small talk, half-answers, irrelevant observations, and non-optimal reactions when their current desire, fear, emotion, or bias would push them there.
 - Include occasional lived-in details that do not explain lore, solve plot, foreshadow, or prove theme.
 - Do not make every character serve plot efficiency. A character may protect ego, save face, misunderstand, delay, refuse, ramble, or notice the wrong thing.`;
 
 const NARRATIVE_MECHANICS_WRITER_V2_GUIDANCE = `\n\n## NarrativeMechanics Writer V2
-You are the Writer layer of Nova's NarrativeMechanics pipeline.
-
 Pipeline roles:
-- World State Database: Importants.md and Chapter Index provide facts, progress, unresolved questions, and confirmed state.
-- Theme Engine: Obsessions.md provides pressure and motif functions only. Do not state the theme directly.
-- Scene Compiler: AuthorVoice.md and NarrativeMechanics provide local constraints such as POV, reveal pattern, object use, and sensory texture.
-- Writer: you generate localized prose as momentary lived experience.
+- Blueprints: source of truth for story order, actual timeline, scene beats, and payoff/fulfillment state.
+- StoryDatabase: static facts for people, geography, factions, items, ownership lore, effects, and manifestations.
+- RealtimeDatabase: changing facts such as current holders, locations, faction status, and time-node state.
+- AuthorTemplate, ProseStyle, and DescriptionStats: prose taste, author intent, description habits, and rhetoric statistics.
+- Writer: generate localized prose as momentary lived experience.
 
 Writer boundaries:
 - Do not summarize events or chapters inside prose.
 - Do not explain narrative meaning, story structure, or theme.
 - Do not explain character psychology directly.
-- Do not produce recap, "previously on" content, balanced scene diagrams, labels, or headings inside generated prose.
-- If planning or memory extraction is needed, keep it outside the prose or leave it to Architect/Memory Candidate flows.
+- Do not produce recap, labels, balanced scene diagrams, or explanatory afterword inside generated prose.
+- If planning or data extraction is needed, keep it outside the prose.
 
 When writing prose:
 - Write momentary lived experience, not story summary.
 - Use observation mode: movement, sound, texture, light, interruption, silence, and physical action.
-- No Explanation: avoid "why this happens", "what this means", and abstract feeling labels. Replace them with action, sensory detail, silence, or interruption.
-- Attention Drift: every 5-12 lines, let attention shift naturally: dialogue to object, main action to background sound, motion to environment, emotional pressure to a physical interruption. Do not explain the shift.
-- Information Imbalance: do not distribute information evenly. Some passages may be closely observed; some may be sparse or almost empty.
+- No Explanation: replace abstract feeling labels with action, sensory detail, silence, or interruption.
+- Attention Drift: every 5-12 lines, let attention shift naturally without explaining the shift.
+- Information Imbalance: do not distribute information evenly.
 - No Full Resolution: do not rush to resolve emotional tension, mysteries, unusual phenomena, or relationship conflict.
-- Burstiness: vary sentence length and paragraph shape. Use short fragments, medium sentences, and occasional longer sensory flow. Avoid symmetry.
-- Use AuthorVoice/NarrativeMechanics as constraints, not templates. Do not mechanically repeat surface motifs such as ravens, necklaces, or fire unless the current scene truly needs them.
-- For scene drafting or chapter creation, the final visible prose and file content should contain prose only: no Scene Plan, Character Goal, Conflict labels, summaries, analysis, JSON, or explanatory afterword. Tool call JSON is allowed only as the hidden execution mechanism.`;
+- Burstiness: vary sentence length and paragraph shape.
+- Use AuthorTemplate/ProseStyle/DescriptionStats as constraints, not copyable templates.`;
 
-const LIGHTWEIGHT_STATE_WORKFLOW_GUIDANCE = `\n\n## Lightweight State Writing Workflow
-- Default long-term project memory is only: CharacterStates, Relationships, Timeline, Inventory, Foreshadowings, and AuthorTemplate.
-- Treat old Importants.md, AuthorVoice.md, Obsessions.md, Snapshot.md, and Cache.md as legacy/heavy memory. Do not rely on them unless explicitly provided in the current context.
-- CharacterStates tracks current desire, fear, emotion, bias, known information, and location.
-- Relationships tracks interaction patterns, conflicts, emotional movement, and relationship blueprint summaries.
-- Timeline tracks chapter order, event order, and causality.
-- Inventory tracks objects, clues, letters, ownership, condition, and last seen line.
-- Foreshadowings tracks open/resolved clues, source lines, and possible payoff.
-- AuthorTemplate tracks prose taste and output format only; it is not plot memory.
+const LIGHTWEIGHT_STATE_WORKFLOW_GUIDANCE = `\n\n## Lightweight Project Data Workflow
+- Default long-term project data is only: AuthorTemplate, ProseStyle, DescriptionStats, StoryDatabase, RealtimeDatabase, and blueprints.
+- Do not ask for, read, write, or rely on old project memory files.
+- Blueprints are mandatory for story planning and writing. Use or update blueprint state before prose when the task changes plot, timeline, scene beats, or payoff state.
+- AuthorTemplate records philosophy, theology, desire, why the author writes this novel, and the novel core. These must come from user confirmation; if missing, ask with the supported clarification-card JSON.
+- ProseStyle records prose rhythm, POV, sentence habits, dialogue habits, and avoided patterns.
+- DescriptionStats records scene/time/person description tendencies and usage counts such as uses/appearances.
+- StoryDatabase records static people, geography, factions, items, effects, manifestations, owners, and backstory.
+- RealtimeDatabase records changing story state, such as item holders at different time nodes.
 
 Writing sequence:
-1. Prompt: understand the user's current request.
-2. Plan: explain why this chapter/scene exists and which state changes it must serve.
-3. Blueprint: create or update a blueprint that records what happens: scenes, character interactions, conflict, emotional movement, object/clue state, foreshadowing added/resolved.
-4. Prose: draft the actual prose from the blueprint.
+1. Prompt: understand the user request.
+2. Blueprint: read/create/update story nodes and payoff status.
+3. Prose: draft the final prose from the blueprint and project data.
 
 Rules:
-- Final chapter/document content must contain Prose only. Do not write Plan or Blueprint labels into .docx prose.
-- For extraction or memory updates, cite file + startLine + endLine + brief evidence. Without line evidence, mark the claim tentative or ask/search instead of writing confirmed state.
-- Use read_file at most twice per turn, and each read_file result is capped at 5000 characters. Prefer search_file first, then read_file with startLine/endLine.
-- Before writing, use the five lightweight state files and relevant blueprint state rather than broad chapter rereads.
-- If any state file grows noisy, Architect should plan a cleanup and rewrite it into current effective state, unresolved items, and last update.`;
+- Final chapter/document content must contain Prose only.
+- For extraction or project data updates, cite file + startLine + endLine + brief evidence, or use source: user_confirmed.
+- If any required data is missing, ask with the clarification-card JSON instead of inventing facts.`;
 
 const CHARACTER_CONTINUITY_GUIDANCE = `\n\n## Character Continuity And OOC Guard
-Use this schema as the standard format for character facts in plans, blueprints, and Memory Candidate content:
+Use StoryDatabase as the durable source of static character facts and RealtimeDatabase as the source of changing character state.
 
-\`\`\`yaml
-character:
-  basic:
-    name:
-    age:
-    identity:
+Character data should include, when known:
+- basic: name, age, identity
+- appearance: hair, eyes, notable body/visual markers
+- personality: surface, core_belief, desire, fear
+- current_state: current_desire, current_fear, current_emotion, current_bias, known_information, location
+- history: important events
+- behavior: danger, pressure, conflict
+- relationships
+- arc
 
-  appearance:
-    hair:
-    eyes:
-
-  personality:
-    surface:
-    core_belief:
-    desire:
-    fear:
-
-  current_state:
-    current_desire:
-    current_fear:
-    current_emotion:
-    current_bias:
-
-  history:
-    events:
-
-  behavior:
-    danger:
-    pressure:
-    conflict:
-
-  relationships:
-
-  arc:
-    start:
-    end:
-\`\`\`
-
-- When a task involves a character, first rely on the reference/config database entries, then character .md files, Importants.md, blueprint character nodes, current document content, and files you have read.
-- Store durable per-character facts in the project's reference/config list mechanism, preferably a list named "人物" or "Characters": the suggestion key is the character name, the annotation is the short note, and the structured body uses the schema above.
-- Reference/config export format should be: {{CharacterName}} "short note" on the first line, followed by editable schema lines such as {basic}, [age]:, {personality}, [desire]:. The {{ }}, { }, and [ ] keys are user-editable and may be added, removed, or renamed.
-- Use Importants.md for project-level summaries and major canon changes, not as a full character database.
-- Character database priority: AI-generated character sheets must be written to the reference/config database first, preferably listName "人物"; also create a human-readable .md file unless the user explicitly asks for database only. If the .md file and reference database conflict, use the database as the source of truth.
-- Character reference entries must include current-state fields in body: [current_desire], [current_fear], [current_emotion], and [current_bias].
+Rules:
+- When a task involves a character, first rely on StoryDatabase, RealtimeDatabase, reference/config database entries, blueprint character nodes, current document content, and files you have read.
+- Character reference/config entries are editing aids; StoryDatabase and RealtimeDatabase are the long-term project data sources.
 - Do not change a character's name, age, identity, appearance, core belief, desire, fear, relationships, behavior pattern, or arc unless the user explicitly asks for a canon change.
-- Do not change current desire, current fear, current emotion, or current bias unless the user explicitly asks for a state change or the scene provides a visible trigger.
-- During prose writing, current_desire, current_fear, current_emotion, and current_bias must shape what the character notices, avoids, misunderstands, says, omits, and does. Do not write only from identity/personality/background.
-- Psychological change must have a visible trigger, emotional transition, and behavioral evidence. Do not make a character suddenly mature, forgive, collapse, turn cruel, become affectionate, change loyalties, or speak in a new voice without setup.
-- Keep reactions consistent with the character's behavior under danger, pressure, and conflict.
-- If character facts are missing and the task depends on them, output exactly a "## Clarification Needed" section with the structured questions format instead of inventing age, gender, personality, backstory, trauma, romance, or relationships.
-- When the user explicitly changes character canon, treat it as a project-state change and provide a Memory Candidate using action: add_character, update_character, update_relationship, or update_character_arc.`;
+- Do not change current desire, current fear, current emotion, current bias, known information, or location unless the user explicitly asks for a state change or the scene provides a visible trigger.
+- Psychological change must have a visible trigger, emotional transition, and behavioral evidence.
+- If character facts are missing and the task depends on them, output exactly a "## Clarification Needed" section with the supported JSON questions format instead of inventing facts.
+- When the user explicitly changes character canon, provide Memory Candidate entries for story_database or realtime_database, or update a blueprint when the change belongs to timeline/fulfillment.`;
 
 interface AiRequestOptions {
   modelProfile: ModelProfile;
@@ -320,79 +282,45 @@ Stats: ${meta.charCount} characters, ${meta.lineCount} lines, ${meta.wordCount} 
     : "";
   const novaWorkflowGuidance = `\n\n## Nova Writing Workflow
 - Always answer in Chinese Markdown unless the user explicitly asks otherwise.
-- Use explicit, non-template preferences from Nova.md as durable user context. Ignore default Nova.md placeholder text as preference evidence. Use Importants.md as the cross-conversation project ledger when it is provided: what the user has done, current progress, confirmed decisions, major canon changes, and project direction.
-- Current role: ${agentMode === "editor" ? "editor" : agentMode === "architect" ? "architect" : "writer"}.
-- If the frontend routes a request to PLAN mode, treat that as mandatory: do not build, write files, generate final prose, or call write tools until the user confirms the plan.
-- If information is missing in PLAN mode, output only "## Clarification Needed" with the JSON questions block. Do not ask several free-form paragraphs of questions, do not use Markdown bullets for questions, and do not combine clarification with a plan.
-- Writer role: generate localized scene prose from the current state, reference entries, and memory constraints. Do not perform thematic analysis or chapter recap inside prose.
-- Editor role is handled by an isolated frontend review call. If this prompt still reaches you with editor role, focus on editing/reviewing prose and do not call tools.
-- For confirmed complex writing work, planning/architecture may update a blueprint first; the Writer phase should then draft local prose only. Provide Memory Candidate only when durable project state actually changed.
-- Memory is event-driven. Nova.md is long-term user preference, Importants.md is durable novel project state and cross-conversation ledger, AuthorVoice.md is author habit/disliked-pattern memory, Obsessions.md is durable recurring theme memory, Snapshot.md is short-term project/session state, and Cache.md is volatile runtime/cache summary.
-- Lightweight state mode overrides the old thick memory model: for ordinary writing/continuation/editing, use CharacterStates, Relationships, Timeline, Inventory, Foreshadowings, and AuthorTemplate as the active long-term context. Do not ask for or inject old thick memory unless the user explicitly requests legacy memory analysis.
-- Writing workflow is Prompt -> Plan -> Blueprint -> Prose. Plan explains why the chapter/scene exists; Blueprint records what happens; Prose is the final text. File content for chapters must contain Prose only.
-- Memory extraction must be line-grounded: include file, startLine, endLine, and a brief evidence quote/summary. If line evidence is missing, use search_file/read_file with line ranges or mark it tentative.
-- read_file is limited to 2 calls per turn and 5000 characters per call. Use search_file before reading broad files.
-- Do not produce a Memory Candidate for critique, explanation, analysis, ordinary Q&A, or prose polishing unless the user explicitly changes the project canon.
-- When a task may change memory, end with one or more "## Memory Candidate" sections using YAML-like fields, or one JSON array. Supported fields: type, project_changed, action, confidence, evidence_count, source, content.
-- Preferred lightweight Memory Candidate types: character_state, relationship, timeline, inventory, foreshadowing, author_template. Use source: user_confirmed for direct user confirmations; otherwise include file/startLine/endLine evidence in source or content.
-- confidence is your self-rated confidence, not a statistical confidence score. Do not use confidence alone as proof.
-- Example: type: important; project_changed: true; action: update_current_progress; confidence: 0.9; source: "confirmed file write"; content: "第八章已创建，当前方向为费迪南小镇日常片段。"
-- Use type: important only for durable project changes such as adding/removing/updating characters, settings, mainline, foreshadowing, chapter completion, or creative direction.
-- Use type: important for Chapter Index entries. Chapter Index is chapter-level memory, not author voice. Format chapter entries like: Chapter04: Summary, CharacterChanges, ImportantObjects, Foreshadowing, OpenQuestions.
-- For character changes, use action: add_character, update_character, update_character_state, update_relationship, or update_character_arc. Store complete character sheets in the reference database, not Importants.md; Importants.md should receive only the project-level summary or major confirmed change.
-- Use type: nova only for durable user preference evidence with confidence >= 0.8; never write one-off project taste or temporary genre choices as Nova preferences.
-- Use type: author_voice or type: obsession only when confidence >= 0.6 and you can provide source or evidence_count. Use source for user confirmation, source prose, or existing memory evidence; use evidence_count for repeated independent signals.
-- AuthorVoice must store whole-book craft models, not chapter facts: WritingMechanics, DialogueMechanics, NarrativeMechanics, and EroticLens when the prose shows recurring desire/body/gaze patterns. NarrativeMechanics is the highest-value layer and describes how the author organizes story.
-- EroticLens is an author-voice analysis layer, not moral judgment and not a request for explicit content. If evidence exists, identify how desire is staged: BodyFocus, GazePattern, DesireMechanics, ShameAndDistance, Clothing/Boundary, and what should be avoided. Do not flatten it into vague words like "暧昧" or "情感细腻".
-- Obsessions must store whole-book themes and motif functions, not isolated objects. Record "boundary messenger" or "emotional anchor", not just "raven" or "necklace".
-- Never mix the two extraction layers: Chapter Index records what happened in a chapter; AuthorVoice/Themes/NarrativeMechanics record how the book creates meaning and how future chapters should be written.
-- Use type: snapshot or type: cache for short-term state and runtime/cache summaries.
-- When the user asks to create, save, write, generate a file, or create a chapter, you must actually call create_file in the same response. Do not only output prose and do not only say you will create it.
+- Current role: writer, editor, or architect according to the frontend mode.
+- The only long-term project data sources are AuthorTemplate, ProseStyle, DescriptionStats, StoryDatabase, RealtimeDatabase, and blueprints.
+- Do not ask for, read, write, mention, or rely on old project memory files.
+- Blueprints are the source of truth for story timeline, actual event order, scene structure, and payoff/fulfillment status.
+- Before plot-changing writing, create/read/update a blueprint. For prose-only polishing, use the current text and project data.
+- AuthorTemplate stores philosophy, theology, desire, why the author writes this novel, and the novel core. If any of these are needed and missing, ask the user with clarification-card JSON instead of inventing them.
+- In any mode, if essential information is missing, output exactly "## Clarification Needed" with the supported JSON object. Do not combine the questions with a plan or prose.
+- Writing workflow is Prompt -> Blueprint -> Prose. File content for chapters must contain Prose only.
+- Memory Candidate entries may only use these project types: author_template, prose_style, description_stats, story_database, realtime_database, blueprint, or nova.
+- Use source: user_confirmed for direct user confirmations; otherwise include file/startLine/endLine evidence in source or content.
+- Use type: author_template for confirmed author philosophy/theology/desire/novel core.
+- Use type: prose_style for prose rhythm, syntax, POV, dialogue, and avoided patterns.
+- Use type: description_stats for scene/time/person description habits and usage-count observations.
+- Use type: story_database for static people, geography, factions, items, effects, manifestations, owners, and backstory.
+- Use type: realtime_database for changing state such as current holders, locations, relationship state, faction state, and time-node state.
+- Use type: blueprint only to request a blueprint tool update; do not write blueprint changes as markdown memory.
+- Do not produce a Memory Candidate for critique, explanation, analysis, ordinary Q&A, or prose polishing unless durable project data actually changed.
+- When the user asks to create, save, write, generate a file, or create a chapter, you must actually call create_file in the same response when tools are available.
 - Chapter prose files should default to .docx unless the user explicitly asks for .md, .txt, or another extension. Use .md for outlines, settings, notes, and summaries.
-- Character sheets should be stored in the reference database with upsert_reference_entries first, and also as .md when a human-readable sheet is useful. Do not rely on Importants.md as the character database.
-- Ordinary follow-up edits should rely on History deltas, recent changes, tool summaries, and local snippets when provided. Do not demand or assume the full chapter is available unless the user explicitly asks for full-chapter analysis, full-structure work, a blueprint, whole-chapter checking, or complete continuation reference.`;
+- Reference lists are editing/import helpers for static database entries, not an independent long-term memory system.`;
   const mandatoryWorkChecklist = taskType === "chat"
     ? `\n\n## Mandatory Work Checklist
-Before every non-trivial project response, silently run this checklist and act on any missing prerequisite:
-1. Memory audit: check the lightweight state files. If CharacterStates, Relationships, Timeline, Inventory, or Foreshadowings are empty during a project request, search/read line-bounded source evidence or ask for confirmation before deep work. Do not build thick AuthorVoice/Obsessions by default.
-2. Reference audit: check Reference Database Status. If a character/persona task needs characters and the "人物" list is missing or empty, create/update it with upsert_reference_entries before or alongside any readable .md file. Do not assume a .md character sheet is enough.
-3. Context audit: if the task depends on existing files, blueprints, reference entries, or recent project state and they are not in context, use list_directory/read_file/read_blueprint or ask a focused clarification. Do not guess quietly.
-4. Action audit: if you say you will create, update, search, inspect, read, or record something, include the matching tool_call in the same response when tools are available.
-5. Memory audit after work: if the project state, current progress, character state, author voice, or theme model changed, output Memory Candidate entries. If nothing durable changed, do not output Memory Candidate.
-6. State audit for creative analysis: extract actionable state only: character state, relationship movement, timeline event, inventory/object state, and foreshadowing status. Each confirmed item needs file/startLine/endLine evidence.
-If a required memory/reference foundation is empty and the task cannot be done responsibly, ask a concise clarification instead of producing a shallow answer.`
+Before every non-trivial project response, silently run this checklist:
+1. Project data audit: use AuthorTemplate, ProseStyle, DescriptionStats, StoryDatabase, RealtimeDatabase, and relevant blueprints.
+2. Blueprint audit: if the task changes plot, timeline, scene beats, or payoff state, read or update the blueprint before prose.
+3. Clarification audit: if author core, canon facts, current state, or payoff status are missing, ask with the supported clarification-card JSON.
+4. Action audit: if you say you will create, update, search, inspect, read, or record something, include the matching tool_call when tools are available.
+5. Data audit after work: if durable project data changed, output Memory Candidate entries using only the new project data types.`
     : "";
-const memoryUpgradeProtocol = taskType === "chat"
-    ? `\n\n## Memory Schema Upgrade Protocol
-When the user asks to upgrade, rebuild, regenerate, or re-extract project memory, do not hard-apply empty templates. Use the imported workspace files as evidence:
-1. Inspect available chapter/setting/reference files with list_directory and read_file unless enough source text is already present.
-2. Rebuild Chapter Index from actual chapters and write it as type: important with action: update_chapter_index.
-3. Rebuild AuthorVoice as structured sections: WritingMechanics, DialogueMechanics, NarrativeMechanics, EroticLens when supported by evidence.
-4. Rebuild Obsessions as structured sections: Themes and MotifFunctions.
-5. Preserve user-confirmed facts; downgrade surface motifs into examples under reusable mechanisms instead of treating them as rules.
-6. If evidence is insufficient, ask for the missing chapters or confirmation before writing durable memory.`
-    : "";
-  const lightweightMemoryUpgradeProtocol = taskType === "chat"
-    ? `\n\n## Lightweight Memory Rebuild Protocol
-When rebuilding or cleaning memory, prefer the lightweight state files over legacy thick memory:
-1. Use list_directory, search_file, and line-bounded read_file; do not exceed 2 read_file calls per turn.
-2. Extract only CharacterStates, Relationships, Timeline, Inventory, Foreshadowings, and AuthorTemplate.
-3. Every confirmed extracted state item must include file/startLine/endLine evidence unless source is user_confirmed.
-4. AuthorTemplate stores prose/output taste only, not plot, chapter facts, themes, or object status.
-5. If a state file is noisy, plan cleanup and rewrite it to current effective state, unresolved items, and last update.`
-    : "";
+  const memoryUpgradeProtocol = "";
+  const lightweightMemoryUpgradeProtocol = "";
   const architectGuidance = agentMode === "architect"
     ? `\n\n## Architect Mode
 - Your job is novel architecture diagnosis and reconstruction, not ordinary drafting.
-- Author Profile First: before designing worldbuilding or characters, identify what kind of novel the author is trying to write. Use two-layer extraction: Chapter Index for chapter facts, and whole-book AuthorVoice/Themes/NarrativeMechanics/EroticLens for reusable creation rules. Prioritize narrative mechanisms and desire/body/gaze mechanisms over surface motifs.
-- Evidence rule: if source prose or memory exists, infer author voice and obsessions from that evidence. If evidence is weak, mark the inference as tentative instead of treating it as canon.
-- If unclear, ask: when author profile, premise, rebuild direction, or keep/discard scope is not clear enough, output exactly "## Clarification Needed" followed by the supported JSON questions object. Do not combine questions with a plan.
-- Rebuild / Start Over Protocol: when the user says 推倒重来, 全部推翻, 全部重写, 不要旧设定, 不要沿用旧设定, 从零开始, 换方向, 重构世界观, 重做人设, start over, or from scratch, do not preserve old worldbuilding by default. Ask again for core genre/direction, old elements to keep/discard, protagonist vs ensemble preference, theme/premise, and desired narrative texture.
-- Change Plan Output: once enough information is available, output a plan with these sections: 作者画像判断, 当前信息缺口, 旧设定保留/废弃清单, 新方向设计原则, 分阶段改动计划, 建议写入的 Memory Candidate.
+- AuthorTemplate first: clarify philosophy, theology, desire, why this novel exists, and the novel core.
+- If unclear, ask with the supported clarification-card JSON. Do not combine questions with a plan.
+- Use blueprints for timeline/structure/payoff state, StoryDatabase for static canon, RealtimeDatabase for changing state, ProseStyle for writing mechanics, and DescriptionStats for description habits.
 - Do not draft chapter prose or modify files unless the user explicitly asks after the architecture plan is confirmed.
-- When designing or regenerating characters, the plan must include both reference database entries and human-readable .md sheets unless the user explicitly opts out. The database is the source of truth.
-- Memory Candidate Routing: use type important for confirmed project facts and Chapter Index entries; use type author_voice for WritingMechanics, DialogueMechanics, NarrativeMechanics, and EroticLens; use type obsession only for durable themes and motif functions.
-- Do not write generic writing advice into AuthorVoice.md, and do not write one-off plot settings into Obsessions.md.`
+- Memory Candidate Routing: author_template, prose_style, description_stats, story_database, realtime_database, or blueprint only.`
     : "";
   const writerLayerGuidance = agentMode === "writer" || !agentMode
     ? LIGHTWEIGHT_STATE_WORKFLOW_GUIDANCE
@@ -418,17 +346,27 @@ When rebuilding or cleaning memory, prefer the lightweight state files over lega
     ? `\n\n## Web Search Policy\n- Use web_search proactively when the user asks for current facts, external references, market/background research, historical/cultural details you are unsure about, or any claim that may depend on up-to-date information.\n- Do not search for pure prose rewriting, local file analysis, or when the user explicitly asks you not to use the web.\n- After searching, summarize the useful evidence in your own words and continue the task.`
     : `\n\n## Web Search Policy\n- Web search is currently disabled. Do not call web_search.\n- If the task clearly needs external or current information, say that web search needs to be enabled.`;
 
-  const blueprintGuidance = `\n\n## Blueprint Guide\nBlueprints are story-structure graphs. A BlueprintDocument has { id, name, updatedAt, nodes, edges, viewport }.\n- nodes are story elements. Common fields: id, kind, layer, nodeType, x, y, title, summary, linkedChapters, typedData, customFields.\n- edges connect nodes with from/to ids and optional role. Use edges for narrative flow, structure flow, reveal/logic links, branch/merge paths.\n- chapter nodes use nodeType="chapter" and typedData.summary / typedData.chapterTitle. linkedChapters binds a node to workspace file names or heading titles.\n- typedData.mountLinks on a chapter node mounts child blueprints under that chapter.\n- Use list_blueprints and read_blueprint before analyzing existing blueprints.\n- In Build mode, use create_blueprint to generate a new blueprint. Place nodes on a readable grid, give every node a clear title and summary, and create edges that tell the story structure.\n- Never cap a generated blueprint to a fixed number of nodes. Use as many content-derived nodes as the source needs: chapter beats, hooks, characters, conflicts, clues, reveals, emotional turns, scene blocks, and structural summary nodes.\n- A chapter-to-blueprint workflow should read the source chapter first, derive a TODO-style construction plan, create the complete blueprint, then summarize what was created.
-- For new chapter writing, create/update blueprint nodes that cover at minimum: chapter purpose, key scenes, character interactions, conflict, emotional movement, inventory/object state changes, and foreshadowing added or resolved.
-- A blueprint named "Relationships" may serve as the relationship network view; Relationships.md remains the lightweight injectable summary.`;
+  const blueprintGuidance = `\n\n## Blueprint Guide
+Blueprints are story-structure graphs and the source of truth for timeline, actual event order, scene structure, and payoff/fulfillment status. A BlueprintDocument has { id, name, updatedAt, nodes, edges, viewport }.
+- nodes are story elements. Common fields: id, kind, layer, nodeType, x, y, title, summary, linkedChapters, typedData, customFields.
+- storyEvents may include time, content, foreshadowing, and fulfilled. fulfilled marks whether a story promise/worldline/payoff has been realized.
+- edges connect nodes with from/to ids and optional role. Use edges for narrative flow, structure flow, reveal/logic links, branch/merge paths.
+- chapter nodes use nodeType="chapter" and typedData.summary / typedData.chapterTitle. linkedChapters binds a node to workspace file names or heading titles.
+- typedData.mountLinks on a chapter node mounts child blueprints under that chapter.
+- Use list_blueprints and read_blueprint before analyzing existing blueprints.
+- Before creating or updating blueprints, call list_blueprint_templates and use the user's existing node templates. Prefer templateId or exact templateName on every node; do not invent a custom schema when a template fits.
+- In Build mode, use create_blueprint to generate a new blueprint. Place nodes on a readable grid, give every node a clear title and summary, and create edges that tell the story structure.
+- Only use kind="custom" when none of the listed templates match the intended node. If a template exists for story/character/timeline/database/payoff work, use that template.
+- Never cap a generated blueprint to a fixed number of nodes. Use as many content-derived nodes as the source needs.
+- For new chapter writing, create/update blueprint nodes that cover chapter purpose, key scenes, character interactions, conflict, emotional movement, static database changes, realtime state changes, and payoff/fulfillment changes.`;
 
   const todoWorkflowGuidance = taskType === "chat"
-    ? `\n\n## TODO Workflow\n- For multi-step requests, make a compact TODO plan before acting. For example: locate file, read content, analyze beats, create blueprint, summarize result.\n- If a TODO step needs a tool, output the tool_call block in the same response. Do not stop after saying you will use a tool.\n- After each Tool Results message, continue the TODO workflow: either call the next needed tool or provide the final answer.\n- For requests like "read chapter one and create a blueprint", use this sequence unless the needed content is already in context: list_directory when the path is unknown, read_file for the chapter, create_blueprint with all needed nodes and edges, then summarize.\n- You may show a short visible TODO list before tool_call blocks, but the tool_call blocks must still be present when tools are needed.`
+    ? `\n\n## TODO Workflow\n- For multi-step requests, make a compact TODO plan before acting. For example: locate file, read content, analyze beats, list blueprint templates, create blueprint, summarize result.\n- If a TODO step needs a tool, output the tool_call block in the same response. Do not stop after saying you will use a tool.\n- After each Tool Results message, continue the TODO workflow: either call the next needed tool or provide the final answer.\n- For requests like "read chapter one and create a blueprint", use this sequence unless the needed content is already in context: list_directory when the path is unknown, read_file for the chapter, list_blueprint_templates, create_blueprint with all needed template-backed nodes and edges, then summarize.\n- You may show a short visible TODO list before tool_call blocks, but the tool_call blocks must still be present when tools are needed.`
     : "";
 
   const buildOnlyTools = agentSubMode === "build"
     ? `
-- create_blueprint: Create or replace a blueprint from nodes and edges.
+- create_blueprint: Create or replace a blueprint from nodes and edges. Use templateId/templateName from list_blueprint_templates on nodes whenever possible.
 - upsert_reference_entries: Create or update structured reference database entries. Use listName "人物" for character sheets and include current_desire/current_fear/current_emotion/current_bias in the body.
 - edit_file: Edit a file with line-level precision. Provide path and edits array with startLine, endLine, and newContent.
 - edit_docx: Insert, append, replace, or delete plain-text paragraphs in an existing DOCX. Use append_to_end for empty DOCX files or simple end appends. Use replace_text/delete_text/replace_between_text/delete_between_text for direct replacements and removals; do not insert deletion markers for the user to clean up.
@@ -439,7 +377,11 @@ When rebuilding or cleaning memory, prefer the lightweight state files over lega
     ? `
 or
 ${fence}tool_call
-{"name":"create_blueprint","arguments":{"name":"Three Act Blueprint","nodes":[{"id":"chapter-1","kind":"custom","layer":"structure","nodeType":"chapter","x":120,"y":120,"title":"Chapter One","summary":"Core chapter summary","typedData":{"summary":"Core chapter summary","chapterTitle":"Chapter One"}}],"edges":[]}}
+{"name":"list_blueprint_templates","arguments":{}}
+${fence}
+then
+${fence}tool_call
+{"name":"create_blueprint","arguments":{"name":"Three Act Blueprint","nodes":[{"id":"event-1","templateName":"Use the exact template name returned by list_blueprint_templates","x":120,"y":120,"title":"Chapter One promise","summary":"Core chapter summary","storyEvents":[{"id":"event-1-a","time":"story time","content":"promised event","foreshadowing":"setup clue","fulfilled":false}]}],"edges":[]}}
 ${fence}
 or
 ${fence}tool_call
@@ -474,6 +416,7 @@ You have access to these tools:
 - read_file: Read numbered file lines, max 5000 characters per call. Use startLine/endLine whenever possible. At most 2 read_file calls are allowed per turn.
 ${enableWebSearch ? "- web_search: Search the internet. Use automatically when the Web Search Policy says external/current facts are needed.\n" : ""}- list_blueprints: List all story blueprints with compact summaries.
 - read_blueprint: Read a blueprint by id or name before analyzing it.
+- list_blueprint_templates: List reusable blueprint node templates. Call before create_blueprint and prefer these templates over custom nodes.
 - upsert_reference_entries: In Build mode, create or update structured reference database entries. Use listName "人物" for generated character sheets.
 - edit_docx: Insert, append, replace, or delete plain-text paragraphs in an existing DOCX.${buildOnlyTools}
 
@@ -507,6 +450,10 @@ ${fence}
 or
 ${fence}tool_call
 {"name":"read_blueprint","arguments":{"name":"Main Story Structure"}}
+${fence}
+or
+${fence}tool_call
+{"name":"list_blueprint_templates","arguments":{}}
 ${fence}${buildOnlyExamples}`
     : `\n\n${selectionPrompt || ""}\nReturn only the processed body text. Do not explain the revision process.`;
   const directoryInfo = directoryTree

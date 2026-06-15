@@ -1,8 +1,8 @@
 import type { ModelProfile } from "../types/ai";
 import type { McpTool, McpToolResult } from "../types/ai";
-import { getReferenceList, getReferenceLists, readFile, readDirectory, readFileBinary, saveReferenceList, writeFile, writeFileBinary, createFile, listBlueprints, saveBlueprint } from "./fileSystemService";
+import { getReferenceList, getReferenceLists, readFile, readDirectory, readFileBinary, saveReferenceList, writeFile, writeFileBinary, createFile, listBlueprints, listBlueprintTemplates, saveBlueprint } from "./fileSystemService";
 import type { ReferenceListData, WorkspaceNode } from "./fileSystemService";
-import type { BlueprintDocument, BlueprintEdge, BlueprintNode } from "../types/blueprint";
+import type { BlueprintDocument, BlueprintEdge, BlueprintFieldBindingKey, BlueprintNode, BlueprintNodeKind, BlueprintNodeTemplate } from "../types/blueprint";
 import { createDocxBase64FromPlainText, parseDocxBase64, serializeDocxBase64, type ProseMirrorNode } from "./docxOoxmlService";
 import { searchWithTavily } from "./searchService";
 import { autoLayoutBlueprint } from "../utils/blueprintAutoLayout";
@@ -227,14 +227,33 @@ const LOCAL_FILESYSTEM_TOOLS: McpTool[] = [
     }
   },
   {
+    name: "list_blueprint_templates",
+    description: "List reusable blueprint node templates. Call this before create_blueprint and prefer templateId/templateName over custom nodes when a template fits.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: []
+    }
+  },
+  {
     name: "create_blueprint",
-    description: "Create or replace a blueprint using the current BlueprintDocument structure.",
+    description: "Create or replace a blueprint using existing blueprint node templates whenever possible. Nodes may include templateId or exact templateName; use custom nodes only when no template fits.",
     inputSchema: {
       type: "object",
       properties: {
         name: { type: "string", description: "Blueprint name" },
         blueprint: { type: "object", description: "Optional full BlueprintDocument draft" },
-        nodes: { type: "array", description: "Blueprint nodes when blueprint is omitted" },
+        nodes: {
+          type: "array",
+          description: "Blueprint nodes when blueprint is omitted. Prefer adding templateId or templateName from list_blueprint_templates on each node.",
+          items: {
+            type: "object",
+            properties: {
+              templateId: { type: "string", description: "Existing blueprint template id to apply to this node." },
+              templateName: { type: "string", description: "Exact existing blueprint template name to apply to this node." }
+            }
+          }
+        },
         edges: { type: "array", description: "Blueprint edges when blueprint is omitted" }
       },
       required: ["name"]
@@ -480,25 +499,175 @@ function summarizeBlueprint(blueprint: BlueprintDocument) {
   };
 }
 
-function normalizeBlueprintDraft(args: Record<string, unknown>): BlueprintDocument {
+function summarizeBlueprintTemplate(template: BlueprintNodeTemplate) {
+  return {
+    id: template.id,
+    name: template.name,
+    nodeKind: template.nodeKind,
+    inputCount: template.inputCount,
+    fields: template.fields.map((field) => ({
+      key: field.key,
+      bindingKey: field.bindingKey ?? "custom",
+      inputMode: field.inputMode ?? "repeatable",
+      showInCard: field.showInCard ?? true,
+      defaultValue: field.defaultValue ?? "",
+      defaultValues: Array.isArray(field.defaultValues) ? field.defaultValues : undefined,
+    })),
+  };
+}
+
+type BlueprintNodeDraft = Partial<BlueprintNode> & {
+  id?: string;
+  templateId?: string;
+  templateName?: string;
+};
+
+const ensureValues = (values: string[] | undefined, fallback = "") =>
+  Array.isArray(values) && values.length > 0 ? values : [fallback];
+
+const firstValue = (values: string[] | undefined, fallback = "") =>
+  ensureValues(values, fallback)[0] ?? fallback;
+
+const supportsTemplateBinding = (kind: BlueprintNodeKind, bindingKey: BlueprintFieldBindingKey) => {
+  if (bindingKey === "custom" || bindingKey === "title" || bindingKey === "linkedChapters") return true;
+  if (kind === "story") {
+    return ["summary", "storyType", "storyEventContent", "storyEventTime", "storyEventForeshadowing"].includes(bindingKey);
+  }
+  if (kind === "character") {
+    return ["characterName", "identity", "relationshipTarget", "relationshipDescription", "characterEventTime", "characterEventStory", "characterEventLocation"].includes(bindingKey);
+  }
+  return false;
+};
+
+const fieldsFromTemplate = (template: BlueprintNodeTemplate | undefined, kind: BlueprintNodeKind): BlueprintNode["customFields"] =>
+  (template?.fields ?? []).filter((field) => {
+    const bindingKey = field.bindingKey ?? "custom";
+    return bindingKey === "custom" || !supportsTemplateBinding(kind, bindingKey);
+  }).map((field) => {
+    const values = ensureValues(field.defaultValues, field.defaultValue ?? "");
+    return {
+      id: newBlueprintId("field"),
+      key: field.key,
+      value: values[0] ?? "",
+      values,
+      inputMode: field.inputMode ?? "repeatable",
+      bindingKey: "custom",
+      showInCard: field.showInCard ?? true,
+    };
+  });
+
+const normalizeStoryEvents = (events: BlueprintNode["storyEvents"]): BlueprintNode["storyEvents"] =>
+  Array.isArray(events)
+    ? events.map((event) => ({
+        id: String(event.id || newBlueprintId("event")),
+        time: String(event.time ?? ""),
+        content: String(event.content ?? ""),
+        foreshadowing: String(event.foreshadowing ?? ""),
+        fulfilled: Boolean(event.fulfilled),
+      }))
+    : undefined;
+
+const applyTemplateBinding = (node: BlueprintNode, field: BlueprintNodeTemplate["fields"][number]): BlueprintNode => {
+  const bindingKey = field.bindingKey ?? "custom";
+  if (bindingKey === "custom") return node;
+  const values = ensureValues(field.defaultValues, field.defaultValue ?? "");
+  const value = firstValue(values, field.defaultValue ?? "");
+
+  if (bindingKey === "title") return { ...node, title: value || node.title };
+  if (bindingKey === "linkedChapters") return { ...node, linkedChapters: values };
+  if (node.kind === "story") {
+    if (bindingKey === "summary") return { ...node, summary: value };
+    if (bindingKey === "storyType") {
+      const storyType = value === "start" || value === "ending" || value === "custom" ? value : "custom";
+      return { ...node, storyType };
+    }
+    if (bindingKey === "storyEventContent") {
+      return { ...node, storyEvents: values.map((item, index) => ({ id: newBlueprintId("event"), time: node.storyEvents?.[index]?.time ?? "", content: item, foreshadowing: node.storyEvents?.[index]?.foreshadowing ?? "", fulfilled: node.storyEvents?.[index]?.fulfilled ?? false })) };
+    }
+    if (bindingKey === "storyEventTime") {
+      return { ...node, storyEvents: values.map((item, index) => ({ id: newBlueprintId("event"), time: item, content: node.storyEvents?.[index]?.content ?? "", foreshadowing: node.storyEvents?.[index]?.foreshadowing ?? "", fulfilled: node.storyEvents?.[index]?.fulfilled ?? false })) };
+    }
+    if (bindingKey === "storyEventForeshadowing") {
+      return { ...node, storyEvents: values.map((item, index) => ({ id: newBlueprintId("event"), time: node.storyEvents?.[index]?.time ?? "", content: node.storyEvents?.[index]?.content ?? "", foreshadowing: item, fulfilled: node.storyEvents?.[index]?.fulfilled ?? false })) };
+    }
+  }
+  if (node.kind === "character") {
+    if (bindingKey === "characterName") return { ...node, characterName: value };
+    if (bindingKey === "identity") return { ...node, identity: value };
+    if (bindingKey === "relationshipTarget") {
+      return { ...node, relationships: values.map((item, index) => ({ id: newBlueprintId("rel"), target: item, description: node.relationships?.[index]?.description ?? "" })) };
+    }
+    if (bindingKey === "relationshipDescription") {
+      return { ...node, relationships: values.map((item, index) => ({ id: newBlueprintId("rel"), target: node.relationships?.[index]?.target ?? "", description: item })) };
+    }
+    if (bindingKey === "characterEventTime") {
+      return { ...node, characterEvents: values.map((item, index) => ({ id: newBlueprintId("character-event"), time: item, story: node.characterEvents?.[index]?.story ?? "", location: node.characterEvents?.[index]?.location ?? "" })) };
+    }
+    if (bindingKey === "characterEventStory") {
+      return { ...node, characterEvents: values.map((item, index) => ({ id: newBlueprintId("character-event"), time: node.characterEvents?.[index]?.time ?? "", story: item, location: node.characterEvents?.[index]?.location ?? "" })) };
+    }
+    if (bindingKey === "characterEventLocation") {
+      return { ...node, characterEvents: values.map((item, index) => ({ id: newBlueprintId("character-event"), time: node.characterEvents?.[index]?.time ?? "", story: node.characterEvents?.[index]?.story ?? "", location: item })) };
+    }
+  }
+  return node;
+};
+
+const applyTemplateBindings = (node: BlueprintNode, template?: BlueprintNodeTemplate): BlueprintNode =>
+  (template?.fields ?? []).reduce(applyTemplateBinding, node);
+
+function resolveNodeTemplate(node: BlueprintNodeDraft, templates: BlueprintNodeTemplate[]): BlueprintNodeTemplate | undefined {
+  const templateId = String(node.templateId ?? "").trim();
+  const templateName = String(node.templateName ?? "").trim();
+  return templates.find((template) => template.id === templateId)
+    ?? templates.find((template) => template.name === templateName);
+}
+
+function normalizeBlueprintNodeDraft(node: BlueprintNodeDraft, index: number, templates: BlueprintNodeTemplate[]): BlueprintNode {
+  const template = resolveNodeTemplate(node, templates);
+  const kind = (node.kind ?? template?.nodeKind ?? "custom") as BlueprintNodeKind;
+  const baseTitle = node.title || node.characterName || node.typedData?.chapterTitle || template?.name || `Node ${index + 1}`;
+  const baseNode: BlueprintNode = {
+    ...node,
+    id: String(node.id || newBlueprintId("node")),
+    kind,
+    x: Number.isFinite(node.x) ? Number(node.x) : 120 + index * 260,
+    y: Number.isFinite(node.y) ? Number(node.y) : 120 + (index % 3) * 170,
+    title: String(baseTitle),
+    linkedChapters: Array.isArray(node.linkedChapters) ? node.linkedChapters : [],
+    templateName: node.templateName ?? template?.name ?? (kind === "custom" ? "" : undefined),
+    inputCount: kind === "custom" ? node.inputCount ?? template?.inputCount ?? 1 : node.inputCount,
+    customFields: node.customFields ?? (template ? fieldsFromTemplate(template, kind) : kind === "custom" ? [] : undefined),
+  };
+  const templatedNode = template ? applyTemplateBindings(baseNode, template) : baseNode;
+  return {
+    ...templatedNode,
+    ...node,
+    id: baseNode.id,
+    kind,
+    x: baseNode.x,
+    y: baseNode.y,
+    title: String(node.title || templatedNode.title || baseTitle),
+    linkedChapters: Array.isArray(node.linkedChapters) ? node.linkedChapters : templatedNode.linkedChapters,
+    templateName: node.templateName ?? templatedNode.templateName,
+    inputCount: node.inputCount ?? templatedNode.inputCount,
+    customFields: node.customFields ?? templatedNode.customFields,
+    storyEvents: normalizeStoryEvents(node.storyEvents ?? templatedNode.storyEvents),
+  };
+}
+
+async function normalizeBlueprintDraft(args: Record<string, unknown>): Promise<BlueprintDocument> {
   const fullDraft = args.blueprint && typeof args.blueprint === "object" ? args.blueprint as Partial<BlueprintDocument> : null;
   const name = String(args.name ?? fullDraft?.name ?? "AI Blueprint").trim() || "AI Blueprint";
   const now = new Date().toISOString();
-  const nodes = (fullDraft?.nodes ?? args.nodes ?? []) as BlueprintNode[];
+  const templates = await listBlueprintTemplates();
+  const nodes = (fullDraft?.nodes ?? args.nodes ?? []) as BlueprintNodeDraft[];
   const edges = (fullDraft?.edges ?? args.edges ?? []) as BlueprintEdge[];
   return autoLayoutBlueprint({
     id: String(fullDraft?.id ?? newBlueprintId("blueprint")),
     name,
     updatedAt: now,
-    nodes: nodes.map((node, index) => ({
-      ...node,
-      id: String(node.id || newBlueprintId("node")),
-      kind: node.kind ?? "custom",
-      x: Number.isFinite(node.x) ? node.x : 120 + index * 260,
-      y: Number.isFinite(node.y) ? node.y : 120 + (index % 3) * 170,
-      title: String(node.title || node.characterName || node.typedData?.chapterTitle || `Node ${index + 1}`),
-      linkedChapters: Array.isArray(node.linkedChapters) ? node.linkedChapters : [],
-    })),
+    nodes: nodes.map((node, index) => normalizeBlueprintNodeDraft(node, index, templates)),
     edges: edges
       .filter((edge) => edge.from && edge.to && edge.from !== edge.to)
       .map((edge) => ({ ...edge, id: String(edge.id || newBlueprintId("edge")) })),
@@ -1063,11 +1232,18 @@ export async function runLocalTool(
           }, null, 2),
         };
       }
+      case "list_blueprint_templates": {
+        const templates = await listBlueprintTemplates();
+        return {
+          toolName,
+          result: JSON.stringify(templates.map(summarizeBlueprintTemplate), null, 2),
+        };
+      }
       case "create_blueprint": {
         if (options?.agentSubMode === "plan") {
           return { toolName, result: "Error: create_blueprint is not available in Plan mode. Switch to Build mode to create blueprints." };
         }
-        const blueprint = normalizeBlueprintDraft(args);
+        const blueprint = await normalizeBlueprintDraft(args);
         const saved = await saveBlueprint(blueprint);
         return {
           toolName,

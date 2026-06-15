@@ -3108,7 +3108,7 @@ export default function BlueprintEditor({ blueprintId }: Props) {
                   <div className="blueprint-field-group">
                     <div className="blueprint-field-header">
                       <span>{t("blueprint.storyEvents")}</span>
-                      <button type="button" onClick={() => updateSelected({ storyEvents: [...(selectedNode.storyEvents ?? []), { id: newLocalId("event"), time: "", content: "", foreshadowing: "" }] })}>
+                      <button type="button" onClick={() => updateSelected({ storyEvents: [...(selectedNode.storyEvents ?? []), { id: newLocalId("event"), time: "", content: "", foreshadowing: "", fulfilled: false }] })}>
                         <Plus size={13} /> {t("blueprint.add")}
                       </button>
                     </div>
@@ -3122,6 +3122,14 @@ export default function BlueprintEditor({ blueprintId }: Props) {
                         </div>
                         <textarea className="blueprint-detail-textarea" value={storyEvent.content} placeholder={t("blueprint.content")} onChange={(event) => updateStoryEvent(storyEvent.id, { content: event.target.value })} />
                         <textarea className="blueprint-detail-textarea" value={storyEvent.foreshadowing} placeholder={t("blueprint.foreshadowing")} onChange={(event) => updateStoryEvent(storyEvent.id, { foreshadowing: event.target.value })} />
+                        <label className="blueprint-event-fulfilled">
+                          <input
+                            type="checkbox"
+                            checked={storyEvent.fulfilled ?? false}
+                            onChange={(event) => updateStoryEvent(storyEvent.id, { fulfilled: event.target.checked })}
+                          />
+                          <span>{t("blueprint.fulfilled")}</span>
+                        </label>
                       </div>
                     ))}
                   </div>

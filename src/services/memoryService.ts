@@ -2,48 +2,25 @@ import {
   ensureWorkspaceHabits,
   readGlobalHabits,
   readProjectAuthorTemplate,
-  readProjectAuthorVoice,
-  readProjectCacheMemory,
-  readProjectCharacterStates,
-  readProjectForeshadowings,
-  readProjectImportant,
-  readProjectInventory,
-  readProjectObsessions,
-  readProjectRelationships,
-  readProjectSnapshot,
-  readProjectTimeline,
+  readProjectDescriptionStats,
+  readProjectProseStyle,
+  readProjectRealtimeDatabase,
+  readProjectStoryDatabase,
   writeGlobalHabits,
   writeProjectAuthorTemplate,
-  writeProjectAuthorVoice,
-  writeProjectCacheMemory,
-  writeProjectCharacterStates,
-  writeProjectForeshadowings,
-  writeProjectImportant,
-  writeProjectInventory,
-  writeProjectObsessions,
-  writeProjectRelationships,
-  writeProjectSnapshot,
-  writeProjectTimeline,
+  writeProjectDescriptionStats,
+  writeProjectProseStyle,
+  writeProjectRealtimeDatabase,
+  writeProjectStoryDatabase,
 } from "./fileSystemService";
 
 export interface MemoryContext {
   globalHabits: string;
-  projectAuthorVoice: string;
-  projectObsessions: string;
-  projectImportant: string;
-  projectSnapshot: string;
-  projectCache: string;
-  characterStates: string;
-  relationships: string;
-  timeline: string;
-  inventory: string;
-  foreshadowings: string;
   authorTemplate: string;
-  includedProjectAuthorVoice: boolean;
-  includedProjectObsessions: boolean;
-  includedProjectImportant: boolean;
-  includedProjectSnapshot: boolean;
-  includedProjectCache: boolean;
+  proseStyle: string;
+  descriptionStats: string;
+  storyDatabase: string;
+  realtimeDatabase: string;
   includedLightweightState: boolean;
 }
 
@@ -57,18 +34,13 @@ interface LoadMemoryOptions {
 }
 
 export type MemoryCandidateType =
-  | "important"
   | "nova"
-  | "cache"
-  | "snapshot"
-  | "author_voice"
-  | "obsession"
-  | "character_state"
-  | "relationship"
-  | "timeline"
-  | "inventory"
-  | "foreshadowing"
-  | "author_template";
+  | "author_template"
+  | "prose_style"
+  | "description_stats"
+  | "story_database"
+  | "realtime_database"
+  | "blueprint";
 
 export interface ParsedMemoryCandidate {
   type: MemoryCandidateType;
@@ -101,59 +73,21 @@ const NOVA_EVIDENCE_THRESHOLD = 5;
 const EMPTY_GLOBAL_HABITS = "(No confirmed global user preferences yet. Ignore the default Nova.md template as user preference evidence.)";
 
 const SUPPORTED_TYPES: MemoryCandidateType[] = [
-  "important",
   "nova",
-  "cache",
-  "snapshot",
-  "author_voice",
-  "obsession",
-  "character_state",
-  "relationship",
-  "timeline",
-  "inventory",
-  "foreshadowing",
   "author_template",
+  "prose_style",
+  "description_stats",
+  "story_database",
+  "realtime_database",
+  "blueprint",
 ];
 
-const LIGHTWEIGHT_MEMORY_TYPES = new Set<MemoryCandidateType>([
-  "character_state",
-  "relationship",
-  "timeline",
-  "inventory",
-  "foreshadowing",
+const PROJECT_TYPES = new Set<MemoryCandidateType>([
   "author_template",
-]);
-
-const PROJECT_CHANGING_ACTIONS = new Set([
-  "update_chapter_index",
-  "add_chapter_index",
-  "add_character",
-  "delete_character",
-  "update_character",
-  "update_character_state",
-  "add_setting",
-  "update_setting",
-  "modify_worldbuilding",
-  "update_worldbuilding",
-  "update_project_summary",
-  "update_current_progress",
-  "determine_mainline",
-  "update_mainline",
-  "add_foreshadowing",
-  "resolve_foreshadowing",
-  "complete_chapter",
-  "complete_scene",
-  "update_direction",
-  "update_outline",
-  "create_blueprint",
-  "update_blueprint",
-  "update_author_voice",
-  "update_obsession",
-  "update_relationship",
-  "update_timeline",
-  "update_inventory",
-  "update_foreshadowing",
-  "update_author_template",
+  "prose_style",
+  "description_stats",
+  "story_database",
+  "realtime_database",
 ]);
 
 const NON_PROJECT_ACTIONS = new Set([
@@ -166,16 +100,6 @@ const NON_PROJECT_ACTIONS = new Set([
   "evaluate",
   "answer_question",
 ]);
-
-const IMPORTANT_LABELS = [
-  "名称：",
-  "当前进度：",
-  "核心主线：",
-  "重要设定：",
-  "未回收伏笔：",
-  "Chapter Index：",
-  "当前创作方向：",
-];
 
 const smartTruncate = (content: string, maxLength: number) =>
   content.length <= maxLength ? content : `${content.slice(0, maxLength)}\n\n...[truncated]...`;
@@ -200,97 +124,66 @@ function markGlobalHabitsConfirmed(content: string): string {
 }
 
 export async function ensureMemoryFiles(): Promise<void> {
-  await Promise.all([
-    readGlobalHabits(),
-    ensureWorkspaceHabits(),
-  ]);
+  await Promise.all([readGlobalHabits(), ensureWorkspaceHabits()]);
 }
 
 export async function loadMemoryContext(options: LoadMemoryOptions = {}): Promise<MemoryContext> {
-  const includeStableProjectMemory = options.includeStableProjectMemory ?? options.includeProjectImportant ?? true;
-  const includeAuthorProjectMemory = options.includeAuthorProjectMemory ?? false;
-  const includeShortTermMemory = options.includeShortTermMemory ?? options.includeProjectSnapshot ?? false;
-  const includeCacheMemory = options.includeCacheMemory ?? includeShortTermMemory;
-  const includeLightweightState = includeStableProjectMemory;
-
+  const includeProjectMemory = options.includeStableProjectMemory ?? options.includeProjectImportant ?? true;
   const [
     globalHabits,
-    projectImportant,
-    projectAuthorVoice,
-    projectObsessions,
-    projectSnapshot,
-    projectCache,
-    characterStates,
-    relationships,
-    timeline,
-    inventory,
-    foreshadowings,
     authorTemplate,
+    proseStyle,
+    descriptionStats,
+    storyDatabase,
+    realtimeDatabase,
   ] = await Promise.all([
     readGlobalHabits(),
-    includeStableProjectMemory ? ensureWorkspaceHabits().then(() => readProjectImportant()) : Promise.resolve(""),
-    includeAuthorProjectMemory ? ensureWorkspaceHabits().then(() => readProjectAuthorVoice()) : Promise.resolve(""),
-    includeAuthorProjectMemory ? ensureWorkspaceHabits().then(() => readProjectObsessions()) : Promise.resolve(""),
-    includeShortTermMemory ? ensureWorkspaceHabits().then(() => readProjectSnapshot()) : Promise.resolve(""),
-    includeCacheMemory ? ensureWorkspaceHabits().then(() => readProjectCacheMemory()) : Promise.resolve(""),
-    includeLightweightState ? ensureWorkspaceHabits().then(() => readProjectCharacterStates()) : Promise.resolve(""),
-    includeLightweightState ? ensureWorkspaceHabits().then(() => readProjectRelationships()) : Promise.resolve(""),
-    includeLightweightState ? ensureWorkspaceHabits().then(() => readProjectTimeline()) : Promise.resolve(""),
-    includeLightweightState ? ensureWorkspaceHabits().then(() => readProjectInventory()) : Promise.resolve(""),
-    includeLightweightState ? ensureWorkspaceHabits().then(() => readProjectForeshadowings()) : Promise.resolve(""),
-    includeLightweightState ? ensureWorkspaceHabits().then(() => readProjectAuthorTemplate()) : Promise.resolve(""),
+    includeProjectMemory ? ensureWorkspaceHabits().then(() => readProjectAuthorTemplate()) : Promise.resolve(""),
+    includeProjectMemory ? ensureWorkspaceHabits().then(() => readProjectProseStyle()) : Promise.resolve(""),
+    includeProjectMemory ? ensureWorkspaceHabits().then(() => readProjectDescriptionStats()) : Promise.resolve(""),
+    includeProjectMemory ? ensureWorkspaceHabits().then(() => readProjectStoryDatabase()) : Promise.resolve(""),
+    includeProjectMemory ? ensureWorkspaceHabits().then(() => readProjectRealtimeDatabase()) : Promise.resolve(""),
   ]);
 
   return {
     globalHabits: globalHabits ?? "",
-    projectAuthorVoice: projectAuthorVoice ?? "",
-    projectObsessions: projectObsessions ?? "",
-    projectImportant: projectImportant ?? "",
-    projectSnapshot: projectSnapshot ?? "",
-    projectCache: projectCache ?? "",
-    characterStates: characterStates ?? "",
-    relationships: relationships ?? "",
-    timeline: timeline ?? "",
-    inventory: inventory ?? "",
-    foreshadowings: foreshadowings ?? "",
     authorTemplate: authorTemplate ?? "",
-    includedProjectAuthorVoice: includeAuthorProjectMemory,
-    includedProjectObsessions: includeAuthorProjectMemory,
-    includedProjectImportant: includeStableProjectMemory,
-    includedProjectSnapshot: includeShortTermMemory,
-    includedProjectCache: includeCacheMemory,
-    includedLightweightState: includeLightweightState,
+    proseStyle: proseStyle ?? "",
+    descriptionStats: descriptionStats ?? "",
+    storyDatabase: storyDatabase ?? "",
+    realtimeDatabase: realtimeDatabase ?? "",
+    includedLightweightState: includeProjectMemory,
   };
 }
 
 export function buildMemoryPrompt(context: MemoryContext): string {
   const sections = [
-    "## Nova Lightweight State Memory",
-    "Default long-term project memory is limited to CharacterStates, Relationships, Timeline, Inventory, Foreshadowings, and AuthorTemplate.",
-    "Legacy memory files such as Importants.md, AuthorVoice.md, Obsessions.md, Snapshot.md, and Cache.md are preserved but are not primary writing context unless explicitly provided elsewhere.",
-    "Use CharacterStates, Relationships, Timeline, Inventory, and Foreshadowings for canon state. Use AuthorTemplate only for prose/output taste, not plot memory.",
-    "Memory extraction must cite file + startLine + endLine + brief evidence. If a claim lacks line evidence, mark it tentative or ask/search instead of writing it as confirmed state.",
-    "For writing, follow Prompt -> Plan -> Blueprint -> Prose. Plan explains why the chapter/scene exists; Blueprint records what happens; Prose is the final scene text only.",
+    "## Nova Lightweight Project Data",
+    "Default long-term project data is limited to AuthorTemplate, ProseStyle, DescriptionStats, StoryDatabase, RealtimeDatabase, and blueprints.",
+    "Do not ask for, read, write, or rely on old project memory files. Blueprints are the source of truth for timeline, story order, and payoff/fulfillment state.",
+    "If AuthorTemplate lacks philosophy, theology, desire, why the novel exists, or the novel core, ask the user with the supported clarification-card JSON before treating any guess as canon.",
+    "When information is insufficient in ordinary chat, writing, editing, blueprint work, or database cleanup, use the clarification-card JSON format instead of inventing facts.",
+    "For writing, follow Prompt -> Blueprint -> Prose. Blueprint records what happens; Prose is the final scene text only.",
+    "Memory extraction must cite file + startLine + endLine + brief evidence unless the source is explicitly user_confirmed.",
     "",
     "### Global User Preferences (~/.config/nova/Nova.md)",
     globalHabitsForPrompt(context.globalHabits),
   ];
 
   if (context.includedLightweightState) {
-    const lightweightFiles: Array<[string, string, number]> = [
-      ["CharacterStates (.novel-assistance/habits/CharacterStates.md)", context.characterStates, 1800],
-      ["Relationships (.novel-assistance/habits/Relationships.md)", context.relationships, 1600],
-      ["Timeline (.novel-assistance/habits/Timeline.md)", context.timeline, 1800],
-      ["Inventory (.novel-assistance/habits/Inventory.md)", context.inventory, 1600],
-      ["Foreshadowings (.novel-assistance/habits/Foreshadowings.md)", context.foreshadowings, 1800],
-      ["AuthorTemplate (.novel-assistance/habits/AuthorTemplate.md)", context.authorTemplate, 1400],
+    const files: Array<[string, string, number]> = [
+      ["AuthorTemplate (.novel-assistance/habits/AuthorTemplate.md)", context.authorTemplate, 1800],
+      ["ProseStyle (.novel-assistance/habits/ProseStyle.md)", context.proseStyle, 1800],
+      ["DescriptionStats (.novel-assistance/habits/DescriptionStats.md)", context.descriptionStats, 2000],
+      ["StoryDatabase (.novel-assistance/habits/StoryDatabase.md)", context.storyDatabase, 2400],
+      ["RealtimeDatabase (.novel-assistance/habits/RealtimeDatabase.md)", context.realtimeDatabase, 2200],
     ];
 
-    for (const [label, content, maxLength] of lightweightFiles) {
-      sections.push("", `### ${label}`, smartTruncate(content.trim(), maxLength) || "(empty: not established yet)");
+    for (const [label, fileContent, maxLength] of files) {
+      sections.push("", `### ${label}`, smartTruncate(fileContent.trim(), maxLength) || "(empty: not established yet)");
     }
   } else {
-    sections.push("", "### Lightweight State", "(not included for this request)");
+    sections.push("", "### Lightweight Project Data", "(not included for this request)");
   }
 
   return sections.join("\n").trim();
@@ -351,7 +244,7 @@ export function stripMemoryCandidates(content: string): string {
   return result.replace(/\n{3,}/g, "\n\n").trim();
 }
 
-function stripFence(value: string): string {
+function stripFence(value: string) {
   const trimmed = value.trim();
   const fenced = trimmed.match(/^```(?:json|yaml|yml)?\s*\n([\s\S]*?)\n```$/i);
   return (fenced?.[1] ?? trimmed).trim();
@@ -384,20 +277,39 @@ function contentToText(value: unknown): string {
   if (!value || typeof value !== "object") return String(value ?? "").trim();
   return Object.entries(value as Record<string, unknown>)
     .map(([key, entry]) => `${key}: ${contentToText(entry)}`)
-    .join("；")
+    .join("; ")
     .trim();
 }
 
 function typeFromValue(value: unknown): MemoryCandidateType {
-  const typeValue = String(value ?? "important").toLowerCase();
+  const raw = String(value ?? "story_database").toLowerCase().replace(/[-\s]+/g, "_");
+  const aliases: Record<string, MemoryCandidateType> = {
+    author: "author_template",
+    style: "prose_style",
+    prose: "prose_style",
+    description: "description_stats",
+    descriptions: "description_stats",
+    stats: "description_stats",
+    database: "story_database",
+    static_database: "story_database",
+    realtime: "realtime_database",
+    real_time_database: "realtime_database",
+  };
+  const typeValue = aliases[raw] ?? raw;
   return SUPPORTED_TYPES.includes(typeValue as MemoryCandidateType)
     ? (typeValue as MemoryCandidateType)
-    : "important";
+    : "story_database";
+}
+
+function inferProjectChanged(action: string, content: string): boolean {
+  const normalizedAction = action.trim().toLowerCase();
+  if (NON_PROJECT_ACTIONS.has(normalizedAction)) return false;
+  return /新增|删除|修改|确定|完成|保存|加入|更新|已创建|已更新|已完成|add_|update_|complete_|resolve_|create_/i.test(`${normalizedAction}\n${content}`);
 }
 
 function parseCandidateObject(value: Record<string, unknown>, raw: string): ParsedMemoryCandidate {
   const type = typeFromValue(value.type);
-  const action = String(value.action ?? "update_setting").trim() || "update_setting";
+  const action = String(value.action ?? "update_project_data").trim() || "update_project_data";
   const content = contentToText(value.content ?? value.summary ?? value.note ?? raw);
 
   return {
@@ -438,11 +350,10 @@ function parseYamlLikeCandidate(raw: string): ParsedMemoryCandidate | null {
   if (fields.size === 0) return null;
 
   const content = fields.get("content") || fields.get("summary") || fields.get("note") || raw;
-  const action = scalar(fields.get("action") || "update_setting");
-  const type = typeFromValue(scalar(fields.get("type") || "important"));
+  const action = scalar(fields.get("action") || "update_project_data");
 
   return {
-    type,
+    type: typeFromValue(scalar(fields.get("type") || "story_database")),
     projectChanged: parseBoolean(fields.get("project_changed") ?? fields.get("projectChanged"), inferProjectChanged(action, content)),
     action,
     confidence: Math.max(0, Math.min(1, parseNumber(fields.get("confidence"), 1))),
@@ -451,13 +362,6 @@ function parseYamlLikeCandidate(raw: string): ParsedMemoryCandidate | null {
     content: content.trim(),
     raw,
   };
-}
-
-function inferProjectChanged(action: string, content: string): boolean {
-  const normalizedAction = action.trim().toLowerCase();
-  if (PROJECT_CHANGING_ACTIONS.has(normalizedAction)) return true;
-  if (NON_PROJECT_ACTIONS.has(normalizedAction)) return false;
-  return /新增|删除|修改|确定|完成|保存|加入主线|世界观|角色状态|当前进度|已创建|已更新|已完成|add_|update_|complete_|resolve_|create_/i.test(content);
 }
 
 export function parseMemoryCandidate(candidate: string): ParsedMemoryCandidate | null {
@@ -486,9 +390,9 @@ export function parseMemoryCandidates(candidate: string): ParsedMemoryCandidate[
   if (yamlCandidate) return [yamlCandidate];
 
   return [{
-    type: "important",
-    projectChanged: inferProjectChanged("update_setting", raw),
-    action: inferProjectChanged("update_setting", raw) ? "update_setting" : "analyze",
+    type: "story_database",
+    projectChanged: inferProjectChanged("update_project_data", raw),
+    action: inferProjectChanged("update_project_data", raw) ? "update_project_data" : "analyze",
     confidence: 1,
     evidenceCount: 1,
     source: "",
@@ -497,38 +401,25 @@ export function parseMemoryCandidates(candidate: string): ParsedMemoryCandidate[
   }];
 }
 
+function hasSourceLineEvidence(candidate: ParsedMemoryCandidate): boolean {
+  const evidenceText = `${candidate.source}\n${candidate.content}`;
+  return /user_confirmed|user confirmed|用户确认/i.test(evidenceText) || (
+    /\b(file|path|source)\s*:/i.test(evidenceText) &&
+    /\b(startLine|line|lines?)\s*[:=]?\s*\d+/i.test(evidenceText) &&
+    /\b(endLine|line|lines?)\s*[:=]?\s*\d+/i.test(evidenceText)
+  );
+}
+
 export function shouldApplyMemoryCandidate(
   candidate: ParsedMemoryCandidate,
-  options: MemoryApplyOptions = {}
+  _options: MemoryApplyOptions = {}
 ): MemoryApplyResult {
   if (!candidate.content.trim()) {
     return { applied: false, target: "none", reason: "empty candidate" };
   }
 
-  if (candidate.type === "important") {
-    const action = candidate.action.toLowerCase();
-    if (!candidate.projectChanged || NON_PROJECT_ACTIONS.has(action)) {
-      return { applied: false, target: "none", reason: "project state unchanged" };
-    }
-    if (!PROJECT_CHANGING_ACTIONS.has(action) && !inferProjectChanged(action, candidate.content)) {
-      return { applied: false, target: "none", reason: "not a durable project-state action" };
-    }
-    if (
-      /complete_chapter|complete_scene/i.test(action) &&
-      !options.hasSuccessfulCreateFile &&
-      !options.isConfirmedPlanExecution
-    ) {
-      return { applied: false, target: "none", reason: "chapter completion was not confirmed by file creation or plan execution" };
-    }
-    return { applied: true, target: "important", reason: "project state changed" };
-  }
-
-  if (LIGHTWEIGHT_MEMORY_TYPES.has(candidate.type)) {
-    const userConfirmed = /user_confirmed|user confirmed|用户确认/i.test(candidate.source);
-    if (!userConfirmed && !hasSourceLineEvidence(candidate)) {
-      return { applied: false, target: "none", reason: "lightweight memory needs file and line evidence" };
-    }
-    return { applied: true, target: candidate.type, reason: "lightweight state evidence accepted" };
+  if (candidate.type === "blueprint") {
+    return { applied: false, target: "none", reason: "blueprint updates must use blueprint tools" };
   }
 
   if (candidate.type === "nova") {
@@ -538,55 +429,17 @@ export function shouldApplyMemoryCandidate(
     return { applied: true, target: "nova", reason: "durable preference evidence accepted" };
   }
 
-  if (candidate.type === "author_voice") {
-    if (candidate.confidence < 0.6) {
-      return { applied: false, target: "none", reason: "author voice confidence below threshold" };
+  if (PROJECT_TYPES.has(candidate.type)) {
+    if (!candidate.projectChanged || NON_PROJECT_ACTIONS.has(candidate.action.toLowerCase())) {
+      return { applied: false, target: "none", reason: "project data unchanged" };
     }
-    if (!hasDurableAuthorEvidence(candidate)) {
-      return { applied: false, target: "none", reason: "author voice needs source or repeated evidence" };
+    if (!hasSourceLineEvidence(candidate)) {
+      return { applied: false, target: "none", reason: "project data needs source lines or user confirmation" };
     }
-    return { applied: true, target: "author_voice", reason: "author voice evidence accepted" };
-  }
-
-  if (candidate.type === "obsession") {
-    if (candidate.confidence < 0.6) {
-      return { applied: false, target: "none", reason: "obsession confidence below threshold" };
-    }
-    if (!hasDurableAuthorEvidence(candidate)) {
-      return { applied: false, target: "none", reason: "obsession needs source or repeated evidence" };
-    }
-    return { applied: true, target: "obsession", reason: "author obsession evidence accepted" };
-  }
-
-  if (candidate.type === "snapshot" || candidate.type === "cache") {
-    return { applied: true, target: candidate.type, reason: "short-term memory candidate" };
+    return { applied: true, target: candidate.type, reason: "project data evidence accepted" };
   }
 
   return { applied: false, target: "none", reason: "unsupported candidate type" };
-}
-
-function hasDurableAuthorEvidence(candidate: ParsedMemoryCandidate): boolean {
-  if (candidate.evidenceCount >= 2) return true;
-  return Boolean(candidate.source.trim());
-}
-
-function hasSourceLineEvidence(candidate: ParsedMemoryCandidate): boolean {
-  const evidenceText = `${candidate.source}\n${candidate.content}`;
-  return /\b(file|path|source)\s*:/i.test(evidenceText) &&
-    /\b(startLine|line|lines?)\s*[:=]?\s*\d+/i.test(evidenceText) &&
-    /\b(endLine|line|lines?)\s*[:=]?\s*\d+/i.test(evidenceText);
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function sectionPattern(label: string): RegExp {
-  const nextLabels = IMPORTANT_LABELS
-    .filter((item) => item !== label)
-    .map(escapeRegExp)
-    .join("|");
-  return new RegExp(`(${escapeRegExp(label)}\\s*\\n)([\\s\\S]*?)(?=\\n(?:${nextLabels})|\\n##\\s|$)`);
 }
 
 function normalizeBulletText(text: string): string {
@@ -594,97 +447,9 @@ function normalizeBulletText(text: string): string {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
-    .join("；")
+    .join("; ")
     .replace(/^[-*]\s*/, "")
     .trim();
-}
-
-function appendToImportantSection(content: string, label: string, value: string): string {
-  const rawValue = value.trim();
-  const text = normalizeBulletText(value);
-  if (!text) return content;
-
-  const pattern = sectionPattern(label);
-  const match = content.match(pattern);
-  const bullet = /^\s*(#{1,4}\s|\*|-|\d+\.)/m.test(rawValue) || rawValue.includes("\n")
-    ? rawValue
-    : `- ${text}`;
-  if (!match) {
-    return `${content.trim()}\n\n${label}\n${bullet}\n`;
-  }
-
-  const body = match[2].trim();
-  if (body.includes(text) || body.includes(rawValue)) return content;
-  const nextBody = !body || body === "..." || body === "待整理"
-    ? bullet
-    : `${body.trim()}\n${bullet}`;
-  return content.replace(pattern, `$1${nextBody}\n`);
-}
-
-function splitMarkdownSections(content: string): Array<{ heading: string; body: string }> {
-  const sections: Array<{ heading: string; body: string }> = [];
-  const pattern = /(^#{2,4}\s+[^\n]+)\n/gm;
-  const matches = Array.from(content.matchAll(pattern));
-  for (let index = 0; index < matches.length; index += 1) {
-    const match = matches[index];
-    const next = matches[index + 1];
-    const start = (match.index ?? 0) + match[0].length;
-    const end = next?.index ?? content.length;
-    sections.push({
-      heading: match[1].trim(),
-      body: content.slice(start, end).trim(),
-    });
-  }
-  return sections;
-}
-
-function mergeMarkdownSectionContent(current: string, incoming: string): string {
-  const rawIncoming = incoming.trim();
-  if (!rawIncoming) return current;
-  const sections = splitMarkdownSections(rawIncoming);
-  if (sections.length === 0) {
-    const normalized = normalizeBulletText(rawIncoming);
-    if (!normalized || current.includes(normalized) || current.includes(rawIncoming)) return current;
-    return `${current.trim()}\n- ${normalized}\n`;
-  }
-
-  let nextContent = current.trimEnd();
-  for (const section of sections) {
-    if (!section.body || section.body === "待整理") continue;
-    const escapedHeading = escapeRegExp(section.heading);
-    const pattern = new RegExp(`(^${escapedHeading}\\s*\\n)([\\s\\S]*?)(?=\\n#{2,4}\\s|$)`, "m");
-    const match = nextContent.match(pattern);
-    if (!match) {
-      nextContent = `${nextContent.trimEnd()}\n\n${section.heading}\n${section.body}\n`;
-      continue;
-    }
-    const body = match[2].trim();
-    if (body.includes(section.body)) continue;
-    const mergedBody = !body || body === "待整理" || body === "..."
-      ? section.body
-      : `${body}\n${section.body}`;
-    nextContent = nextContent.replace(pattern, `$1${mergedBody}\n`);
-  }
-  return nextContent.trimEnd() + "\n";
-}
-
-function targetImportantLabel(action: string): string {
-  const normalized = action.toLowerCase();
-  if (/chapter_index/.test(normalized)) return "Chapter Index：";
-  if (/complete_chapter|complete_scene|current_progress/.test(normalized)) return "当前进度：";
-  if (/mainline/.test(normalized)) return "核心主线：";
-  if (/foreshadowing/.test(normalized)) return "未回收伏笔：";
-  if (/direction|outline|blueprint|project_summary/.test(normalized)) return "当前创作方向：";
-  return "重要设定：";
-}
-
-export async function mergeProjectImportantCandidate(candidate: ParsedMemoryCandidate): Promise<void> {
-  const current = (await readProjectImportant()) ?? "";
-  const label = targetImportantLabel(candidate.action);
-  const value = candidate.action.toLowerCase() === "resolve_foreshadowing"
-    ? `已回收：${candidate.content}`
-    : candidate.content;
-  await writeProjectImportant(appendToImportantSection(current, label, value));
 }
 
 function getPreferenceEvidence(): Record<string, number> {
@@ -726,7 +491,7 @@ async function applyNovaCandidate(candidate: ParsedMemoryCandidate): Promise<Mem
 
   const section = "## 自动识别偏好";
   const next = current.includes(section)
-    ? current.replace(new RegExp(`(${escapeRegExp(section)}\\s*\\n)([\\s\\S]*?)(?=\\n##\\s|$)`), (_match, head, body) => {
+    ? current.replace(new RegExp(`(${section}\\s*\\n)([\\s\\S]*?)(?=\\n##\\s|$)`), (_match, head, body) => {
         const currentBody = String(body).trim();
         const nextBody = !currentBody || currentBody === "待整理"
           ? bullet
@@ -738,76 +503,34 @@ async function applyNovaCandidate(candidate: ParsedMemoryCandidate): Promise<Mem
   return { applied: true, target: "nova", reason: "nova preference threshold reached" };
 }
 
-async function appendShortTermMemory(candidate: ParsedMemoryCandidate): Promise<void> {
-  const now = new Date().toLocaleString();
-  const entry = [`### ${now}`, "", `action: ${candidate.action}`, "", candidate.content.trim(), ""].join("\n");
-  if (candidate.type === "cache") {
-    const current = (await readProjectCacheMemory()) ?? "# Cache\n\n";
-    await writeProjectCacheMemory(`${current.trim()}\n\n${entry}`);
-    return;
-  }
-
-  const current = (await readProjectSnapshot()) ?? "# Snapshot\n\n";
-  await writeProjectSnapshot(`${current.trim()}\n\n${entry}`);
-}
-
-async function appendDurableProjectMemory(candidate: ParsedMemoryCandidate): Promise<void> {
+async function appendProjectData(candidate: ParsedMemoryCandidate): Promise<void> {
   const now = new Date().toLocaleString();
   const normalized = normalizeBulletText(candidate.content);
-  const bullet = `- ${normalized} (${candidate.action}, ${now})`;
-  if (candidate.type === "author_voice") {
-    const current = (await readProjectAuthorVoice()) ?? "# AuthorVoice\n\n";
-    if (/^#{2,4}\s+/m.test(candidate.content)) {
-      await writeProjectAuthorVoice(mergeMarkdownSectionContent(current, candidate.content));
-      return;
-    }
-    if (current.includes(normalized)) return;
-    await writeProjectAuthorVoice(`${current.trim()}\n${bullet}\n`);
-    return;
-  }
-  if (candidate.type === "obsession") {
-    const current = (await readProjectObsessions()) ?? "# Obsessions\n\n";
-    if (/^#{2,4}\s+/m.test(candidate.content)) {
-      await writeProjectObsessions(mergeMarkdownSectionContent(current, candidate.content));
-      return;
-    }
-    if (current.includes(normalized)) return;
-    await writeProjectObsessions(`${current.trim()}\n${bullet}\n`);
-  }
-}
-
-async function appendLightweightStateMemory(candidate: ParsedMemoryCandidate): Promise<void> {
-  const now = new Date().toLocaleString();
-  const normalized = normalizeBulletText(candidate.content);
-  const bullet = `- ${normalized} (${candidate.action}, ${now})`;
+  const entry = `- ${normalized} (${candidate.action}, ${now})`;
   const appendUnique = async (current: string | null, fallback: string, write: (content: string) => Promise<void>) => {
     const base = current ?? fallback;
     if (base.includes(normalized)) return;
-    await write(`${base.trim()}\n${bullet}\n`);
+    await write(`${base.trim()}\n${entry}\n`);
   };
 
-  if (candidate.type === "character_state") {
-    await appendUnique(await readProjectCharacterStates(), "# CharacterStates\n\n", writeProjectCharacterStates);
-    return;
-  }
-  if (candidate.type === "relationship") {
-    await appendUnique(await readProjectRelationships(), "# Relationships\n\n", writeProjectRelationships);
-    return;
-  }
-  if (candidate.type === "timeline") {
-    await appendUnique(await readProjectTimeline(), "# Timeline\n\n", writeProjectTimeline);
-    return;
-  }
-  if (candidate.type === "inventory") {
-    await appendUnique(await readProjectInventory(), "# Inventory\n\n", writeProjectInventory);
-    return;
-  }
-  if (candidate.type === "foreshadowing") {
-    await appendUnique(await readProjectForeshadowings(), "# Foreshadowings\n\n", writeProjectForeshadowings);
-    return;
-  }
   if (candidate.type === "author_template") {
     await appendUnique(await readProjectAuthorTemplate(), "# AuthorTemplate\n\n", writeProjectAuthorTemplate);
+    return;
+  }
+  if (candidate.type === "prose_style") {
+    await appendUnique(await readProjectProseStyle(), "# ProseStyle\n\n", writeProjectProseStyle);
+    return;
+  }
+  if (candidate.type === "description_stats") {
+    await appendUnique(await readProjectDescriptionStats(), "# DescriptionStats\n\n", writeProjectDescriptionStats);
+    return;
+  }
+  if (candidate.type === "story_database") {
+    await appendUnique(await readProjectStoryDatabase(), "# StoryDatabase\n\n", writeProjectStoryDatabase);
+    return;
+  }
+  if (candidate.type === "realtime_database") {
+    await appendUnique(await readProjectRealtimeDatabase(), "# RealtimeDatabase\n\n", writeProjectRealtimeDatabase);
   }
 }
 
@@ -821,24 +544,11 @@ export async function applyMemoryCandidate(
   const decision = shouldApplyMemoryCandidate(candidate, options);
   if (!decision.applied) return decision;
 
-  if (decision.target === "important") {
-    await mergeProjectImportantCandidate(candidate);
-    return decision;
-  }
   if (decision.target === "nova") {
     return applyNovaCandidate(candidate);
   }
-  if (decision.target === "cache" || decision.target === "snapshot") {
-    await appendShortTermMemory(candidate);
-    return decision;
-  }
-  if (decision.target === "author_voice" || decision.target === "obsession") {
-    await appendDurableProjectMemory(candidate);
-    return decision;
-  }
-  if (LIGHTWEIGHT_MEMORY_TYPES.has(decision.target as MemoryCandidateType)) {
-    await appendLightweightStateMemory(candidate);
-    return decision;
+  if (PROJECT_TYPES.has(decision.target as MemoryCandidateType)) {
+    await appendProjectData(candidate);
   }
 
   return decision;
@@ -860,32 +570,15 @@ export async function applyMemoryCandidates(
       results.push(decision);
       continue;
     }
-
-    if (decision.target === "important") {
-      await mergeProjectImportantCandidate(candidate);
-      results.push(decision);
-      continue;
-    }
     if (decision.target === "nova") {
       results.push(await applyNovaCandidate(candidate));
       continue;
     }
-    if (decision.target === "cache" || decision.target === "snapshot") {
-      await appendShortTermMemory(candidate);
+    if (PROJECT_TYPES.has(decision.target as MemoryCandidateType)) {
+      await appendProjectData(candidate);
       results.push(decision);
       continue;
     }
-    if (decision.target === "author_voice" || decision.target === "obsession") {
-      await appendDurableProjectMemory(candidate);
-      results.push(decision);
-      continue;
-    }
-    if (LIGHTWEIGHT_MEMORY_TYPES.has(decision.target as MemoryCandidateType)) {
-      await appendLightweightStateMemory(candidate);
-      results.push(decision);
-      continue;
-    }
-
     results.push(decision);
   }
 
