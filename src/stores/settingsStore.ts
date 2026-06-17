@@ -13,6 +13,14 @@ export type HeadingColors = {
   h3: string;
 };
 
+export type ProxySettings = {
+  proxyEnabled: boolean;
+  proxyUrl: string;
+  proxyBypassRules: string;
+};
+
+const DEFAULT_REASONING_DEPTH = 3;
+
 interface SettingsState {
   language: Locale;
   theme: AppTheme;
@@ -28,6 +36,9 @@ interface SettingsState {
   contextMaxLength: number;
   tavilyApiKey: string;
   webSearchLimit: number;
+  proxyEnabled: boolean;
+  proxyUrl: string;
+  proxyBypassRules: string;
   setLanguage: (locale: Locale) => void;
   setTheme: (theme: AppTheme) => void;
   setBackgroundImage: (value: string) => void;
@@ -45,6 +56,7 @@ interface SettingsState {
   setContextMaxLength: (value: number) => void;
   setTavilyApiKey: (value: string) => void;
   setWebSearchLimit: (value: number) => void;
+  setProxySettings: (settings: ProxySettings) => void;
   getModelProfileById: (id: string | null | undefined) => ModelProfile | null;
 }
 
@@ -58,6 +70,7 @@ const DEFAULT_PROFILE: ModelProfile = {
   mcpServerUrl: "",
   headers: [],
   rememberSecrets: true,
+  reasoningDepth: DEFAULT_REASONING_DEPTH,
 };
 
 const inferTransportType = (profile: Partial<ModelProfile>): ModelTransportType => {
@@ -97,6 +110,7 @@ const normalizeModelProfile = (profile: Partial<ModelProfile>): ModelProfile => 
   mcpServerUrl: profile.mcpServerUrl ?? "",
   headers: Array.isArray(profile.headers) ? profile.headers : [],
   rememberSecrets: profile.rememberSecrets ?? true,
+  reasoningDepth: Math.min(10, Math.max(0, Number(profile.reasoningDepth ?? DEFAULT_REASONING_DEPTH) || DEFAULT_REASONING_DEPTH)),
 });
 
 const normalizeModelProfiles = (profiles?: Partial<ModelProfile>[] | null): ModelProfile[] => {
@@ -132,6 +146,12 @@ const DEFAULT_HEADING_COLORS: HeadingColors = {
   h1: "#e2e8f0",
   h2: "#e2e8f0",
   h3: "#e2e8f0",
+};
+
+export const DEFAULT_PROXY_SETTINGS: ProxySettings = {
+  proxyEnabled: false,
+  proxyUrl: "",
+  proxyBypassRules: "localhost,127.0.0.1,::1",
 };
 
 const normalizeSelectionPromptTemplates = (
@@ -240,6 +260,9 @@ export async function syncFromFile(): Promise<boolean> {
       parsed.contextMaxLength !== currentState.contextMaxLength ||
       parsed.tavilyApiKey !== currentState.tavilyApiKey ||
       parsed.webSearchLimit !== currentState.webSearchLimit ||
+      (parsed.proxyEnabled ?? currentState.proxyEnabled) !== currentState.proxyEnabled ||
+      (parsed.proxyUrl ?? currentState.proxyUrl) !== currentState.proxyUrl ||
+      (parsed.proxyBypassRules ?? currentState.proxyBypassRules) !== currentState.proxyBypassRules ||
       parsed.theme !== currentState.theme ||
       parsed.backgroundImage !== currentState.backgroundImage ||
       (parsed.backgroundOpacity ?? currentState.backgroundOpacity) !== currentState.backgroundOpacity ||
@@ -267,6 +290,9 @@ export async function syncFromFile(): Promise<boolean> {
           ...DEFAULT_HEADING_COLORS,
           ...(parsed.headingColors ?? {}),
         },
+        proxyEnabled: parsed.proxyEnabled ?? DEFAULT_PROXY_SETTINGS.proxyEnabled,
+        proxyUrl: parsed.proxyUrl ?? DEFAULT_PROXY_SETTINGS.proxyUrl,
+        proxyBypassRules: parsed.proxyBypassRules ?? DEFAULT_PROXY_SETTINGS.proxyBypassRules,
       });
       return true;
     }
@@ -301,6 +327,9 @@ export async function exportToFile(): Promise<boolean> {
       contextMaxLength: state.contextMaxLength,
       tavilyApiKey: state.tavilyApiKey,
       webSearchLimit: state.webSearchLimit,
+      proxyEnabled: state.proxyEnabled,
+      proxyUrl: state.proxyUrl,
+      proxyBypassRules: state.proxyBypassRules,
       theme: state.theme,
       backgroundImage: state.backgroundImage,
       backgroundOpacity: state.backgroundOpacity,
@@ -331,6 +360,9 @@ export const useSettingsStore = create<SettingsState>()(
       contextMaxLength: 5000,
       tavilyApiKey: "",
       webSearchLimit: 15,
+      proxyEnabled: DEFAULT_PROXY_SETTINGS.proxyEnabled,
+      proxyUrl: DEFAULT_PROXY_SETTINGS.proxyUrl,
+      proxyBypassRules: DEFAULT_PROXY_SETTINGS.proxyBypassRules,
       setLanguage: (locale) => {
         setLocale(locale);
         set({ language: locale });
@@ -399,6 +431,11 @@ export const useSettingsStore = create<SettingsState>()(
       setContextMaxLength: (value) => set({ contextMaxLength: value }),
       setTavilyApiKey: (value) => set({ tavilyApiKey: value }),
       setWebSearchLimit: (value) => set({ webSearchLimit: value }),
+      setProxySettings: (settings) => set({
+        proxyEnabled: settings.proxyEnabled,
+        proxyUrl: settings.proxyUrl,
+        proxyBypassRules: settings.proxyBypassRules,
+      }),
       getModelProfileById: (id) => {
         if (!id) return null;
         return get().modelProfiles.find((profile) => profile.id === id) ?? null;
@@ -418,6 +455,9 @@ export const useSettingsStore = create<SettingsState>()(
         contextMaxLength: state.contextMaxLength,
         tavilyApiKey: state.tavilyApiKey,
         webSearchLimit: state.webSearchLimit,
+        proxyEnabled: state.proxyEnabled,
+        proxyUrl: state.proxyUrl,
+        proxyBypassRules: state.proxyBypassRules,
         theme: state.theme,
         backgroundImage: state.backgroundImage,
         backgroundOpacity: state.backgroundOpacity,
@@ -442,6 +482,9 @@ export const useSettingsStore = create<SettingsState>()(
             persisted?.defaultSelectionModelId ?? currentState.defaultSelectionModelId
           ),
           selectionPromptTemplates: normalizeSelectionPromptTemplates(persisted?.selectionPromptTemplates),
+          proxyEnabled: persisted?.proxyEnabled ?? DEFAULT_PROXY_SETTINGS.proxyEnabled,
+          proxyUrl: persisted?.proxyUrl ?? DEFAULT_PROXY_SETTINGS.proxyUrl,
+          proxyBypassRules: persisted?.proxyBypassRules ?? DEFAULT_PROXY_SETTINGS.proxyBypassRules,
           headingColors: {
             ...DEFAULT_HEADING_COLORS,
             ...(persisted?.headingColors ?? {}),

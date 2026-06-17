@@ -56,6 +56,14 @@
   "build": {
     "appId": "com.novelassistance.app",
     "productName": "Nova",
+    "protocols": [
+      {
+        "name": "Nova Browser Bridge",
+        "schemes": [
+          "nova"
+        ]
+      }
+    ],
     "npmRebuild": false,
     "files": [
       "dist/**/*",

@@ -1,9 +1,10 @@
 import React, { useMemo } from "react";
-import { Bot, FolderOpen, Globe, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, SaveAll, Settings } from "lucide-react";
+import { Bot, FolderOpen, Globe, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, SaveAll, Settings, SquareArrowOutUpRight } from "lucide-react";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useFileStore } from "../stores/fileStore";
 import { useAppUIStore } from "../stores/appUIStore";
 import { useTranslation } from "../hooks/useTranslation";
+import { openBrowserWindow } from "../services/fileSystemService";
 import type { Locale } from "../i18n";
 import "./Header.css";
 
@@ -42,6 +43,13 @@ const Header: React.FC = () => {
     () => modelProfiles.find((profile) => profile.id === defaultSelectionModelId) ?? null,
     [defaultSelectionModelId, modelProfiles]
   );
+  const handleOpenBrowser = async () => {
+    try {
+      await openBrowserWindow();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to open browser window.");
+    }
+  };
 
   return (
     <header className="header">
@@ -109,6 +117,10 @@ const Header: React.FC = () => {
           <button className="workspace-button" onClick={() => void saveAllFiles()} disabled={dirtyCount === 0}>
             <SaveAll size={14} />
             <span>{dirtyCount > 0 ? t("header.saveAllCount", { count: dirtyCount }) : t("header.saveAll")}</span>
+          </button>
+          <button className="workspace-button browser-launch" onClick={() => void handleOpenBrowser()} title={t("header.openBrowser")}>
+            <SquareArrowOutUpRight size={14} />
+            <span>{t("header.openBrowser")}</span>
           </button>
           <button className="icon-button settings-launch" title={t("header.settings")} onClick={openSettings}>
             <Settings size={16} />

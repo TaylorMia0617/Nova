@@ -546,6 +546,11 @@ function isMimoModel(model: string) {
   return model.trim().toLowerCase().startsWith("mimo");
 }
 
+function getReasoningDepth(modelProfile: ModelProfile) {
+  const depth = Number(modelProfile.reasoningDepth ?? 3);
+  return Number.isFinite(depth) ? Math.min(10, Math.max(0, Math.round(depth))) : 3;
+}
+
 async function parseErrorMessage(response: Response) {
   try {
     const error = await response.json();
@@ -715,6 +720,7 @@ async function callAnthropicMessagesApi(options: AiRequestOptions, systemPrompt:
 async function callChatCompletionsApi(options: AiRequestOptions, systemPrompt: string, finalUserMessage: string) {
   const { modelProfile, conversationHistory } = options;
   const tokenLimitKey = isMimoModel(modelProfile.model) ? "max_completion_tokens" : "max_tokens";
+  const includeDepth = resolveTransportType(modelProfile) === "openai-compatible";
 
   const response = await fetch(modelProfile.baseUrl, {
     method: "POST",
@@ -723,6 +729,7 @@ async function callChatCompletionsApi(options: AiRequestOptions, systemPrompt: s
       model: modelProfile.model,
       messages: buildChatCompletionMessages(systemPrompt, finalUserMessage, conversationHistory),
       ...(options.maxTokens ? { [tokenLimitKey]: options.maxTokens } : {}),
+      ...(includeDepth ? { depth: getReasoningDepth(modelProfile) } : {}),
       temperature: options.temperature ?? 0.7,
     }),
   });

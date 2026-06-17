@@ -21,6 +21,18 @@ contextBridge.exposeInMainWorld("novelHost", {
   deleteGlobalSettings: (name) => ipcRenderer.invoke("settings:delete", name),
   readGlobalApiConfig: () => ipcRenderer.invoke("settings:readGlobalApiConfig"),
   writeGlobalApiConfig: (content) => ipcRenderer.invoke("settings:writeGlobalApiConfig", content),
+  getProxySettings: () => ipcRenderer.invoke("network:getProxySettings"),
+  setProxySettings: (settings) => ipcRenderer.invoke("network:setProxySettings", settings),
+  applyProxy: () => ipcRenderer.invoke("network:applyProxy"),
+  testProxy: (settings) => ipcRenderer.invoke("network:testProxy", settings),
+  openExternalUrl: (url) => ipcRenderer.invoke("browser:openExternal", url),
+  openBrowserWindow: () => ipcRenderer.invoke("browser:openWindow"),
+  sendBrowserContextToMainApp: (payload) => ipcRenderer.invoke("browser:sendContextToMainApp", payload),
+  onBrowserContext: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("browser:context", listener);
+    return () => ipcRenderer.removeListener("browser:context", listener);
+  },
   readGlobalHabits: () => ipcRenderer.invoke("memory:readGlobalHabits"),
   writeGlobalHabits: (content) => ipcRenderer.invoke("memory:writeGlobalHabits", content),
   ensureWorkspaceHabits: () => ipcRenderer.invoke("memory:ensureWorkspaceHabits"),

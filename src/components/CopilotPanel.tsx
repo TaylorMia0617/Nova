@@ -5,6 +5,7 @@ import { ChevronDown, MessageSquarePlus, Paperclip, Send, Settings, Sparkles, Tr
 import { useSettingsStore } from "../stores/settingsStore";
 import { useFileStore } from "../stores/fileStore";
 import { useBlueprintStore } from "../stores/blueprintStore";
+import { useAppUIStore } from "../stores/appUIStore";
 import { useTranslation } from "../hooks/useTranslation";
 import { callAI, callEditorRoleReview, reviewEditFileContent } from "../services/aiService";
 import {
@@ -652,6 +653,8 @@ const CopilotPanel: React.FC = () => {
   const referenceLists = useFileStore((state) => state.referenceLists);
   const loadReferenceLists = useFileStore((state) => state.loadReferenceLists);
   const refreshLoadedWorkspace = useFileStore((state) => state.refreshLoadedWorkspace);
+  const consumeBrowserContexts = useAppUIStore((state) => state.consumeBrowserContexts);
+  const browserContextQueueLength = useAppUIStore((state) => state.browserContextQueue.length);
   const { loadBlueprints } = useBlueprintStore();
   const { modelProfiles, defaultChatModelId, defaultEditReviewModelId, getModelProfileById, chatMaxTokens, setChatMaxTokens, contextMaxLength, webSearchLimit } = useSettingsStore();
   const { t } = useTranslation();
@@ -1175,6 +1178,29 @@ const CopilotPanel: React.FC = () => {
       setChatSkills(DEFAULT_CHAT_SKILLS);
     }
   }, [activeConversation?.id]);
+
+  useEffect(() => {
+    const queuedContexts = consumeBrowserContexts();
+    if (queuedContexts.length === 0) return;
+
+    let nextInput = draftInputRef.current.trim();
+    for (const detail of queuedContexts) {
+      if (!detail?.url) continue;
+      const selection = detail.selection?.trim();
+      const sourceLabel = detail.source === "system-browser" ? "系统浏览器" : "Nova 内置浏览器";
+      const contextText = [
+        "请参考当前网页：",
+        `来源：${sourceLabel}`,
+        `标题：${detail.title || "未命名网页"}`,
+        `URL：${detail.url}`,
+        selection ? `选中文本：\n${selection}` : "页面说明：用户未选择具体文本，请只根据标题和 URL 判断是否需要继续询问或联网检索。",
+      ].join("\n");
+      nextInput = nextInput ? `${nextInput}\n\n${contextText}` : contextText;
+    }
+
+    draftInputRef.current = nextInput;
+    setInput(nextInput);
+  }, [browserContextQueueLength, consumeBrowserContexts]);
 
   useEffect(() => {
     workspaceLoadRequestRef.current += 1;

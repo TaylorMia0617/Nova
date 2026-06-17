@@ -6,6 +6,7 @@ import { useSettingsStore } from "../stores/settingsStore";
 import { useTranslation } from "../hooks/useTranslation";
 import type { ModelProfile, ModelTransportType } from "../types/ai";
 import { testMcpConnection } from "../services/mcpService";
+import { setProxySettings as applyProxySettings, testProxy } from "../services/fileSystemService";
 import "./SettingsModal.css";
 
 type Props = {
@@ -28,6 +29,7 @@ const createDraftProfile = (): ModelProfile => ({
   mcpServerUrl: "",
   headers: [],
   rememberSecrets: true,
+  reasoningDepth: 3,
 });
 
 const TRANSPORT_OPTIONS: Array<{ value: ModelTransportType; labelKey: string }> = [
@@ -66,6 +68,9 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     contextMaxLength,
     tavilyApiKey,
     webSearchLimit,
+    proxyEnabled,
+    proxyUrl,
+    proxyBypassRules,
     setTheme,
     setBackgroundImage,
     clearBackgroundImage,
@@ -81,6 +86,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     setContextMaxLength,
     setTavilyApiKey,
     setWebSearchLimit,
+    setProxySettings,
   } = useSettingsStore();
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<SettingsTab>("models");
@@ -90,6 +96,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   const [testStatus, setTestStatus] = useState<string>("");
   const [saveStatus, setSaveStatus] = useState<string>("");
   const [basicStatus, setBasicStatus] = useState<string>("");
+  const [proxyStatus, setProxyStatus] = useState<string>("");
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestDraftRef = useRef<ModelProfile | null>(null);
   const backgroundInputRef = useRef<HTMLInputElement | null>(null);
@@ -214,6 +221,37 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
     setDefaultChatModelId(profileDraft.id);
     setDefaultSelectionModelId(profileDraft.id);
     setSaveStatus(t("settings.profileSaved"));
+  };
+
+  const handleProxyChange = async (patch: Partial<{ proxyEnabled: boolean; proxyUrl: string; proxyBypassRules: string }>) => {
+    const next = {
+      proxyEnabled,
+      proxyUrl,
+      proxyBypassRules,
+      ...patch,
+    };
+    setProxySettings(next);
+    setProxyStatus("");
+    try {
+      await applyProxySettings(next);
+    } catch (error) {
+      setProxyStatus(error instanceof Error ? error.message : t("settings.proxyApplyFailed"));
+    }
+  };
+
+  const handleTestProxy = async () => {
+    const settings = { proxyEnabled, proxyUrl, proxyBypassRules };
+    setProxyStatus(t("settings.proxyTesting"));
+    try {
+      const result = await testProxy(settings);
+      if (!result) {
+        setProxyStatus(t("settings.proxyUnavailable"));
+        return;
+      }
+      setProxyStatus(result.ok ? t("settings.proxyConnected") : result.message || t("settings.proxyFailed"));
+    } catch (error) {
+      setProxyStatus(error instanceof Error ? error.message : t("settings.proxyFailed"));
+    }
   };
 
   const handleSelectProfile = (id: string) => {
@@ -351,6 +389,18 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
                 autoComplete="off"
               />
             </label>
+            <label>
+              <span>{t("settings.reasoningDepth")}</span>
+              <input
+                type="number"
+                min={0}
+                max={10}
+                step={1}
+                value={profileDraft.reasoningDepth}
+                onChange={(event) => updateDraft({ reasoningDepth: Number(event.target.value) })}
+              />
+              <span className="settings-hint">{t("settings.reasoningDepthHint")}</span>
+            </label>
             <label className="settings-span-2">
               <span>{t("settings.apiKey")}</span>
               <input
@@ -472,36 +522,77 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose }) => {
   );
 
   const renderSearchSettings = () => (
-    <div className="settings-section">
-      <h3>{t("settings.tavilyConfig")}</h3>
-      <label>
-        <span>{t("settings.tavilyApiKey")}</span>
-        <input
-          type="password"
-          value={tavilyApiKey}
-          onChange={(event) => setTavilyApiKey(event.target.value)}
-          placeholder="tvly-..."
-          autoComplete="new-password"
-        />
-      </label>
-      <div className="settings-hint">
-        <span>{t("settings.tavilyApiKeyHint")}</span>
-        <a href="https://app.tavily.com" target="_blank" rel="noopener noreferrer">
-          app.tavily.com
-        </a>
+    <>
+      <div className="settings-section">
+        <h3>{t("settings.tavilyConfig")}</h3>
+        <label>
+          <span>{t("settings.tavilyApiKey")}</span>
+          <input
+            type="password"
+            value={tavilyApiKey}
+            onChange={(event) => setTavilyApiKey(event.target.value)}
+            placeholder="tvly-..."
+            autoComplete="new-password"
+          />
+        </label>
+        <div className="settings-hint">
+          <span>{t("settings.tavilyApiKeyHint")}</span>
+          <a href="https://app.tavily.com" target="_blank" rel="noopener noreferrer">
+            app.tavily.com
+          </a>
+        </div>
+        <label>
+          <span>{t("settings.webSearchLimit")}</span>
+          <input
+            type="number"
+            min={1}
+            max={100}
+            value={webSearchLimit}
+            onChange={(event) => setWebSearchLimit(Number(event.target.value))}
+          />
+          <span className="settings-hint">{t("settings.webSearchLimitHint")}</span>
+        </label>
       </div>
-      <label>
-        <span>{t("settings.webSearchLimit")}</span>
-        <input
-          type="number"
-          min={1}
-          max={100}
-          value={webSearchLimit}
-          onChange={(event) => setWebSearchLimit(Number(event.target.value))}
-        />
-        <span className="settings-hint">{t("settings.webSearchLimitHint")}</span>
-      </label>
-    </div>
+      <div className="settings-section">
+        <h3>{t("settings.proxyConfig")}</h3>
+        <div className="settings-checks">
+          <label>
+            <input
+              type="checkbox"
+              checked={proxyEnabled}
+              onChange={(event) => void handleProxyChange({ proxyEnabled: event.target.checked })}
+            />
+            <span>{t("settings.proxyEnabled")}</span>
+          </label>
+        </div>
+        <label>
+          <span>{t("settings.proxyUrl")}</span>
+          <input
+            type="text"
+            value={proxyUrl}
+            placeholder="http://127.0.0.1:7890"
+            onChange={(event) => void handleProxyChange({ proxyUrl: event.target.value })}
+          />
+          <span className="settings-hint">{t("settings.proxyUrlHint")}</span>
+        </label>
+        <label>
+          <span>{t("settings.proxyBypassRules")}</span>
+          <input
+            type="text"
+            value={proxyBypassRules}
+            placeholder="localhost,127.0.0.1,::1"
+            onChange={(event) => void handleProxyChange({ proxyBypassRules: event.target.value })}
+          />
+          <span className="settings-hint">{t("settings.proxyBypassRulesHint")}</span>
+        </label>
+        <div className="settings-actions">
+          <button type="button" onClick={() => void handleTestProxy()}>
+            {t("settings.testProxy")}
+          </button>
+        </div>
+        {proxyStatus && <div className="settings-status">{proxyStatus}</div>}
+      </div>
+    </>
   );
 
   const renderBasicSettings = () => (

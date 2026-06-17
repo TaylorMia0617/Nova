@@ -7,6 +7,7 @@ import MenuBar from "./components/MenuBar";
 import { useTranslation } from "./hooks/useTranslation";
 import { useAppUIStore } from "./stores/appUIStore";
 import { useSettingsStore } from "./stores/settingsStore";
+import { onBrowserContext } from "./services/fileSystemService";
 
 const EditorPanel = lazy(() => import("./components/EditorPanel"));
 const BlueprintPanel = lazy(() => import("./components/BlueprintPanel"));
@@ -70,14 +71,23 @@ function App() {
     toggleExplorer,
     toggleBlueprint,
     toggleCopilot,
+    openCopilot,
     openSettings,
     closeSettings,
+    enqueueBrowserContext,
   } = useAppUIStore();
   const { theme, backgroundImage, backgroundOpacity, headingColors } = useSettingsStore();
   const backgroundVisibility = Math.min(100, Math.max(0, backgroundOpacity)) / 100;
   const surfaceOpacity = Math.max(0.42, Math.min(0.96, 0.96 - backgroundVisibility * 0.42));
   const headerOpacity = Math.max(0.5, Math.min(0.96, 0.94 - backgroundVisibility * 0.32));
   const editorOpacity = Math.max(0.38, Math.min(0.86, 0.84 - backgroundVisibility * 0.42));
+
+  useEffect(() => {
+    return onBrowserContext((payload) => {
+      enqueueBrowserContext(payload);
+      openCopilot();
+    });
+  }, [enqueueBrowserContext, openCopilot]);
 
   useEffect(() => {
     if (!dragTarget) return;

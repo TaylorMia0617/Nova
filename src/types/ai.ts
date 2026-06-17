@@ -15,6 +15,7 @@ export interface ModelProfile {
   mcpServerUrl: string;
   headers: Array<{ key: string; value: string }>;
   rememberSecrets: boolean;
+  reasoningDepth: number;
 }
 
 export interface SelectionPromptTemplates {

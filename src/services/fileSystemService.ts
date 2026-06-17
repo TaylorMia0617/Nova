@@ -75,6 +75,14 @@ interface NovelHostApi {
   onWorkspaceChanged?: (callback: (payload: { rootPath: string; changedPath: string | null }) => void) => () => void;
   readGlobalApiConfig?: () => Promise<string>;
   writeGlobalApiConfig?: (content: string) => Promise<void>;
+  getProxySettings?: () => Promise<import("../stores/settingsStore").ProxySettings>;
+  setProxySettings?: (settings: import("../stores/settingsStore").ProxySettings) => Promise<import("../stores/settingsStore").ProxySettings>;
+  applyProxy?: () => Promise<import("../stores/settingsStore").ProxySettings>;
+  testProxy?: (settings: import("../stores/settingsStore").ProxySettings) => Promise<{ ok: boolean; message?: string; statusCode?: number }>;
+  openExternalUrl?: (url: string) => Promise<void>;
+  openBrowserWindow?: () => Promise<void>;
+  sendBrowserContextToMainApp?: (payload: BrowserContextPayload) => Promise<void>;
+  onBrowserContext?: (callback: (payload: BrowserContextPayload) => void) => () => void;
   readGlobalHabits?: () => Promise<string>;
   writeGlobalHabits?: (content: string) => Promise<void>;
   ensureWorkspaceHabits?: () => Promise<WorkspaceHabitsPaths>;
@@ -97,6 +105,13 @@ interface NovelHostApi {
   saveReferenceList?: (list: ReferenceListData) => Promise<ReferenceListData>;
   deleteReferenceList?: (listId: string) => Promise<void>;
 }
+
+export type BrowserContextPayload = {
+  title?: string;
+  url: string;
+  selection?: string;
+  source?: "nova-browser" | "system-browser";
+};
 
 export interface ReferenceListIndex {
   id: string;
@@ -719,6 +734,81 @@ export async function writeGlobalApiConfig(content: string): Promise<void> {
   if (host?.writeGlobalApiConfig) {
     await host.writeGlobalApiConfig(content);
   }
+}
+
+export async function getProxySettings(): Promise<import("../stores/settingsStore").ProxySettings | null> {
+  const host = getHostApi();
+  if (host?.getProxySettings) {
+    return host.getProxySettings();
+  }
+  return null;
+}
+
+export async function setProxySettings(settings: import("../stores/settingsStore").ProxySettings): Promise<import("../stores/settingsStore").ProxySettings | null> {
+  const host = getHostApi();
+  if (host?.setProxySettings) {
+    return host.setProxySettings(settings);
+  }
+  return null;
+}
+
+export async function applyProxy(): Promise<import("../stores/settingsStore").ProxySettings | null> {
+  const host = getHostApi();
+  if (host?.applyProxy) {
+    return host.applyProxy();
+  }
+  return null;
+}
+
+export async function testProxy(settings: import("../stores/settingsStore").ProxySettings): Promise<{ ok: boolean; message?: string; statusCode?: number } | null> {
+  const host = getHostApi();
+  if (host?.testProxy) {
+    return host.testProxy(settings);
+  }
+  return null;
+}
+
+export async function openExternalUrl(url: string): Promise<void> {
+  const host = getHostApi();
+  if (host?.openExternalUrl) {
+    await host.openExternalUrl(url);
+    return;
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
+export async function openBrowserWindow(): Promise<void> {
+  const host = getHostApi();
+  if (host?.openBrowserWindow) {
+    try {
+      await host.openBrowserWindow();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("No handler registered") && message.includes("browser:openWindow")) {
+        throw new Error("浏览器窗口需要重启 Nova 桌面应用后启用：Electron 主进程尚未加载 browser:openWindow。");
+      }
+      throw error;
+    }
+  }
+}
+
+export async function sendBrowserContextToMainApp(payload: BrowserContextPayload): Promise<void> {
+  const host = getHostApi();
+  if (host?.sendBrowserContextToMainApp) {
+    await host.sendBrowserContextToMainApp(payload);
+    return;
+  }
+  window.dispatchEvent(new CustomEvent("nova-browser-send-to-ai", { detail: payload }));
+}
+
+export function onBrowserContext(callback: (payload: BrowserContextPayload) => void): () => void {
+  const host = getHostApi();
+  if (host?.onBrowserContext) {
+    return host.onBrowserContext(callback);
+  }
+  const listener = (event: Event) => callback((event as CustomEvent<BrowserContextPayload>).detail);
+  window.addEventListener("nova-browser-send-to-ai", listener);
+  return () => window.removeEventListener("nova-browser-send-to-ai", listener);
 }
 
 export async function readGlobalHabits(): Promise<string | null> {

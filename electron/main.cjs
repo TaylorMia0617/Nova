@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, net, session, shell } = require("electron");
 const fs = require("fs/promises");
 const fsSync = require("fs");
 const path = require("path");
@@ -39,6 +39,17 @@ const MAX_ATTACHMENT_TEXT_LENGTH = 120000;
 const GLOBAL_SETTINGS_DIR_NAME = "global-settings";
 const CACHE_SCHEMA_VERSION = 1;
 const CACHE_PROMPT_VERSION = "nova-cache-v1";
+const DEFAULT_PROXY_SETTINGS = {
+  proxyEnabled: false,
+  proxyUrl: "",
+  proxyBypassRules: "localhost,127.0.0.1,::1",
+};
+let currentProxySettings = { ...DEFAULT_PROXY_SETTINGS };
+const windows = new Set();
+const mainWindows = new Set();
+let browserWindow = null;
+const APP_PROTOCOL = "nova";
+const pendingBrowserContexts = [];
 const DEFAULT_GLOBAL_HABITS = `---
 template: true
 confirmed_by_user: false
@@ -194,6 +205,124 @@ function getGlobalSettingsPath(name = "novel-assistance-settings") {
 
 function getGlobalApiConfigPath() {
   return path.join(os.homedir(), ".config", "nova", "NovaApi.json");
+}
+
+function normalizeProxySettings(settings = {}) {
+  return {
+    proxyEnabled: Boolean(settings.proxyEnabled),
+    proxyUrl: String(settings.proxyUrl ?? "").trim(),
+    proxyBypassRules: String(settings.proxyBypassRules ?? DEFAULT_PROXY_SETTINGS.proxyBypassRules).trim() || DEFAULT_PROXY_SETTINGS.proxyBypassRules,
+  };
+}
+
+function buildElectronProxyConfig(settings) {
+  const normalized = normalizeProxySettings(settings);
+  if (!normalized.proxyEnabled || !normalized.proxyUrl) {
+    return { mode: "direct" };
+  }
+  return {
+    proxyRules: normalized.proxyUrl,
+    proxyBypassRules: normalized.proxyBypassRules,
+  };
+}
+
+async function applyProxySettings(settings = currentProxySettings) {
+  currentProxySettings = normalizeProxySettings(settings);
+  const proxyConfig = buildElectronProxyConfig(currentProxySettings);
+  const sessions = [
+    session.defaultSession,
+    session.fromPartition("persist:nova-browser"),
+  ];
+  await Promise.all(sessions.map(async (targetSession) => {
+    await targetSession.setProxy(proxyConfig);
+    await targetSession.closeAllConnections();
+  }));
+  return currentProxySettings;
+}
+
+async function readStoredProxySettings() {
+  const settingsPath = getGlobalSettingsPath();
+  if (!(await pathExists(settingsPath))) {
+    return { ...DEFAULT_PROXY_SETTINGS };
+  }
+  try {
+    const parsed = JSON.parse(await fs.readFile(settingsPath, "utf8"));
+    const state = parsed?.state ?? parsed ?? {};
+    return normalizeProxySettings({
+      proxyEnabled: state.proxyEnabled,
+      proxyUrl: state.proxyUrl,
+      proxyBypassRules: state.proxyBypassRules,
+    });
+  } catch {
+    return { ...DEFAULT_PROXY_SETTINGS };
+  }
+}
+
+function normalizeTemplateText(content) {
+  return String(content ?? "").replace(/\s+/g, "").trim();
+}
+
+function isLegacyDefaultGlobalHabits(content) {
+  const normalized = normalizeTemplateText(content);
+  return normalized === normalizeTemplateText(LEGACY_DEFAULT_GLOBAL_HABITS);
+}
+
+function trimBridgeText(value, maxLength) {
+  const text = String(value ?? "").trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function parseBrowserBridgeUrl(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(String(rawUrl));
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== `${APP_PROTOCOL}:`) return null;
+  const command = parsed.hostname || parsed.pathname.replace(/^\/+/, "");
+  if (command !== "send-to-ai") return null;
+
+  const pageUrl = parsed.searchParams.get("url") ?? "";
+  let validatedPageUrl;
+  try {
+    validatedPageUrl = new URL(pageUrl);
+  } catch {
+    return null;
+  }
+  if (!["http:", "https:"].includes(validatedPageUrl.protocol)) return null;
+
+  return {
+    title: trimBridgeText(parsed.searchParams.get("title") ?? validatedPageUrl.href, 300),
+    url: validatedPageUrl.href,
+    selection: trimBridgeText(parsed.searchParams.get("selection") ?? "", 8000),
+    source: "system-browser",
+  };
+}
+
+function registerAppProtocol() {
+  if (process.defaultApp) {
+    app.setAsDefaultProtocolClient(APP_PROTOCOL, process.execPath, [path.resolve(process.argv[1] ?? "")]);
+  } else {
+    app.setAsDefaultProtocolClient(APP_PROTOCOL);
+  }
+}
+
+async function deliverBrowserContext(payload) {
+  const mainWindow = [...mainWindows].find((win) => !win.isDestroyed()) ?? await createWindow();
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.focus();
+  mainWindow.webContents.send("browser:context", payload);
+}
+
+function handleProtocolUrl(rawUrl) {
+  const payload = parseBrowserBridgeUrl(rawUrl);
+  if (!payload) return;
+  if (!app.isReady()) {
+    pendingBrowserContexts.push(payload);
+    return;
+  }
+  void deliverBrowserContext(payload);
 }
 
 function getGlobalHabitsPath() {
@@ -934,16 +1063,19 @@ async function createWindow() {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
+      webviewTag: true,
       sandbox: false,
     },
   });
 
   windows.add(win);
+  mainWindows.add(win);
   const webContentsId = win.webContents.id;
 
   win.on("closed", () => {
     try {
       windows.delete(win);
+      mainWindows.delete(win);
       workspaceRootsByWebContents.delete(webContentsId);
     } catch {
       // The window is already gone; shutdown cleanup must never surface as a main-process error.
@@ -960,8 +1092,78 @@ async function createWindow() {
   return win;
 }
 
-app.whenReady().then(async () => {
+async function createBrowserWindow() {
+  if (browserWindow && !browserWindow.isDestroyed()) {
+    if (browserWindow.isMinimized()) browserWindow.restore();
+    browserWindow.focus();
+    return browserWindow;
+  }
+
+  const win = new BrowserWindow({
+    width: 1100,
+    height: 760,
+    minWidth: 760,
+    minHeight: 520,
+    backgroundColor: "#10151d",
+    title: "Nova Browser",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      webviewTag: true,
+      sandbox: false,
+    },
+  });
+
+  browserWindow = win;
+  windows.add(win);
+  win.on("closed", () => {
+    windows.delete(win);
+    if (browserWindow === win) browserWindow = null;
+  });
+
+  if (isDev) {
+    await win.loadURL("http://127.0.0.1:1420?browser=1");
+  } else {
+    await win.loadFile(path.join(__dirname, "../dist/index.html"), { query: { browser: "1" } });
+  }
+
+  return win;
+}
+
+registerAppProtocol();
+
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", (_event, argv) => {
+    const bridgeUrl = argv.find((arg) => String(arg).startsWith(`${APP_PROTOCOL}://`));
+    if (bridgeUrl) {
+      handleProtocolUrl(bridgeUrl);
+      return;
+    }
+    const mainWindow = [...mainWindows].find((win) => !win.isDestroyed());
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+
+  app.on("open-url", (event, rawUrl) => {
+    event.preventDefault();
+    handleProtocolUrl(rawUrl);
+  });
+}
+
+if (gotSingleInstanceLock) app.whenReady().then(async () => {
+  await applyProxySettings(await readStoredProxySettings());
   await createWindow();
+  const initialBridgeUrl = process.argv.find((arg) => String(arg).startsWith(`${APP_PROTOCOL}://`));
+  if (initialBridgeUrl) handleProtocolUrl(initialBridgeUrl);
+  while (pendingBrowserContexts.length > 0) {
+    await deliverBrowserContext(pendingBrowserContexts.shift());
+  }
 
   app.on("activate", async () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -995,7 +1197,6 @@ app.on("will-quit", () => {
 // ─── IPC Handlers ─────────────────────────────────────────────────────────────
 
 // Window controls
-const windows = new Set();
 
 ipcMain.handle("window:minimize", (event) => {
   const win = BrowserWindow.fromWebContents(event.sender);
@@ -1023,6 +1224,10 @@ ipcMain.handle("window:isMaximized", (event) => {
 
 ipcMain.handle("window:createNew", () => {
   createWindow();
+});
+
+ipcMain.handle("browser:openWindow", async () => {
+  await createBrowserWindow();
 });
 
 ipcMain.handle("fs:pickWorkspace", async (event) => {
@@ -1120,6 +1325,58 @@ ipcMain.handle("settings:write", async (_event, name, content) => {
 ipcMain.handle("settings:delete", async (_event, name) => {
   const settingsPath = getGlobalSettingsPath(name);
   await fs.rm(settingsPath, { force: true });
+});
+
+ipcMain.handle("network:getProxySettings", async () => currentProxySettings);
+
+ipcMain.handle("network:setProxySettings", async (_event, settings) => {
+  return applyProxySettings(settings);
+});
+
+ipcMain.handle("network:applyProxy", async () => {
+  return applyProxySettings(await readStoredProxySettings());
+});
+
+ipcMain.handle("network:testProxy", async (_event, settings) => {
+  const normalized = await applyProxySettings(settings);
+  const targetUrl = "https://www.google.com/generate_204";
+  return new Promise((resolve) => {
+    const request = net.request({ method: "GET", url: targetUrl });
+    const timer = setTimeout(() => {
+      request.abort();
+      resolve({ ok: false, message: "Proxy test timed out.", proxy: normalized });
+    }, 10000);
+    request.on("response", (response) => {
+      clearTimeout(timer);
+      response.on("data", () => {});
+      response.on("end", () => {
+        resolve({ ok: response.statusCode >= 200 && response.statusCode < 400, statusCode: response.statusCode, proxy: normalized });
+      });
+    });
+    request.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({ ok: false, message: error.message, proxy: normalized });
+    });
+    request.end();
+  });
+});
+
+ipcMain.handle("browser:openExternal", async (_event, url) => {
+  const targetUrl = String(url ?? "").trim();
+  if (!/^https?:\/\//i.test(targetUrl)) {
+    throw new Error("Only http and https URLs can be opened externally.");
+  }
+  await shell.openExternal(targetUrl);
+});
+
+ipcMain.handle("browser:sendContextToMainApp", async (_event, payload) => {
+  for (const win of mainWindows) {
+    if (!win.isDestroyed()) {
+      win.webContents.send("browser:context", payload);
+      if (win.isMinimized()) win.restore();
+      win.focus();
+    }
+  }
 });
 
 ipcMain.handle("settings:readGlobalApiConfig", async () => {

@@ -161,6 +161,7 @@
   }
 
   .workspace-button span,
+  .browser-launch span,
   .settings-launch span {
     display: none;
   }
